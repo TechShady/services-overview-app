@@ -1,0 +1,7 @@
+fetch spans, samplingRatio:1, scanLimitGBytes:50, from:-7d
+| filter request.is_root_span == true AND isNotNull(endpoint.name)
+| fieldsAdd Service = entityName(dt.entity.service, type:"dt.entity.service")
+| summarize Requests = count(), by:{ Service, endpoint.name }
+| fields Service, Request = endpoint.name, Requests
+| sort Requests desc
+| limit 3

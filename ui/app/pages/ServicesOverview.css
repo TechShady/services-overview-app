@@ -1,0 +1,199 @@
+/* Services Overview — Premium styling */
+
+.svc-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 100%;
+}
+
+/* Sticky filter bar */
+.svc-filter-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: linear-gradient(180deg, rgba(20, 22, 38, 0.97) 0%, rgba(26, 26, 46, 0.95) 100%);
+  backdrop-filter: blur(12px);
+  padding: 12px 20px 10px 20px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.15);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Section header gradient bar */
+.svc-section-header {
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #0d3fb8 0%, #134fc9 50%, #1a6bef 100%);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(19, 79, 201, 0.35);
+}
+
+.svc-section-header h5,
+.svc-section-header h6 {
+  color: #fff;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+/* Chart tile */
+.svc-chart-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+  transition: box-shadow 0.2s ease, transform 0.15s ease;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.svc-chart-tile:hover {
+  box-shadow: 0 4px 16px rgba(19, 79, 201, 0.25), 0 0 2px rgba(99, 130, 191, 0.35);
+  transform: translateY(-1px);
+}
+
+.svc-chart-tile .chart-title {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.svc-chart-tile .chart-description {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 0 8px 0;
+  line-height: 1.4;
+}
+
+.svc-chart-tile .chart-body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Table tile */
+.svc-table-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+}
+
+/* Grid layouts */
+.svc-chart-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+.svc-chart-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 1400px) {
+  .svc-chart-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 900px) {
+  .svc-chart-grid-4,
+  .svc-chart-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Overview row: honeycomb + problems */
+.svc-overview-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 16px;
+}
+@media (max-width: 1200px) {
+  .svc-overview-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Honeycomb tile */
+.svc-honeycomb-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Status badges */
+.svc-status-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.svc-status-active {
+  background: #C21930;
+  color: #fff;
+}
+.svc-status-closed {
+  background: #0D9C29;
+  color: #fff;
+}
+
+/* Help modal content */
+.svc-help-content {
+  padding: 16px;
+  max-height: 70vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.svc-help-content h3 {
+  margin-top: 24px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.2);
+  padding-bottom: 4px;
+}
+.svc-help-content h3:first-child {
+  margin-top: 0;
+}
+.svc-help-content h4 {
+  margin-top: 16px;
+  margin-bottom: 6px;
+}
+.svc-help-content ul {
+  padding-left: 20px;
+}
+.svc-help-content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.svc-help-content th,
+.svc-help-content td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.15);
+}
+.svc-help-content code {
+  background: rgba(69, 137, 255, 0.12);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* Loading center */
+.svc-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 48px;
+}

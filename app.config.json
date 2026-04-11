@@ -1,0 +1,23 @@
+{
+  "$schema": "./.dt-app/app.config.schema.json",
+  "environmentUrl": "https://guu84124.apps.dynatrace.com/",
+  "app": {
+    "name": "Services Overview",
+    "version": "0.11.2",
+    "description": "SRE dashboard for service health, requests, latency and errors",
+    "id": "my.services.overview.app",
+    "scopes": [
+      { "name": "storage:logs:read", "comment": "read log data" },
+      { "name": "storage:buckets:read", "comment": "read storage buckets" },
+      { "name": "storage:metrics:read", "comment": "read host and service metrics" },
+      { "name": "storage:entities:read", "comment": "read entity data" },
+      { "name": "storage:events:read", "comment": "read Davis problems and events" },
+      { "name": "storage:spans:read", "comment": "read distributed traces" },
+      { "name": "storage:system:read", "comment": "read system data" },
+      { "name": "environment-api:metrics:read", "comment": "read metrics v2" },
+      { "name": "environment-api:entities:read", "comment": "read entities v2" },
+      { "name": "state:user-app-states:read", "comment": "read user alert rules" },
+      { "name": "state:user-app-states:write", "comment": "save user alert rules" }
+    ]
+  }
+}

@@ -572,7 +572,7 @@ export const ServicesOverview = () => {
     return scorecardData.map((d) => {
       const prev = scorecardPrevMap.get(d.Service);
       const prevScore = prevLoading ? "Loading..." : prev ? String(prev.score) : "N/A";
-      const deltaScore = prevLoading ? "..." : prev ? String(d.Score - prev.score) : "N/A";
+      const deltaScore = prevLoading ? null : prev ? d.Score - prev.score : null;
       const prevGrade = prevLoading ? "..." : prev ? prev.grade : "N/A";
       return { ...d, "Prev Score": prevScore, "Δ Score": deltaScore, "Prev Grade": prevGrade };
     });
@@ -1962,11 +1962,11 @@ export const ServicesOverview = () => {
                           ] },
                         ...(scorecardCompare ? [
                           { id: "PrevScore", header: "Prev Score", accessor: "Prev Score" },
-                          { id: "DeltaScore", header: "Δ Score", accessor: "Δ Score",
-                            cell: ({ value }: { value: string }) => {
-                              const n = Number(value);
-                              const color = isNaN(n) || n === 0 ? undefined : n > 0 ? GREEN : RED;
-                              return <span style={{ fontWeight: 700, color }}>{isNaN(n) ? value : n > 0 ? `+${value}` : value}</span>;
+                          { id: "DeltaScore", header: "Δ Score", accessor: "Δ Score", columnType: "number" as const,
+                            cell: ({ value }: { value: number | null }) => {
+                              if (value == null) return <span>N/A</span>;
+                              const color = value === 0 ? undefined : value > 0 ? GREEN : RED;
+                              return <span style={{ fontWeight: 700, color }}>{value > 0 ? `+${value}` : String(value)}</span>;
                             } },
                           { id: "PrevGrade", header: "Prev Grade", accessor: "Prev Grade" },
                         ] : []),

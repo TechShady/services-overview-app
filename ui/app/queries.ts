@@ -1,4 +1,4 @@
-/**
+﻿/**
  * DQL query builders for the Services Overview app.
  *
  * Adapted from the "Services Overview" dashboard.
@@ -127,7 +127,7 @@ export function serviceDetailsQuery(
             \`5xx\` = arraySum(http5xx.http_5xx),
             \`4xx\` = arraySum(http4xx.http_4xx)
 | fieldsAdd FailureRate = (Failures / Requests) * 100
-| fieldsAdd Service = entityName(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields Status = if(Problems >= 0, "PROBLEM", else:"HEALTHY"),
          Service,
          dt.entity.service,
@@ -144,6 +144,33 @@ export function serviceDetailsQuery(
 | fieldsAdd StatusSort = if(Status == "PROBLEM" and isNotNull(event.id), 0, else:1)
 | sort StatusSort asc
 | fieldsRemove StatusSort
+| limit ${topN}`;
+}
+
+// ---------------------------------------------------------------------------
+// Scorecard Previous Period (for compare)
+// ---------------------------------------------------------------------------
+export function scorecardPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries {
+  latency_p50 = median(dt.service.request.response_time),
+  latency_p90 = percentile(dt.service.request.response_time, 90),
+  requests = sum(dt.service.request.count),
+  errors = sum(dt.service.request.failure_count)
+}, by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+
+| lookup [timeseries http_5xx = sum(dt.service.request.count, default:0.0),
+         by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d,
+         filter:(http.response.status_code >= 500 and http.response.status_code <= 599)],
+  sourceField:dt.entity.service, lookupField:dt.entity.service, prefix:"http5xx."
+
+| fieldsAdd Latency_p50 = arrayAvg(latency_p50),
+            Latency_p90 = arrayAvg(latency_p90),
+            Requests = arraySum(requests),
+            Failures = arraySum(errors),
+            \`5xx\` = if(isNull(arraySum(http5xx.http_5xx)), 0, else:arraySum(http5xx.http_5xx))
+| fieldsAdd FailureRate = (Failures / Requests) * 100
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fields Service, dt.entity.service, Requests, Latency_p50, Latency_p90, FailureRate, \`5xx\`
 | limit ${topN}`;
 }
 
@@ -175,7 +202,7 @@ export function requestDetailsQuery(topN: number, timeframeDays: number): string
     endpoint.name,
     dt.system.sampling_ratio
   }
-| fieldsAdd Service = entityName(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | filter isNotNull(endpoint.name)
 | fields Service,
          Request = endpoint.name,
@@ -200,7 +227,7 @@ export function requestDetailsQuery(topN: number, timeframeDays: number): string
 export function requestsTotalQuery(topN: number, timeframeDays: number): string {
   return `timeseries requests = sum(dt.service.request.count),
            by:{dt.entity.service}, from:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, requests
 | sort arraySum(requests) desc
 | limit ${topN}`;
@@ -209,7 +236,7 @@ export function requestsTotalQuery(topN: number, timeframeDays: number): string 
 export function latencyP50Query(topN: number, timeframeDays: number): string {
   return `timeseries latency_p50 = percentile(dt.service.request.response_time, 50),
            by:{dt.entity.service}, from:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, latency_p50
 | sort arrayAvg(latency_p50) desc
 | limit ${topN}`;
@@ -218,7 +245,7 @@ export function latencyP50Query(topN: number, timeframeDays: number): string {
 export function latencyP90Query(topN: number, timeframeDays: number): string {
   return `timeseries latency_p90 = percentile(dt.service.request.response_time, 90),
            by:{dt.entity.service}, from:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, latency_p90
 | sort arrayAvg(latency_p90) desc
 | limit ${topN}`;
@@ -228,7 +255,7 @@ export function failedRequestsQuery(topN: number, timeframeDays: number): string
   return `timeseries errors = sum(dt.service.request.failure_count, default:0),
            nonempty:true,
            by:{dt.entity.service}, from:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
@@ -244,7 +271,7 @@ export function failureRateQuery(topN: number, timeframeDays: number): string {
            by:{dt.entity.service}, from:-${timeframeDays}d
 ], sourceField:dt.entity.service, lookupField:dt.entity.service, prefix:"request."
 | fieldsAdd failureRate = request.errors[] / total[] * 100
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, failureRate
 | sort arrayAvg(failureRate) desc
 | limit ${topN}`;
@@ -255,7 +282,7 @@ export function http5xxQuery(topN: number, timeframeDays: number): string {
            nonempty:true,
            by:{dt.entity.service}, from:-${timeframeDays}d,
            filter: http.response.status_code >= 500 and http.response.status_code <= 599
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
@@ -266,7 +293,7 @@ export function http4xxQuery(topN: number, timeframeDays: number): string {
            nonempty:true,
            by:{dt.entity.service}, from:-${timeframeDays}d,
            filter: http.response.status_code >= 400 and http.response.status_code <= 499
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
@@ -287,8 +314,8 @@ export function requestsByStatusCodeQuery(topN: number, timeframeDays: number): 
 export function processCpuQuery(topN: number, timeframeDays: number): string {
   return `timeseries cpu = avg(dt.process.cpu.usage),
            by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays}d
-| fieldsAdd pgi = entityName(dt.entity.process_group_instance)
-| fieldsAdd host.name = entityName(dt.entity.host)
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
 | fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, cpu
 | sort arrayAvg(cpu) desc
 | limit ${topN}`;
@@ -297,8 +324,8 @@ export function processCpuQuery(topN: number, timeframeDays: number): string {
 export function processMemoryPercentQuery(topN: number, timeframeDays: number): string {
   return `timeseries memory = avg(dt.process.memory.usage),
            by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays}d
-| fieldsAdd pgi = entityName(dt.entity.process_group_instance)
-| fieldsAdd host.name = entityName(dt.entity.host)
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
 | fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, memory
 | sort arrayAvg(memory) desc
 | limit ${topN}`;
@@ -307,8 +334,8 @@ export function processMemoryPercentQuery(topN: number, timeframeDays: number): 
 export function processMemoryUsedQuery(topN: number, timeframeDays: number): string {
   return `timeseries memory = avg(dt.process.memory.working_set_size),
            by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays}d
-| fieldsAdd pgi = entityName(dt.entity.process_group_instance)
-| fieldsAdd host.name = entityName(dt.entity.host)
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
 | fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, memory
 | sort arrayAvg(memory) desc
 | limit ${topN}`;
@@ -323,8 +350,8 @@ export function processGcTimeQuery(topN: number, timeframeDays: number): string 
            by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays}d]
 | append [timeseries gc_time = avg(dt.runtime.nodejs.gc.suspension_time),
            by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays}d]
-| fieldsAdd pgi = entityName(dt.entity.process_group_instance)
-| fieldsAdd host.name = entityName(dt.entity.host)
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
 | fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, gc_time
 | sort arrayAvg(gc_time) desc
 | limit ${topN}`;
@@ -338,7 +365,7 @@ export function k8sCpuQuery(topN: number, timeframeDays: number): string {
   return `timeseries cpu = avg(dt.kubernetes.container.cpu_usage),
            by:{k8s.namespace.name, dt.entity.kubernetes_cluster, dt.entity.cloud_application_namespace, dt.entity.cloud_application},
            from:-${timeframeDays}d
-| fieldsAdd workload = entityName(dt.entity.cloud_application)
+| fieldsAdd workload = coalesce(entityName(dt.entity.cloud_application), toString(dt.entity.cloud_application))
 | fields timeframe, interval, workload, cpu, dt.entity.cloud_application, k8s.namespace.name
 | sort arrayAvg(cpu) desc
 | limit ${topN}`;
@@ -349,7 +376,28 @@ export function k8sMemoryQuery(topN: number, timeframeDays: number): string {
            limits = avg(dt.kubernetes.container.limits_memory),
            by:{k8s.namespace.name, dt.entity.kubernetes_cluster, dt.entity.cloud_application_namespace, dt.entity.cloud_application},
            from:-${timeframeDays}d
-| fieldsAdd workload = entityName(dt.entity.cloud_application)
+| fieldsAdd workload = coalesce(entityName(dt.entity.cloud_application), toString(dt.entity.cloud_application))
+| fields timeframe, interval, workload, memory, limits, dt.entity.cloud_application, k8s.namespace.name
+| sort arrayAvg(memory) desc
+| limit ${topN}`;
+}
+
+export function k8sCpuPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries cpu = avg(dt.kubernetes.container.cpu_usage),
+           by:{k8s.namespace.name, dt.entity.kubernetes_cluster, dt.entity.cloud_application_namespace, dt.entity.cloud_application},
+           from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd workload = coalesce(entityName(dt.entity.cloud_application), toString(dt.entity.cloud_application))
+| fields timeframe, interval, workload, cpu, dt.entity.cloud_application, k8s.namespace.name
+| sort arrayAvg(cpu) desc
+| limit ${topN}`;
+}
+
+export function k8sMemoryPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries memory = avg(dt.kubernetes.container.memory_working_set),
+           limits = avg(dt.kubernetes.container.limits_memory),
+           by:{k8s.namespace.name, dt.entity.kubernetes_cluster, dt.entity.cloud_application_namespace, dt.entity.cloud_application},
+           from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd workload = coalesce(entityName(dt.entity.cloud_application), toString(dt.entity.cloud_application))
 | fields timeframe, interval, workload, memory, limits, dt.entity.cloud_application, k8s.namespace.name
 | sort arrayAvg(memory) desc
 | limit ${topN}`;
@@ -441,10 +489,40 @@ export function toK8sTimeseries(
 export function deploymentEventsQuery(timeframeDays: number): string {
   return `fetch events, from:-${timeframeDays}d
 | filter event.type == "CUSTOM_DEPLOYMENT"
-| fieldsAdd serviceName = entityName(dt.entity.service)
+| fieldsAdd serviceName = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timestamp, event.name, serviceName, dt.entity.service, event.type
 | sort timestamp desc
 | limit 200`;
+}
+
+// Change Impact — hourly service metrics for correlating with deployments
+export function changeImpactMetricsQuery(timeframeDays: number): string {
+  return `timeseries {
+  requests = sum(dt.service.request.count),
+  failures = sum(dt.service.request.failure_count, default:0),
+  latency_p90 = percentile(dt.service.request.response_time, 90)
+}, by:{dt.entity.service}, interval:1h, from:-${timeframeDays}d
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fields Service, dt.entity.service, timeframe, requests, failures, latency_p90`;
+}
+
+// Apdex — per-service satisfaction breakdown from spans
+export function apdexQuery(timeframeDays: number, thresholdMs: number): string {
+  const fourT = thresholdMs * 4;
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, from:-${timeframeDays}d
+| filter isNotNull(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service)),
+  satisfaction = if(duration <= ${thresholdMs}ms, "satisfied", else: if(duration <= ${fourT}ms, "tolerating", else: "frustrated"))
+| summarize count = count(), by:{Service, dt.entity.service, satisfaction}`;
+}
+
+export function apdexPrevQuery(timeframeDays: number, thresholdMs: number): string {
+  const fourT = thresholdMs * 4;
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| filter isNotNull(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service)),
+  satisfaction = if(duration <= ${thresholdMs}ms, "satisfied", else: if(duration <= ${fourT}ms, "tolerating", else: "frustrated"))
+| summarize count = count(), by:{Service, dt.entity.service, satisfaction}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +534,7 @@ export function serviceDependenciesQuery(): string {
 | fieldsAdd calledServices = calls[\`dt.entity.service\`]
 | filter isNotNull(calledServices)
 | expand calledServices
-| fieldsAdd Caller = entity.name, Callee = entityName(calledServices, type:"dt.entity.service")
+| fieldsAdd Caller = entity.name, Callee = coalesce(entityName(calledServices, type:"dt.entity.service"), toString(calledServices))
 | filter isNotNull(Callee)
 | fields Caller, Callee
 | sort Caller asc`;
@@ -483,7 +561,7 @@ export function anomalyCurrentQuery(timeframeDays: number): string {
   errors = sum(dt.service.request.failure_count),
   latency_p90 = percentile(dt.service.request.response_time, 90)
 }, by:{dt.entity.service}, from:-${timeframeDays}d
-| fieldsAdd Service = entityName(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fieldsAdd avgRequests = arrayAvg(requests), totalErrors = arraySum(errors), totalRequests = arraySum(requests)
 | fieldsAdd avgLatencyP90 = arrayAvg(latency_p90)
 | fieldsAdd errorRate = if(totalRequests > 0, totalErrors / totalRequests * 100, else:0.0)
@@ -497,7 +575,7 @@ export function anomalyBaselineQuery(timeframeDays: number): string {
   errors = sum(dt.service.request.failure_count),
   latency_p90 = percentile(dt.service.request.response_time, 90)
 }, by:{dt.entity.service}, from:-${baselineDays}d, to:-${timeframeDays}d
-| fieldsAdd Service = entityName(dt.entity.service)
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fieldsAdd avgRequests = arrayAvg(requests), totalErrors = arraySum(errors), totalRequests = arraySum(requests)
 | fieldsAdd avgLatencyP90 = arrayAvg(latency_p90)
 | fieldsAdd errorRate = if(totalRequests > 0, totalErrors / totalRequests * 100, else:0.0)
@@ -510,7 +588,7 @@ export function anomalyBaselineQuery(timeframeDays: number): string {
 export function requestsTotalPrevQuery(topN: number, timeframeDays: number): string {
   return `timeseries requests = sum(dt.service.request.count),
            by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, requests
 | sort arraySum(requests) desc
 | limit ${topN}`;
@@ -519,7 +597,7 @@ export function requestsTotalPrevQuery(topN: number, timeframeDays: number): str
 export function latencyP90PrevQuery(topN: number, timeframeDays: number): string {
   return `timeseries latency_p90 = percentile(dt.service.request.response_time, 90),
            by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, latency_p90
 | sort arrayAvg(latency_p90) desc
 | limit ${topN}`;
@@ -535,7 +613,7 @@ export function failureRatePrevQuery(topN: number, timeframeDays: number): strin
            by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
 ], sourceField:dt.entity.service, lookupField:dt.entity.service, prefix:"request."
 | fieldsAdd failureRate = request.errors[] / total[] * 100
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, failureRate
 | sort arrayAvg(failureRate) desc
 | limit ${topN}`;
@@ -546,8 +624,95 @@ export function http5xxPrevQuery(topN: number, timeframeDays: number): string {
            nonempty:true,
            by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d,
            filter: http.response.status_code >= 500 and http.response.status_code <= 599
-| fieldsAdd service.name = entityName(dt.entity.service)
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
+| limit ${topN}`;
+}
+
+export function latencyP50PrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries latency_p50 = percentile(dt.service.request.response_time, 50),
+           by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fields timeframe, interval, service.name, dt.entity.service, latency_p50
+| sort arrayAvg(latency_p50) desc
+| limit ${topN}`;
+}
+
+export function failedRequestsPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries errors = sum(dt.service.request.failure_count, default:0),
+           nonempty:true,
+           by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fields timeframe, interval, service.name, dt.entity.service, errors
+| sort arraySum(errors) desc
+| limit ${topN}`;
+}
+
+export function requestsByStatusCodePrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries requests = sum(dt.service.request.count),
+           by:{http.response.status_code}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fields timeframe, interval, http.response.status_code, requests
+| sort http.response.status_code asc
+| limit ${topN}`;
+}
+
+export function http4xxPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries errors = sum(dt.service.request.count, default:0),
+           nonempty:true,
+           by:{dt.entity.service}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d,
+           filter: http.response.status_code >= 400 and http.response.status_code <= 499
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fields timeframe, interval, service.name, dt.entity.service, errors
+| sort arraySum(errors) desc
+| limit ${topN}`;
+}
+
+// ---------------------------------------------------------------------------
+// Comparison Mode — Previous Period Process Metrics
+// ---------------------------------------------------------------------------
+export function processCpuPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries cpu = avg(dt.process.cpu.usage),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
+| fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, cpu
+| sort arrayAvg(cpu) desc
+| limit ${topN}`;
+}
+
+export function processMemoryPercentPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries memory = avg(dt.process.memory.usage),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
+| fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, memory
+| sort arrayAvg(memory) desc
+| limit ${topN}`;
+}
+
+export function processMemoryUsedPrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries memory = avg(dt.process.memory.working_set_size),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
+| fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, memory
+| sort arrayAvg(memory) desc
+| limit ${topN}`;
+}
+
+export function processGcTimePrevQuery(topN: number, timeframeDays: number): string {
+  return `timeseries gc_time = avg(dt.runtime.jvm.gc.suspension_time),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d
+| append [timeseries gc_time = avg(dt.runtime.clr.gc.suspension_time),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d]
+| append [timeseries gc_time = avg(dt.runtime.go.gc.suspension_time),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d]
+| append [timeseries gc_time = avg(dt.runtime.nodejs.gc.suspension_time),
+           by:{dt.entity.process_group_instance, dt.entity.host}, from:-${timeframeDays * 2}d, to:-${timeframeDays}d]
+| fieldsAdd pgi = coalesce(entityName(dt.entity.process_group_instance), toString(dt.entity.process_group_instance))
+| fieldsAdd host.name = coalesce(entityName(dt.entity.host), toString(dt.entity.host))
+| fields timeframe, interval, pgi, dt.entity.process_group_instance, host.name, gc_time
+| sort arrayAvg(gc_time) desc
 | limit ${topN}`;
 }

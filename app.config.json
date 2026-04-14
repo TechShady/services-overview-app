@@ -3,7 +3,7 @@
   "environmentUrl": "https://guu84124.apps.dynatrace.com/",
   "app": {
     "name": "Services Overview",
-    "version": "0.11.2",
+    "version": "0.20.6",
     "description": "SRE dashboard for service health, requests, latency and errors",
     "id": "my.services.overview.app",
     "scopes": [
@@ -17,7 +17,9 @@
       { "name": "environment-api:metrics:read", "comment": "read metrics v2" },
       { "name": "environment-api:entities:read", "comment": "read entities v2" },
       { "name": "state:user-app-states:read", "comment": "read user alert rules" },
-      { "name": "state:user-app-states:write", "comment": "save user alert rules" }
+      { "name": "state:user-app-states:write", "comment": "save user alert rules" },
+      { "name": "document:documents:write", "comment": "export to notebook" },
+      { "name": "document:documents:read", "comment": "read notebooks" }
     ]
   }
 }

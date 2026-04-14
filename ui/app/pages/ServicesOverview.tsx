@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback } from "react";
 import "./ServicesOverview.css";
 import { Flex } from "@dynatrace/strato-components/layouts";
-import { Heading, Strong } from "@dynatrace/strato-components/typography";
+import { Heading, Strong, Text } from "@dynatrace/strato-components/typography";
 import {
   HoneycombChart,
   TimeseriesChart,
@@ -15,9 +15,11 @@ import { ProgressCircle } from "@dynatrace/strato-components/content";
 import { Tabs, Tab } from "@dynatrace/strato-components/navigation";
 import { Modal } from "@dynatrace/strato-components/overlays";
 import { Button } from "@dynatrace/strato-components/buttons";
-import { SettingIcon, HelpIcon } from "@dynatrace/strato-icons";
+import { SettingIcon, HelpIcon, MaximizeIcon, MinimizeIcon, CompareIcon, XmarkIcon, DocumentIcon } from "@dynatrace/strato-icons";
 import { useDql } from "@dynatrace-sdk/react-hooks";
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
+import { documentsClient } from "@dynatrace-sdk/client-document";
+import { ServiceTopology } from "../components/ServiceTopology";
 import {
   servicesHealthQuery,
   problemsQuery,
@@ -38,14 +40,28 @@ import {
   k8sCpuQuery,
   k8sMemoryQuery,
   deploymentEventsQuery,
+  changeImpactMetricsQuery,
   serviceDependenciesQuery,
   closedProblemsQuery,
   anomalyCurrentQuery,
   anomalyBaselineQuery,
   requestsTotalPrevQuery,
+  latencyP50PrevQuery,
   latencyP90PrevQuery,
+  failedRequestsPrevQuery,
   failureRatePrevQuery,
   http5xxPrevQuery,
+  http4xxPrevQuery,
+  requestsByStatusCodePrevQuery,
+  processCpuPrevQuery,
+  processMemoryPercentPrevQuery,
+  processMemoryUsedPrevQuery,
+  processGcTimePrevQuery,
+  k8sCpuPrevQuery,
+  k8sMemoryPrevQuery,
+  apdexQuery,
+  apdexPrevQuery,
+  scorecardPrevQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +76,7 @@ const DEFAULT_TIMEFRAME_DAYS = 7;
 const DEFAULT_CHART_TOP_N = 10;
 const DEFAULT_TENANT = "";
 const DEFAULT_SLO_TARGET = 99.9;
+const DEFAULT_APDEX_T = 500; // ms
 const NOOP_QUERY = "fetch logs | limit 0";
 
 interface AlertRule {
@@ -68,6 +85,22 @@ interface AlertRule {
   comparator: "gt" | "lt";
   threshold: number;
   serviceName?: string;
+}
+
+interface ServiceBaselineSnapshot {
+  service: string;
+  latencyAvg: number;
+  latencyP50: number;
+  latencyP90: number;
+  latencyP99: number;
+  failureRate: number;
+}
+
+interface ServiceBaseline {
+  id: number;
+  name: string;
+  timestamp: string;
+  services: ServiceBaselineSnapshot[];
 }
 
 const ALERT_METRIC_OPTIONS = [
@@ -119,12 +152,107 @@ function ChartTile({
   description?: string;
   children: React.ReactNode;
 }) {
+  const [maximized, setMaximized] = useState(false);
   return (
-    <div className="svc-chart-tile">
-      <div className="chart-title">{title}</div>
-      {description && <div className="chart-description">{description}</div>}
-      <div className="chart-body">{children}</div>
-    </div>
+    <>
+      {maximized && (
+        <div className="svc-chart-overlay" onClick={() => setMaximized(false)}>
+          <div className="svc-chart-maximized" onClick={(e) => e.stopPropagation()}>
+            <div className="chart-title-row">
+              <div className="chart-title">{title}</div>
+              <button className="svc-chart-toggle" onClick={() => setMaximized(false)} title="Minimize">
+                <MinimizeIcon />
+              </button>
+            </div>
+            {description && <div className="chart-description">{description}</div>}
+            <div className="chart-body">{children}</div>
+          </div>
+        </div>
+      )}
+      <div className="svc-chart-tile">
+        <div className="chart-title-row">
+          <div className="chart-title">{title}</div>
+          <button className="svc-chart-toggle" onClick={() => setMaximized(true)} title="Maximize">
+            <MaximizeIcon />
+          </button>
+        </div>
+        {description && <div className="chart-description">{description}</div>}
+        <div className="chart-body">{children}</div>
+      </div>
+    </>
+  );
+}
+
+function CompareChartTile({
+  title,
+  description,
+  currentTitle,
+  currentChart,
+  children,
+}: {
+  title: string;
+  description?: string;
+  currentTitle: string;
+  currentChart: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [maximized, setMaximized] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
+  return (
+    <>
+      {splitOpen && (
+        <div className="svc-chart-overlay" onClick={() => setSplitOpen(false)}>
+          <div className="svc-compare-split" onClick={(e) => e.stopPropagation()}>
+            <div className="svc-compare-half">
+              <div className="chart-title-row">
+                <div className="chart-title">{currentTitle}</div>
+                <span className="chart-tag">Current</span>
+              </div>
+              <div className="chart-body">{currentChart}</div>
+            </div>
+            <div className="svc-compare-half">
+              <div className="chart-title-row">
+                <div className="chart-title">{title}</div>
+                <span className="chart-tag">Previous</span>
+              </div>
+              <div className="chart-body">{children}</div>
+            </div>
+            <button className="svc-compare-close" onClick={() => setSplitOpen(false)} title="Close">
+              <XmarkIcon />
+            </button>
+          </div>
+        </div>
+      )}
+      {maximized && (
+        <div className="svc-chart-overlay" onClick={() => setMaximized(false)}>
+          <div className="svc-chart-maximized" onClick={(e) => e.stopPropagation()}>
+            <div className="chart-title-row">
+              <div className="chart-title">{title}</div>
+              <button className="svc-chart-toggle" onClick={() => setMaximized(false)} title="Minimize">
+                <MinimizeIcon />
+              </button>
+            </div>
+            {description && <div className="chart-description">{description}</div>}
+            <div className="chart-body">{children}</div>
+          </div>
+        </div>
+      )}
+      <div className="svc-chart-tile">
+        <div className="chart-title-row">
+          <div className="chart-title">{title}</div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="svc-chart-toggle" onClick={() => setSplitOpen(true)} title="Compare side-by-side">
+              <CompareIcon />
+            </button>
+            <button className="svc-chart-toggle" onClick={() => setMaximized(true)} title="Maximize">
+              <MaximizeIcon />
+            </button>
+          </div>
+        </div>
+        {description && <div className="chart-description">{description}</div>}
+        <div className="chart-body">{children}</div>
+      </div>
+    </>
   );
 }
 
@@ -137,8 +265,22 @@ const LINK_STYLE: React.CSSProperties = {
   cursor: "pointer",
 };
 
+/** Reusable cell renderer that links a service name to Distributed Traces */
+const makeServiceLinkCell = (envUrl: string) =>
+  ({ value, rowData }: { value: string; rowData: any }) => {
+    const svcId = rowData["dt.entity.service"];
+    if (!svcId) return <span>{value}</span>;
+    const url = `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(svcId)}`;
+    return (
+      <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>
+        {value}
+      </a>
+    );
+  };
+
 export const ServicesOverview = () => {
   const envUrl = getEnvironmentUrl().replace(/\/$/, "");
+  const serviceLinkCell = useMemo(() => makeServiceLinkCell(envUrl), [envUrl]);
 
   // --- State ---
   const [timeframeDays, setTimeframeDays] = useState<number>(DEFAULT_TIMEFRAME_DAYS);
@@ -164,12 +306,20 @@ export const ServicesOverview = () => {
 
   // Enhancement state
   const [compareMode, setCompareMode] = useState(false);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [sloTarget, setSloTarget] = useState<number>(DEFAULT_SLO_TARGET);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [newRuleMetric, setNewRuleMetric] = useState<string>("FailureRate");
   const [newRuleComparator, setNewRuleComparator] = useState<"gt" | "lt">("gt");
   const [newRuleThreshold, setNewRuleThreshold] = useState<number>(5);
   const [newRuleService, setNewRuleService] = useState<string>("");
+
+  // Baselines state
+  const [baselines, setBaselines] = useState<ServiceBaseline[]>([]);
+  const [baselineName, setBaselineName] = useState("");
+
+  // Apdex state
+  const [apdexT, setApdexT] = useState<number>(DEFAULT_APDEX_T);
 
   // --- Queries ---
 
@@ -207,7 +357,7 @@ export const ServicesOverview = () => {
     if (!svcDetailsResult.data?.records) return [];
     return svcDetailsResult.data.records.map((r) => ({
       Status: r["Status"] as string,
-      Service: r["Service"] as string,
+      Service: (r["Service"] as string) ?? (r["dt.entity.service"] as string) ?? "Unknown",
       "dt.entity.service": r["dt.entity.service"] as string,
       Requests: r["Requests"] as number,
       Latency_Avg: r["Latency_Avg"] as number,
@@ -229,7 +379,7 @@ export const ServicesOverview = () => {
   const reqDetailsData = useMemo(() => {
     if (!reqDetailsResult.data?.records) return [];
     return reqDetailsResult.data.records.map((r) => ({
-      Service: r["Service"] as string,
+      Service: (r["Service"] as string) ?? (r["dt.entity.service"] as string) ?? "Unknown",
       Request: r["Request"] as string,
       "dt.entity.service": r["dt.entity.service"] as string,
       Requests: (r["Requests"] as number) ?? 0,
@@ -266,16 +416,35 @@ export const ServicesOverview = () => {
 
   // Enhancement queries
   const deploymentsResult = useDql({ query: deploymentEventsQuery(timeframeDays) });
+  const changeImpactResult = useDql({ query: changeImpactMetricsQuery(timeframeDays) });
   const dependenciesResult = useDql({ query: serviceDependenciesQuery() });
   const closedProblemsResult = useDql({ query: closedProblemsQuery(timeframeDays) });
   const anomalyCurrentResult = useDql({ query: anomalyCurrentQuery(timeframeDays) });
   const anomalyBaselineResult = useDql({ query: anomalyBaselineQuery(timeframeDays) });
+  const apdexResult = useDql({ query: apdexQuery(timeframeDays, apdexT) });
 
   // Comparison mode — previous period (no-op when disabled)
-  const reqTotalPrev = useDql({ query: compareMode ? requestsTotalPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const latP90Prev = useDql({ query: compareMode ? latencyP90PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const failRatePrev = useDql({ query: compareMode ? failureRatePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const http5xxPrev = useDql({ query: compareMode ? http5xxPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const svcCompare = compareMode && activeTabIndex === 3;
+  const procCompare = compareMode && activeTabIndex === 4;
+  const k8sCompare = compareMode && activeTabIndex === 5;
+  const apdexCompare = compareMode && activeTabIndex === 14;
+  const scorecardCompare = compareMode && activeTabIndex === 7;
+  const reqTotalPrev = useDql({ query: svcCompare ? requestsTotalPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const latP50Prev = useDql({ query: svcCompare ? latencyP50PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const latP90Prev = useDql({ query: svcCompare ? latencyP90PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const failedReqPrev = useDql({ query: svcCompare ? failedRequestsPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const failRatePrev = useDql({ query: svcCompare ? failureRatePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const http5xxPrev = useDql({ query: svcCompare ? http5xxPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const http4xxPrev = useDql({ query: svcCompare ? http4xxPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const statusCodePrev = useDql({ query: svcCompare ? requestsByStatusCodePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const procCpuPrev = useDql({ query: procCompare ? processCpuPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const procMemPctPrev = useDql({ query: procCompare ? processMemoryPercentPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const procMemUsedPrev = useDql({ query: procCompare ? processMemoryUsedPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const procGcPrev = useDql({ query: procCompare ? processGcTimePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const k8sCpuPrev = useDql({ query: k8sCompare ? k8sCpuPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const k8sMemPrev = useDql({ query: k8sCompare ? k8sMemoryPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
+  const apdexPrevResult = useDql({ query: apdexCompare ? apdexPrevQuery(timeframeDays, apdexT) : NOOP_QUERY });
+  const scorecardPrevResult = useDql({ query: scorecardCompare ? scorecardPrevQuery(topN, timeframeDays) : NOOP_QUERY });
 
   // Convert timeseries data for charts using Strato's built-in converter
   const toTs = (result: { data?: { records?: any; types?: any } | null }) =>
@@ -298,11 +467,25 @@ export const ServicesOverview = () => {
   const k8sCpuTs = useMemo(() => toTs(k8sCpuResult), [k8sCpuResult.data]);
   const k8sMemTs = useMemo(() => toTs(k8sMemResult), [k8sMemResult.data]);
 
-  // Comparison mode timeseries
+  // Comparison mode timeseries — Service Metrics
   const reqTotalPrevTs = useMemo(() => toTs(reqTotalPrev), [reqTotalPrev.data]);
+  const latP50PrevTs = useMemo(() => toTs(latP50Prev), [latP50Prev.data]);
   const latP90PrevTs = useMemo(() => toTs(latP90Prev), [latP90Prev.data]);
+  const failedReqPrevTs = useMemo(() => toTs(failedReqPrev), [failedReqPrev.data]);
   const failRatePrevTs = useMemo(() => toTs(failRatePrev), [failRatePrev.data]);
   const http5xxPrevTs = useMemo(() => toTs(http5xxPrev), [http5xxPrev.data]);
+  const http4xxPrevTs = useMemo(() => toTs(http4xxPrev), [http4xxPrev.data]);
+  const statusCodePrevTs = useMemo(() => toTs(statusCodePrev), [statusCodePrev.data]);
+
+  // Comparison mode timeseries — Process Metrics
+  const procCpuPrevTs = useMemo(() => toTs(procCpuPrev), [procCpuPrev.data]);
+  const procMemPctPrevTs = useMemo(() => toTs(procMemPctPrev), [procMemPctPrev.data]);
+  const procMemUsedPrevTs = useMemo(() => toTs(procMemUsedPrev), [procMemUsedPrev.data]);
+  const procGcPrevTs = useMemo(() => toTs(procGcPrev), [procGcPrev.data]);
+
+  // Comparison mode timeseries — K8s Workloads
+  const k8sCpuPrevTs = useMemo(() => toTs(k8sCpuPrev), [k8sCpuPrev.data]);
+  const k8sMemPrevTs = useMemo(() => toTs(k8sMemPrev), [k8sMemPrev.data]);
 
   // ─── SLO & Error Budget ───
   const sloData = useMemo(() => {
@@ -317,6 +500,7 @@ export const ServicesOverview = () => {
       const minutesLeft = burnRate > 0 ? (budgetRemaining / 100) * periodMinutes / burnRate : periodMinutes;
       return {
         Service: svc.Service,
+        "dt.entity.service": svc["dt.entity.service"],
         "Error Rate %": Math.round(errorRate * 1000) / 1000,
         "SLO Target": `${sloTarget}%`,
         "Budget (%)": Math.round(budgetPercent * 10000) / 10000,
@@ -347,6 +531,7 @@ export const ServicesOverview = () => {
       const score = Math.round(errorScore * 0.35 + latencyScore * 0.2 + problemScore * 0.25 + http5xxScore * 0.2);
       return {
         Service: svc.Service,
+        "dt.entity.service": svc["dt.entity.service"],
         Score: score,
         Grade: score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F",
         "Error Score": Math.round(errorScore),
@@ -357,6 +542,41 @@ export const ServicesOverview = () => {
       };
     }).sort((a, b) => b.Score - a.Score);
   }, [svcDetailsData]);
+
+  // ─── Scorecard Previous Period (for compare) ───
+  const scorecardPrevMap = useMemo(() => {
+    const map = new Map<string, { score: number; grade: string; errorScore: number; latencyScore: number; http5xxScore: number }>();
+    if (!scorecardPrevResult.data?.records) return map;
+    scorecardPrevResult.data.records.forEach((r) => {
+      const name = (r["Service"] as string) ?? "";
+      const errorRate = (r["FailureRate"] as number) ?? 0;
+      const latP90 = (r["Latency_p90"] as number) ?? 0;
+      const latP50 = (r["Latency_p50"] as number) ?? 0;
+      const http5xx = (r["5xx"] as number) ?? 0;
+      const requests = (r["Requests"] as number) ?? 0;
+      const http5xxRate = requests > 0 ? (http5xx / requests) * 100 : 0;
+      const errorScore = Math.max(0, 100 - errorRate * 20);
+      const latencyScore = latP50 > 0 ? Math.max(0, Math.min(100, 100 - ((latP90 / latP50 - 1) * 50))) : 100;
+      const http5xxScore = Math.max(0, 100 - http5xxRate * 100);
+      // No problem score for prev period — use 100 (neutral)
+      const score = Math.round(errorScore * 0.35 + latencyScore * 0.2 + 100 * 0.25 + http5xxScore * 0.2);
+      const grade = score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F";
+      if (name) map.set(name, { score, grade, errorScore: Math.round(errorScore), latencyScore: Math.round(latencyScore), http5xxScore: Math.round(http5xxScore) });
+    });
+    return map;
+  }, [scorecardPrevResult.data]);
+
+  const scorecardCompareData = useMemo(() => {
+    if (!scorecardCompare) return [];
+    const prevLoading = scorecardPrevResult.isLoading;
+    return scorecardData.map((d) => {
+      const prev = scorecardPrevMap.get(d.Service);
+      const prevScore = prevLoading ? "Loading..." : prev ? String(prev.score) : "N/A";
+      const deltaScore = prevLoading ? "..." : prev ? String(d.Score - prev.score) : "N/A";
+      const prevGrade = prevLoading ? "..." : prev ? prev.grade : "N/A";
+      return { ...d, "Prev Score": prevScore, "Δ Score": deltaScore, "Prev Grade": prevGrade };
+    });
+  }, [scorecardData, scorecardPrevMap, scorecardCompare, scorecardPrevResult.isLoading]);
 
   // ─── Dependencies ───
   const dependenciesData = useMemo(() => {
@@ -421,6 +641,7 @@ export const ServicesOverview = () => {
       const isAnomaly = Math.abs(latencyChange) > 50 || Math.abs(errorRateChange) > 100 || curErrorRate > 5;
       return {
         Service: (r["Service"] as string) ?? "",
+        "dt.entity.service": svcId,
         "Latency P90 (now)": Math.round(curLatency),
         "Latency P90 (baseline)": Math.round(baseLatency),
         "Latency Change %": Math.round(latencyChange * 10) / 10,
@@ -440,8 +661,167 @@ export const ServicesOverview = () => {
       Time: r["timestamp"] ? new Date(r["timestamp"] as string).toLocaleString() : "",
       Event: (r["event.name"] as string) ?? "",
       Service: (r["serviceName"] as string) ?? "",
+      "dt.entity.service": (r["dt.entity.service"] as string) ?? "",
     }));
   }, [deploymentsResult.data]);
+
+  // ─── Change Impact Analysis ───
+  const changeImpactData = useMemo(() => {
+    if (!deploymentsResult.data?.records || !changeImpactResult.data?.records) return [];
+    const deployments = deploymentsResult.data.records;
+    const metrics = changeImpactResult.data.records;
+
+    // Build per-service hourly buckets: { svcId -> [{ start, requests, failures, latency }] }
+    const svcBuckets = new Map<string, { start: number; requests: number; failures: number; latency: number }[]>();
+    metrics.forEach((r) => {
+      const svcId = (r["dt.entity.service"] as string) ?? "";
+      const tf = r["timeframe"] as any;
+      const start = tf?.start ? new Date(tf.start).getTime() : 0;
+      const reqArr = r["requests"] as number[] | null;
+      const failArr = r["failures"] as number[] | null;
+      const latArr = r["latency_p90"] as number[] | null;
+      if (!reqArr || !start) return;
+      // timeseries interval is a scalar Duration, not an array; compute bucket starts from timeframe.start
+      const intervalMs = 3600000; // 1h matches the query interval
+      reqArr.forEach((req, i) => {
+        const bucketStart = start + i * intervalMs;
+        if (!svcBuckets.has(svcId)) svcBuckets.set(svcId, []);
+        svcBuckets.get(svcId)!.push({
+          start: bucketStart,
+          requests: req ?? 0,
+          failures: failArr?.[i] ?? 0,
+          latency: latArr?.[i] ?? 0,
+        });
+      });
+    });
+
+    // For each deployment, find 3h before and 3h after metrics
+    const windowMs = 3 * 3600000;
+    return deployments.map((d) => {
+      const ts = d["timestamp"] ? new Date(d["timestamp"] as string).getTime() : 0;
+      const svcId = (d["dt.entity.service"] as string) ?? "";
+      const svcName = (d["serviceName"] as string) ?? "";
+      const eventName = (d["event.name"] as string) ?? "";
+      const buckets = svcBuckets.get(svcId) ?? [];
+
+      const before = buckets.filter((b) => b.start >= ts - windowMs && b.start < ts);
+      const after = buckets.filter((b) => b.start >= ts && b.start < ts + windowMs);
+
+      const avg = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+      const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
+
+      const beforeReq = sum(before.map((b) => b.requests));
+      const afterReq = sum(after.map((b) => b.requests));
+      const beforeLat = avg(before.map((b) => b.latency));
+      const afterLat = avg(after.map((b) => b.latency));
+      const beforeFail = beforeReq > 0 ? (sum(before.map((b) => b.failures)) / beforeReq) * 100 : 0;
+      const afterFail = afterReq > 0 ? (sum(after.map((b) => b.failures)) / afterReq) * 100 : 0;
+
+      const latDelta = beforeLat > 0 ? ((afterLat - beforeLat) / beforeLat) * 100 : 0;
+      const reqDelta = beforeReq > 0 ? ((afterReq - beforeReq) / beforeReq) * 100 : 0;
+      const failDelta = afterFail - beforeFail;
+
+      let verdict = "✅ Healthy";
+      if (latDelta > 50 || failDelta > 2) verdict = "🟥 Regression";
+      else if (latDelta > 20 || failDelta > 0.5) verdict = "🟨 Warning";
+      else if (latDelta < -10 && failDelta <= 0) verdict = "🟩 Improved";
+
+      return {
+        Time: ts ? new Date(ts).toLocaleString() : "",
+        Deployment: eventName,
+        Service: svcName,
+        "dt.entity.service": svcId,
+        "Requests (Before)": beforeReq,
+        "Requests (After)": afterReq,
+        "Requests Δ %": Math.round(reqDelta * 10) / 10,
+        "Latency P90 (Before)": Math.round(beforeLat),
+        "Latency P90 (After)": Math.round(afterLat),
+        "Latency Δ %": Math.round(latDelta * 10) / 10,
+        "Error Rate (Before)": Math.round(beforeFail * 1000) / 1000,
+        "Error Rate (After)": Math.round(afterFail * 1000) / 1000,
+        "Error Δ pp": Math.round(failDelta * 1000) / 1000,
+        Verdict: verdict,
+      };
+    }).filter((d) => d.Service);
+  }, [deploymentsResult.data, changeImpactResult.data]);
+
+  // ─── Apdex / User Satisfaction ───
+  const apdexData = useMemo(() => {
+    if (!apdexResult.data?.records) return [];
+    const svcMap = new Map<string, { satisfied: number; tolerating: number; frustrated: number; name: string; svcId: string }>();
+    apdexResult.data.records.forEach((r) => {
+      const svcId = (r["dt.entity.service"] as string) ?? "";
+      const name = (r["Service"] as string) ?? svcId;
+      const satisfaction = (r["satisfaction"] as string) ?? "";
+      const cnt = Number(r["count"]) || 0;
+      if (!svcMap.has(svcId)) svcMap.set(svcId, { satisfied: 0, tolerating: 0, frustrated: 0, name, svcId });
+      const entry = svcMap.get(svcId)!;
+      if (satisfaction === "satisfied") entry.satisfied += cnt;
+      else if (satisfaction === "tolerating") entry.tolerating += cnt;
+      else if (satisfaction === "frustrated") entry.frustrated += cnt;
+    });
+    return Array.from(svcMap.entries())
+      .map(([_id, s]) => {
+        const total = s.satisfied + s.tolerating + s.frustrated;
+        const apdex = total > 0 ? (s.satisfied + s.tolerating / 2) / total : 1;
+        const pctSatisfied = total > 0 ? (s.satisfied / total) * 100 : 100;
+        const pctTolerating = total > 0 ? (s.tolerating / total) * 100 : 0;
+        const pctFrustrated = total > 0 ? (s.frustrated / total) * 100 : 0;
+        let rating = "Excellent";
+        if (apdex < 0.5) rating = "Unacceptable";
+        else if (apdex < 0.7) rating = "Poor";
+        else if (apdex < 0.85) rating = "Fair";
+        else if (apdex < 0.94) rating = "Good";
+        return {
+          Service: s.name,
+          "dt.entity.service": s.svcId,
+          Apdex: apdex.toFixed(2),
+          ApdexNum: Math.round(apdex * 100) / 100,
+          Rating: rating,
+          Satisfied: s.satisfied,
+          "Satisfied %": `${(Math.round(pctSatisfied * 10) / 10)}%`,
+          Tolerating: s.tolerating,
+          "Tolerating %": `${(Math.round(pctTolerating * 10) / 10)}%`,
+          Frustrated: s.frustrated,
+          "Frustrated %": `${(Math.round(pctFrustrated * 10) / 10)}%`,
+          Total: total,
+        };
+      })
+      .sort((a, b) => a.ApdexNum - b.ApdexNum); // worst first
+  }, [apdexResult.data]);
+
+  // ─── Apdex Previous Period (for compare) ───
+  const apdexPrevMap = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!apdexPrevResult.data?.records) return map;
+    const svcMap = new Map<string, { satisfied: number; tolerating: number; frustrated: number }>();
+    apdexPrevResult.data.records.forEach((r) => {
+      const name = (r["Service"] as string) ?? "";
+      const satisfaction = (r["satisfaction"] as string) ?? "";
+      const cnt = Number(r["count"]) || 0;
+      if (!svcMap.has(name)) svcMap.set(name, { satisfied: 0, tolerating: 0, frustrated: 0 });
+      const entry = svcMap.get(name)!;
+      if (satisfaction === "satisfied") entry.satisfied += cnt;
+      else if (satisfaction === "tolerating") entry.tolerating += cnt;
+      else if (satisfaction === "frustrated") entry.frustrated += cnt;
+    });
+    svcMap.forEach((s, name) => {
+      const total = s.satisfied + s.tolerating + s.frustrated;
+      map.set(name, total > 0 ? (s.satisfied + s.tolerating / 2) / total : 1);
+    });
+    return map;
+  }, [apdexPrevResult.data]);
+
+  const apdexCompareData = useMemo(() => {
+    if (!apdexCompare) return [];
+    const prevLoading = apdexPrevResult.isLoading;
+    return apdexData.map((d) => {
+      const prev = apdexPrevMap.get(d.Service);
+      const prevApdex = prevLoading ? "Loading..." : prev !== undefined ? prev.toFixed(2) : "N/A";
+      const delta = prevLoading ? "..." : prev !== undefined ? (d.ApdexNum - prev).toFixed(2) : "N/A";
+      return { ...d, "Prev Apdex": prevApdex, "Δ Apdex": delta };
+    });
+  }, [apdexData, apdexPrevMap, apdexCompare, apdexPrevResult.isLoading]);
 
   // ─── Incident Timeline (combined) ───
   const timelineData = useMemo(() => {
@@ -462,7 +842,7 @@ export const ServicesOverview = () => {
   // ─── Alert Rule Evaluation ───
   const alertViolations = useMemo(() => {
     if (!alertRules.length || !svcDetailsData.length) return [];
-    const violations: { Rule: string; Service: string; Metric: string; Value: number; Threshold: number }[] = [];
+    const violations: { Rule: string; Service: string; "dt.entity.service": string; Metric: string; Value: number; Threshold: number }[] = [];
     for (const rule of alertRules) {
       for (const svc of svcDetailsData) {
         if (rule.serviceName && svc.Service !== rule.serviceName) continue;
@@ -472,6 +852,7 @@ export const ServicesOverview = () => {
           violations.push({
             Rule: `${rule.metric} ${rule.comparator === "gt" ? ">" : "<"} ${rule.threshold}`,
             Service: svc.Service as string,
+            "dt.entity.service": svc["dt.entity.service"],
             Metric: rule.metric,
             Value: Math.round(value * 1000) / 1000,
             Threshold: rule.threshold,
@@ -508,6 +889,98 @@ export const ServicesOverview = () => {
     setTenantId(tempTenantId);
     setSettingsOpen(false);
   };
+
+  // --- Export to Notebook ---
+  const [exporting, setExporting] = useState(false);
+  const handleExportNotebook = useCallback(async () => {
+    setExporting(true);
+    try {
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const tf = `now()-${timeframeDays}d`;
+      const uid = () => crypto.randomUUID();
+
+      const sections: any[] = [
+        { id: uid(), type: "markdown", markdown: `# Services Overview — Exported ${ts}\n\nAuto-generated notebook from the **Services Overview** app.\n\n**Settings:** Top N = ${topN}, Chart Top N = ${chartTopN}, Timeframe = ${timeframeDays}d` },
+
+        // Service Health
+        { id: uid(), type: "markdown", markdown: "## Service Health" },
+        { id: uid(), type: "dql", title: "Services Health Overview", showTitle: true, height: 400, state: { input: { value: servicesHealthQuery(problemsLookbackHours), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+
+        // Service Details
+        { id: uid(), type: "markdown", markdown: "## Service Details" },
+        { id: uid(), type: "dql", title: "Service Details", showTitle: true, height: 400, state: { input: { value: serviceDetailsQuery(topN, timeframeDays, problemsLookbackHours), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+
+        // Request Details
+        { id: uid(), type: "markdown", markdown: "## Request Details" },
+        { id: uid(), type: "dql", title: "Request Details", showTitle: true, height: 400, state: { input: { value: requestDetailsQuery(topN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+
+        // Service Metrics
+        { id: uid(), type: "markdown", markdown: "## Service Metrics" },
+        { id: uid(), type: "dql", title: "Requests Total", showTitle: true, height: 300, state: { input: { value: requestsTotalQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Latency P50", showTitle: true, height: 300, state: { input: { value: latencyP50Query(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Latency P90", showTitle: true, height: 300, state: { input: { value: latencyP90Query(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Failure Rate %", showTitle: true, height: 300, state: { input: { value: failureRateQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Requests by Status Code", showTitle: true, height: 300, state: { input: { value: requestsByStatusCodeQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "barChart" } },
+        { id: uid(), type: "dql", title: "Failed Requests", showTitle: true, height: 300, state: { input: { value: failedRequestsQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "5xx Errors", showTitle: true, height: 300, state: { input: { value: http5xxQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "4xx Errors", showTitle: true, height: 300, state: { input: { value: http4xxQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+
+        // Process Metrics
+        { id: uid(), type: "markdown", markdown: "## Process Metrics" },
+        { id: uid(), type: "dql", title: "Process CPU Usage %", showTitle: true, height: 300, state: { input: { value: processCpuQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Process Memory Usage %", showTitle: true, height: 300, state: { input: { value: processMemoryPercentQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Process Memory Used", showTitle: true, height: 300, state: { input: { value: processMemoryUsedQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "GC Suspension Time %", showTitle: true, height: 300, state: { input: { value: processGcTimeQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+
+        // K8s Workloads
+        { id: uid(), type: "markdown", markdown: "## K8s Workload Metrics" },
+        { id: uid(), type: "dql", title: "K8s Workload CPU Usage", showTitle: true, height: 300, state: { input: { value: k8sCpuQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "K8s Workload Memory Usage", showTitle: true, height: 300, state: { input: { value: k8sMemoryQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+
+        // Problems & MTTR
+        { id: uid(), type: "markdown", markdown: "## Problems & MTTR" },
+        { id: uid(), type: "dql", title: "Active Problems", showTitle: true, height: 400, state: { input: { value: problemsQuery(), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Closed Problems (MTTR)", showTitle: true, height: 400, state: { input: { value: closedProblemsQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+
+        // Anomaly Detection
+        { id: uid(), type: "markdown", markdown: "## Anomaly Detection" },
+        { id: uid(), type: "dql", title: "Current Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyCurrentQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Baseline Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyBaselineQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+
+        // Dependencies
+        { id: uid(), type: "markdown", markdown: "## Service Dependencies" },
+        { id: uid(), type: "dql", title: "Service Dependencies", showTitle: true, height: 400, state: { input: { value: serviceDependenciesQuery() }, visualization: "table" } },
+
+        // Deployments
+        { id: uid(), type: "markdown", markdown: "## Deployment Events" },
+        { id: uid(), type: "dql", title: "Recent Deployments", showTitle: true, height: 400, state: { input: { value: deploymentEventsQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+      ];
+
+      const notebookContent = {
+        version: "7",
+        defaultTimeframe: { from: tf, to: "now()" },
+        sections,
+      };
+
+      const name = `Services Overview — ${ts}`;
+      const result = await documentsClient.createDocument({
+        body: {
+          name,
+          type: "notebook",
+          content: new Blob([JSON.stringify(notebookContent)], { type: "application/json" }),
+        },
+      });
+
+      const envUrl = getEnvironmentUrl().replace(/\/$/, "");
+      const nbUrl = `${envUrl}/ui/apps/dynatrace.notebooks/notebook/${result.id}`;
+      window.open(nbUrl, "_blank");
+    } catch (e) {
+      console.error("Export to notebook failed", e);
+      alert("Export to notebook failed: " + (e as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }, [topN, chartTopN, timeframeDays, problemsLookbackHours]);
 
   // --- Column Definitions ---
   const problemsColumns = useMemo(
@@ -579,16 +1052,7 @@ export const ServicesOverview = () => {
         id: "Service",
         header: "Service",
         accessor: "Service",
-        cell: ({ value, rowData }: { value: string; rowData: any }) => {
-          const svcId = rowData["dt.entity.service"];
-          if (!svcId) return <span>{value}</span>;
-          const url = `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(svcId)}`;
-          return (
-            <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>
-              {value}
-            </a>
-          );
-        },
+        cell: serviceLinkCell,
       },
       {
         id: "Requests",
@@ -650,16 +1114,7 @@ export const ServicesOverview = () => {
         id: "Service",
         header: "Service",
         accessor: "Service",
-        cell: ({ value, rowData }: { value: string; rowData: any }) => {
-          const svcId = rowData["dt.entity.service"];
-          if (!svcId) return <span>{value}</span>;
-          const url = `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(svcId)}`;
-          return (
-            <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>
-              {value}
-            </a>
-          );
-        },
+        cell: serviceLinkCell,
       },
       {
         id: "Request",
@@ -761,13 +1216,21 @@ export const ServicesOverview = () => {
                 <HelpIcon />
               </Button.Prefix>
             </Button>
-            <Button variant={compareMode ? "emphasized" : "default"} onClick={() => setCompareMode(!compareMode)}>
-              {compareMode ? "Compare: ON" : "Compare"}
-            </Button>
+            {(activeTabIndex === 3 || activeTabIndex === 4 || activeTabIndex === 5 || activeTabIndex === 7 || activeTabIndex === 14) && (
+              <Button variant={compareMode ? "emphasized" : "default"} onClick={() => setCompareMode(!compareMode)}>
+                {compareMode ? "Compare: ON" : "Compare"}
+              </Button>
+            )}
             <Button variant="default" onClick={handleOpenSettings}>
               <Button.Prefix>
                 <SettingIcon />
               </Button.Prefix>
+            </Button>
+            <Button variant="default" onClick={handleExportNotebook} disabled={exporting}>
+              <Button.Prefix>
+                <DocumentIcon />
+              </Button.Prefix>
+              {exporting ? "Exporting..." : "Export to Notebook"}
             </Button>
           </div>
         </Flex>
@@ -834,6 +1297,15 @@ export const ServicesOverview = () => {
               onChange={(val) => setSloTarget(val ?? DEFAULT_SLO_TARGET)}
               min={90}
               max={100}
+            />
+          </Flex>
+          <Flex flexDirection="column" gap={4}>
+            <Strong>Apdex Threshold T (ms)</Strong>
+            <NumberInput
+              value={apdexT}
+              onChange={(val) => setApdexT(val ?? DEFAULT_APDEX_T)}
+              min={50}
+              max={10000}
             />
           </Flex>
         </Flex>
@@ -988,13 +1460,14 @@ export const ServicesOverview = () => {
               <tr><td>Chart Top N</td><td>{DEFAULT_CHART_TOP_N}</td><td>Max series per timeseries chart</td></tr>
               <tr><td>Problems Lookback</td><td>{DEFAULT_PROBLEMS_LOOKBACK_HOURS}h</td><td>Hours to look back for active problems</td></tr>
               <tr><td>SLO Target</td><td>{DEFAULT_SLO_TARGET}%</td><td>SLO target for error budget calculations</td></tr>
+              <tr><td>Apdex T</td><td>{DEFAULT_APDEX_T}ms</td><td>Apdex threshold — Satisfied ≤ T, Tolerating ≤ 4T</td></tr>
             </tbody>
           </table>
 
           <h3>New Features</h3>
 
           <h4>Compare Mode</h4>
-          <p>Toggle the <strong>Compare</strong> button in the filter bar to show previous-period timeseries charts below the current Service Metrics. Compares the selected timeframe against the equivalent prior period.</p>
+          <p>Toggle the <strong>Compare</strong> button in the filter bar to show previous-period data alongside current data. Available on Service Metrics, Process Metrics, K8s Workloads (timeseries overlay), and Apdex (Prev Apdex / Δ columns). Compares the selected timeframe against the equivalent prior period.</p>
 
           <h4>Deployment Correlation</h4>
           <p>When deployment events (<code>CUSTOM_DEPLOYMENT</code>) exist, they appear at the top of the Service Metrics tab as a table. Correlate deploys with latency spikes or error increases.</p>
@@ -1023,6 +1496,48 @@ export const ServicesOverview = () => {
           <h4>Alert Rules</h4>
           <p>Define custom threshold rules (e.g., "Failure Rate &gt; 5%"). Rules are evaluated against current Service Details data. Violations are shown in real-time. Rules persist for the current session.</p>
 
+          <h4>Baselines</h4>
+          <p>Computes rolling baselines for each service using the selected timeframe. Shows average request rate, latency P90, and failure rate baselines with upper/lower bounds. Useful for spotting services that have drifted from their normal operating range.</p>
+
+          <h4>Maximize / Minimize Charts</h4>
+          <p>Click the <strong>⤢ Maximize</strong> icon on any chart tile to expand it to a full-screen overlay for detailed inspection. Click <strong>⤡ Minimize</strong> or press Escape to return. Available on Service Metrics, Process Metrics, and K8s Workloads charts.</p>
+
+          <h4>Service Topology Map</h4>
+          <p>Interactive SVG dependency map in the Dependencies tab showing caller → callee relationships as a directed graph. Features:</p>
+          <ul>
+            <li><strong>Focus Mode</strong> — Toggle to dim or hide unrelated services when hovering a node</li>
+            <li><strong>Click-to-Pin</strong> — Click a service node to lock the focus; click again or click the background to release</li>
+            <li><strong>Hover Highlighting</strong> — Hover over a node to see its upstream and downstream connections</li>
+          </ul>
+
+          <h4>Export to Notebook</h4>
+          <p>Click the <strong>📄 Export to Notebook</strong> button in the header to create a Dynatrace Notebook containing all current queries and results. The notebook is saved to your Document Store and opens in a new tab.</p>
+
+          <h4>Change Impact Analysis</h4>
+          <p>Compares service metrics <strong>3 hours before</strong> vs <strong>3 hours after</strong> each deployment event (<code>CUSTOM_DEPLOYMENT</code>). Shows per-deployment impact assessment:</p>
+          <ul>
+            <li><strong>Latency P90</strong> — Before/After values and Δ% change</li>
+            <li><strong>Error Rate</strong> — Before/After values and Δ percentage points</li>
+            <li><strong>Verdict</strong> — 🟩 Improved (latency dropped &gt;10%), ✅ Healthy (stable), 🟨 Warning (latency up 20–50% or error Δ 0.5–2pp), 🟥 Regression (latency up &gt;50% or error Δ &gt;2pp)</li>
+          </ul>
+          <p>Summary cards show total deployments, regressions, warnings, and healthy/improved counts at a glance.</p>
+
+          <h4>Apdex / User Satisfaction</h4>
+          <p>Calculates <strong>Apdex</strong> (Application Performance Index) per service from span response times using a configurable threshold <strong>T</strong> (default: {DEFAULT_APDEX_T}ms).</p>
+          <ul>
+            <li><strong>Satisfied</strong> — response ≤ T</li>
+            <li><strong>Tolerating</strong> — T &lt; response ≤ 4T</li>
+            <li><strong>Frustrated</strong> — response &gt; 4T</li>
+          </ul>
+          <p>Apdex = (Satisfied + Tolerating/2) / Total. Ratings: Excellent (≥0.94), Good (0.85–0.94), Fair (0.7–0.85), Poor (0.5–0.7), Unacceptable (&lt;0.5). Change T in Settings (⚙).</p>
+          <p>Supports <strong>Compare mode</strong> — toggle the Compare button to show <strong>Prev Apdex</strong> and <strong>Δ Apdex</strong> columns, comparing the current period against the equivalent prior period. Positive Δ (green) = improvement, negative Δ (red) = degradation.</p>
+
+          <h4>Service Name Deep Links</h4>
+          <p>Service names in all tables are clickable links that open the <strong>Distributed Traces</strong> app filtered to that service. This provides one-click drill-down from any tab into the full trace explorer for root-cause analysis.</p>
+
+          <h4>Scorecard Compare Colorization</h4>
+          <p>When Compare mode is enabled on the Scorecards tab, the <strong>Δ Score</strong> column is color-coded: <span style={{ color: GREEN, fontWeight: 700 }}>green (+)</span> = score improved, <span style={{ color: RED, fontWeight: 700 }}>red (−)</span> = score degraded.</p>
+
           <h3>Tips for SREs</h3>
           <ul>
             <li>Use the <strong>Service filter</strong> to narrow down to services you own.</li>
@@ -1034,6 +1549,12 @@ export const ServicesOverview = () => {
             <li>Check <strong>SLO & Error Budget</strong> to see which services are burning through their budget.</li>
             <li>Use <strong>Anomaly Detection</strong> to catch regressions vs baseline.</li>
             <li>Set up <strong>Alert Rules</strong> for metrics you care about — violations highlight instantly.</li>
+            <li>Use <strong>Change Impact Analysis</strong> after deployments to verify no regressions were introduced.</li>
+            <li>Maximize charts to inspect spikes in detail, then minimize to return to the dashboard.</li>
+            <li>Use the <strong>Topology Map</strong> focus/pin to trace the blast radius of a degraded service.</li>
+            <li><strong>Export to Notebook</strong> to share findings with your team or document an investigation.</li>
+            <li>Check <strong>Baselines</strong> to identify services that have drifted from their normal operating range.</li>
+            <li>Use <strong>Apdex</strong> to quickly gauge user satisfaction — services scoring below 0.85 need attention.</li>
             <li>Column widths are remembered within each tab session — resize to your preference.</li>
           </ul>
         </div>
@@ -1041,7 +1562,7 @@ export const ServicesOverview = () => {
 
       {/* ---- Main Content ---- */}
       <Flex flexDirection="column" padding={16} gap={16}>
-        <Tabs>
+        <Tabs selectedIndex={activeTabIndex} onChange={(idx) => setActiveTabIndex(idx)}>
           {/* ═══════════════════════ Overview ═══════════════════════ */}
           <Tab title="Overview">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
@@ -1142,7 +1663,7 @@ export const ServicesOverview = () => {
                       columns={[
                         { id: "Time", header: "Time", accessor: "Time" },
                         { id: "Event", header: "Deployment", accessor: "Event" },
-                        { id: "Service", header: "Service", accessor: "Service" },
+                        { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
                       ]}
                       sortable
                     >
@@ -1203,26 +1724,48 @@ export const ServicesOverview = () => {
                 <>
                   <SectionHeader title="Previous Period Comparison" />
                   <div className="svc-chart-grid-4">
-                    <ChartTile title="Requests Total (Previous)" description="Previous period">
+                    <CompareChartTile title="Requests Total (Previous)" description="Previous period" currentTitle="Requests Total" currentChart={<TimeseriesChart data={reqTotalTs as any} loading={reqTotalResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
                       <TimeseriesChart data={reqTotalPrevTs as any} loading={reqTotalPrev.isLoading} gapPolicy="connect">
                         <TimeseriesChart.Legend hidden />
                       </TimeseriesChart>
-                    </ChartTile>
-                    <ChartTile title="Latency P90 (Previous)" description="Previous period">
+                    </CompareChartTile>
+                    <CompareChartTile title="Latency P50 (Previous)" description="Previous period" currentTitle="Latency P50" currentChart={<TimeseriesChart data={latP50Ts as any} loading={latP50Result.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={latP50PrevTs as any} loading={latP50Prev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="Latency P90 (Previous)" description="Previous period" currentTitle="Latency P90" currentChart={<TimeseriesChart data={latP90Ts as any} loading={latP90Result.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
                       <TimeseriesChart data={latP90PrevTs as any} loading={latP90Prev.isLoading} gapPolicy="connect">
                         <TimeseriesChart.Legend hidden />
                       </TimeseriesChart>
-                    </ChartTile>
-                    <ChartTile title="Failure Rate % (Previous)" description="Previous period">
+                    </CompareChartTile>
+                    <CompareChartTile title="Failure Rate % (Previous)" description="Previous period" currentTitle="Failure Rate %" currentChart={<TimeseriesChart data={failRateTs as any} loading={failRateResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
                       <TimeseriesChart data={failRatePrevTs as any} loading={failRatePrev.isLoading} gapPolicy="connect">
                         <TimeseriesChart.Legend hidden />
                       </TimeseriesChart>
-                    </ChartTile>
-                    <ChartTile title="5xx Errors (Previous)" description="Previous period">
+                    </CompareChartTile>
+                  </div>
+                  <div className="svc-chart-grid-4">
+                    <CompareChartTile title="Requests by Status Code (Previous)" description="Previous period" currentTitle="Requests by Status Code" currentChart={<TimeseriesChart data={statusCodeTs as any} loading={statusCodeResult.isLoading} variant="bar" gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={statusCodePrevTs as any} loading={statusCodePrev.isLoading} variant="bar" gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="Failed Requests (Previous)" description="Previous period" currentTitle="Failed Requests" currentChart={<TimeseriesChart data={failedReqTs as any} loading={failedReqResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={failedReqPrevTs as any} loading={failedReqPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="5xx Errors (Previous)" description="Previous period" currentTitle="5xx Errors" currentChart={<TimeseriesChart data={http5xxTs as any} loading={http5xxResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
                       <TimeseriesChart data={http5xxPrevTs as any} loading={http5xxPrev.isLoading} gapPolicy="connect">
                         <TimeseriesChart.Legend hidden />
                       </TimeseriesChart>
-                    </ChartTile>
+                    </CompareChartTile>
+                    <CompareChartTile title="4xx Errors (Previous)" description="Previous period" currentTitle="4xx Errors" currentChart={<TimeseriesChart data={http4xxTs as any} loading={http4xxResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={http4xxPrevTs as any} loading={http4xxPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
                   </div>
                 </>
               )}
@@ -1255,6 +1798,35 @@ export const ServicesOverview = () => {
                   </TimeseriesChart>
                 </ChartTile>
               </div>
+
+              {/* Comparison Mode — Previous Period */}
+              {compareMode && (
+                <>
+                  <SectionHeader title="Previous Period Comparison" />
+                  <div className="svc-chart-grid-2">
+                    <CompareChartTile title="Process CPU Usage % (Previous)" description="Previous period" currentTitle="Process CPU Usage %" currentChart={<TimeseriesChart data={procCpuTs as any} loading={procCpuResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={procCpuPrevTs as any} loading={procCpuPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="Process Memory Usage % (Previous)" description="Previous period" currentTitle="Process Memory Usage %" currentChart={<TimeseriesChart data={procMemPctTs as any} loading={procMemPctResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={procMemPctPrevTs as any} loading={procMemPctPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="Process Memory Used (Previous)" description="Previous period" currentTitle="Process Memory Used" currentChart={<TimeseriesChart data={procMemUsedTs as any} loading={procMemUsedResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={procMemUsedPrevTs as any} loading={procMemUsedPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="GC Suspension Time % (Previous)" description="Previous period" currentTitle="GC Suspension Time %" currentChart={<TimeseriesChart data={procGcTs as any} loading={procGcResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={procGcPrevTs as any} loading={procGcPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                  </div>
+                </>
+              )}
             </Flex>
           </Tab>
 
@@ -1277,6 +1849,25 @@ export const ServicesOverview = () => {
                   </TimeseriesChart>
                 </ChartTile>
               </div>
+
+              {/* Comparison Mode — Previous Period */}
+              {compareMode && (
+                <>
+                  <SectionHeader title="Previous Period Comparison" />
+                  <div className="svc-chart-grid-2">
+                    <CompareChartTile title="K8s Workload CPU Usage (Previous)" description="Previous period" currentTitle="K8s Workload CPU Usage" currentChart={<TimeseriesChart data={k8sCpuTs as any} loading={k8sCpuResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={k8sCpuPrevTs as any} loading={k8sCpuPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                    <CompareChartTile title="K8s Workload Memory Usage (Previous)" description="Previous period" currentTitle="K8s Workload Memory Usage" currentChart={<TimeseriesChart data={k8sMemTs as any} loading={k8sMemResult.isLoading} gapPolicy="connect"><TimeseriesChart.Legend hidden /></TimeseriesChart>}>
+                      <TimeseriesChart data={k8sMemPrevTs as any} loading={k8sMemPrev.isLoading} gapPolicy="connect">
+                        <TimeseriesChart.Legend hidden />
+                      </TimeseriesChart>
+                    </CompareChartTile>
+                  </div>
+                </>
+              )}
             </Flex>
           </Tab>
 
@@ -1307,7 +1898,7 @@ export const ServicesOverview = () => {
                   <DataTable
                     data={sloData}
                     columns={[
-                      { id: "Service", header: "Service", accessor: "Service" },
+                      { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
                       { id: "ErrorRate", header: "Error Rate %", accessor: "Error Rate %", columnType: "number" as const },
                       { id: "SloTarget", header: "SLO Target", accessor: "SLO Target" },
                       { id: "BudgetUsed", header: "Budget Used %", accessor: "Budget Used %", columnType: "number" as const,
@@ -1351,42 +1942,60 @@ export const ServicesOverview = () => {
                 </div>
               </div>
               {svcDetailsResult.isLoading ? <LoadingState /> : (
-                <div className="svc-table-tile">
-                  <DataTable
-                    data={scorecardData}
-                    columns={[
-                      { id: "Service", header: "Service", accessor: "Service" },
-                      { id: "Score", header: "Score", accessor: "Score", columnType: "number" as const,
-                        thresholds: [
-                          { comparator: "less-than" as const, value: 60, backgroundColor: RED, color: "#fff" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 60, backgroundColor: YELLOW, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 75, backgroundColor: GREEN, color: "#000" },
-                        ] },
-                      { id: "Grade", header: "Grade", accessor: "Grade",
-                        cell: ({ value }: { value: string }) => (
-                          <div style={{ textAlign: "center", width: "100%" }}>
-                            <span style={{ fontWeight: 700, fontSize: 16, color: value === "A" ? GREEN : value === "B" ? "#4CAF50" : value === "C" ? YELLOW : RED }}>
+                <>
+                  {scorecardCompare && scorecardPrevResult.isLoading && (
+                    <Flex alignItems="center" gap={8} style={{ padding: "8px 16px", background: "var(--dt-colors-surface-default)", borderRadius: 8, marginBottom: 8 }}>
+                      <ProgressCircle size="small" />
+                      <Text>Loading previous period data for comparison…</Text>
+                    </Flex>
+                  )}
+                  <div className="svc-table-tile">
+                    <DataTable
+                      data={scorecardCompare ? scorecardCompareData : scorecardData}
+                      columns={[
+                        { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
+                        { id: "Score", header: "Score", accessor: "Score", columnType: "number" as const,
+                          thresholds: [
+                            { comparator: "less-than" as const, value: 60, backgroundColor: RED, color: "#fff" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 60, backgroundColor: YELLOW, color: "#000" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 75, backgroundColor: GREEN, color: "#000" },
+                          ] },
+                        ...(scorecardCompare ? [
+                          { id: "PrevScore", header: "Prev Score", accessor: "Prev Score" },
+                          { id: "DeltaScore", header: "Δ Score", accessor: "Δ Score",
+                            cell: ({ value }: { value: string }) => {
+                              const n = Number(value);
+                              const color = isNaN(n) || n === 0 ? undefined : n > 0 ? GREEN : RED;
+                              return <span style={{ fontWeight: 700, color }}>{isNaN(n) ? value : n > 0 ? `+${value}` : value}</span>;
+                            } },
+                          { id: "PrevGrade", header: "Prev Grade", accessor: "Prev Grade" },
+                        ] : []),
+                        { id: "Grade", header: "Grade", accessor: "Grade",
+                          cell: ({ value }: { value: string }) => (
+                            <div style={{ textAlign: "center", width: "100%" }}>
+                              <span style={{ fontWeight: 700, fontSize: 16, color: value === "A" ? GREEN : value === "B" ? "#4CAF50" : value === "C" ? YELLOW : RED }}>
+                                {value}
+                              </span>
+                            </div>
+                          ) },
+                        { id: "ErrorScore", header: "Error (35%)", accessor: "Error Score", columnType: "number" as const },
+                        { id: "LatencyScore", header: "Latency (20%)", accessor: "Latency Score", columnType: "number" as const },
+                        { id: "ProblemScore", header: "Problem (25%)", accessor: "Problem Score", columnType: "number" as const },
+                        { id: "5xxScore", header: "5xx (20%)", accessor: "5xx Score", columnType: "number" as const },
+                        { id: "Status", header: "Status", accessor: "Status",
+                          cell: ({ value }: { value: string }) => (
+                            <span className={`svc-status-badge ${value === "PROBLEM" ? "svc-status-active" : "svc-status-closed"}`}>
                               {value}
                             </span>
-                          </div>
-                        ) },
-                      { id: "ErrorScore", header: "Error (35%)", accessor: "Error Score", columnType: "number" as const },
-                      { id: "LatencyScore", header: "Latency (20%)", accessor: "Latency Score", columnType: "number" as const },
-                      { id: "ProblemScore", header: "Problem (25%)", accessor: "Problem Score", columnType: "number" as const },
-                      { id: "5xxScore", header: "5xx (20%)", accessor: "5xx Score", columnType: "number" as const },
-                      { id: "Status", header: "Status", accessor: "Status",
-                        cell: ({ value }: { value: string }) => (
-                          <span className={`svc-status-badge ${value === "PROBLEM" ? "svc-status-active" : "svc-status-closed"}`}>
-                            {value}
-                          </span>
-                        ) },
-                    ]}
-                    sortable
-                    resizable
-                  >
-                    <DataTable.Pagination defaultPageSize={25} />
-                  </DataTable>
-                </div>
+                          ) },
+                      ]}
+                      sortable
+                      resizable
+                    >
+                      <DataTable.Pagination defaultPageSize={25} />
+                    </DataTable>
+                  </div>
+                </>
               )}
             </Flex>
           </Tab>
@@ -1394,7 +2003,7 @@ export const ServicesOverview = () => {
           {/* ═══════════════════════ Dependencies ═══════════════════════ */}
           <Tab title="Dependencies">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
-              <SectionHeader title="Service Dependency Map" />
+              <SectionHeader title="Service Topology Map" />
               {dependenciesResult.isLoading ? <LoadingState /> : dependenciesData.length === 0 ? (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
                   <Strong>No service dependencies found</Strong>
@@ -1415,6 +2024,18 @@ export const ServicesOverview = () => {
                       <div style={{ fontSize: 32, fontWeight: 700, color: "#4589FF" }}>{new Set(dependenciesData.map((d) => d.Callee)).size}</div>
                     </div>
                   </Flex>
+                  <div className="svc-chart-tile" style={{ minHeight: 500 }}>
+                    <div className="chart-title-row">
+                      <div className="chart-title">Interactive Topology</div>
+                    </div>
+                    <div className="chart-description">
+                      Nodes sized by request volume, colored by health. Hover to highlight connections. Arrows show call direction (Caller → Callee).
+                    </div>
+                    <div className="chart-body">
+                      <ServiceTopology edges={dependenciesData} services={svcDetailsData} />
+                    </div>
+                  </div>
+                  <SectionHeader title="Dependency Table" />
                   <div className="svc-table-tile">
                     <DataTable
                       data={dependenciesData}
@@ -1545,7 +2166,7 @@ export const ServicesOverview = () => {
                   <DataTable
                     data={anomalyData}
                     columns={[
-                      { id: "Service", header: "Service", accessor: "Service" },
+                      { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
                       { id: "Anomaly", header: "Anomaly", accessor: "Anomaly",
                         cell: ({ value }: { value: string }) => (
                           <span style={{ fontWeight: 700, color: value === "YES" ? RED : GREEN }}>{value}</span>
@@ -1618,6 +2239,356 @@ export const ServicesOverview = () => {
                     <DataTable.Pagination defaultPageSize={25} />
                   </DataTable>
                 </div>
+              )}
+            </Flex>
+          </Tab>
+
+          {/* ═══════════════════════ Change Impact Analysis ═══════════════════════ */}
+          <Tab title="Change Impact">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              <SectionHeader title="Change Impact Analysis — Deployment Before/After" />
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                <div className="chart-description">
+                  Compares service metrics <strong>3 hours before</strong> vs <strong>3 hours after</strong> each deployment.
+                  Latency Δ% and Error Δ (percentage points) indicate regression risk.
+                  Verdict: 🟩 Improved | ✅ Healthy | 🟨 Warning | 🟥 Regression
+                </div>
+              </div>
+              {deploymentsResult.isLoading || changeImpactResult.isLoading ? <LoadingState /> : changeImpactData.length === 0 ? (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
+                  <Strong>No deployment events found in the last {timeframeDays} days</Strong>
+                </div>
+              ) : (
+                <>
+                  <Flex gap={16} flexWrap="wrap">
+                    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 200px" }}>
+                      <div className="chart-title">Deployments</div>
+                      <div style={{ fontSize: 32, fontWeight: 700, color: "#4589FF" }}>{changeImpactData.length}</div>
+                    </div>
+                    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 200px" }}>
+                      <div className="chart-title">Regressions</div>
+                      <div style={{ fontSize: 32, fontWeight: 700, color: RED }}>{changeImpactData.filter((d) => d.Verdict.includes("Regression")).length}</div>
+                    </div>
+                    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 200px" }}>
+                      <div className="chart-title">Warnings</div>
+                      <div style={{ fontSize: 32, fontWeight: 700, color: YELLOW }}>{changeImpactData.filter((d) => d.Verdict.includes("Warning")).length}</div>
+                    </div>
+                    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 200px" }}>
+                      <div className="chart-title">Healthy / Improved</div>
+                      <div style={{ fontSize: 32, fontWeight: 700, color: GREEN }}>{changeImpactData.filter((d) => d.Verdict.includes("Healthy") || d.Verdict.includes("Improved")).length}</div>
+                    </div>
+                  </Flex>
+                  <div className="svc-table-tile">
+                    <DataTable
+                      data={changeImpactData}
+                      columns={[
+                        { id: "Time", header: "Time", accessor: "Time" },
+                        { id: "Deployment", header: "Deployment", accessor: "Deployment" },
+                        { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
+                        { id: "LatBefore", header: "Latency P90 (Before)", accessor: "Latency P90 (Before)", columnType: "number" as const },
+                        { id: "LatAfter", header: "Latency P90 (After)", accessor: "Latency P90 (After)", columnType: "number" as const },
+                        { id: "LatDelta", header: "Latency Δ %", accessor: "Latency Δ %", columnType: "number" as const,
+                          thresholds: [
+                            { comparator: "less-than" as const, value: -10, backgroundColor: GREEN, color: "#000" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 20, backgroundColor: YELLOW, color: "#000" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 50, backgroundColor: RED, color: "#fff" },
+                          ] },
+                        { id: "ErrBefore", header: "Error Rate (Before)", accessor: "Error Rate (Before)", columnType: "number" as const },
+                        { id: "ErrAfter", header: "Error Rate (After)", accessor: "Error Rate (After)", columnType: "number" as const },
+                        { id: "ErrDelta", header: "Error Δ pp", accessor: "Error Δ pp", columnType: "number" as const,
+                          thresholds: [
+                            { comparator: "less-than" as const, value: 0, backgroundColor: GREEN, color: "#000" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 0.5, backgroundColor: YELLOW, color: "#000" },
+                            { comparator: "greater-than-or-equal-to" as const, value: 2, backgroundColor: RED, color: "#fff" },
+                          ] },
+                        { id: "Verdict", header: "Verdict", accessor: "Verdict" },
+                      ]}
+                      sortable
+                      resizable
+                    >
+                      <DataTable.Pagination defaultPageSize={25} />
+                    </DataTable>
+                  </div>
+                </>
+              )}
+            </Flex>
+          </Tab>
+
+          {/* ═══════════════════════ Apdex / User Satisfaction ═══════════════════════ */}
+          <Tab title="Apdex">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              <SectionHeader title={`Apdex / User Satisfaction — Threshold T = ${apdexT}ms`} />
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                <div className="chart-description">
+                  <strong>Apdex</strong> = (Satisfied + Tolerating/2) / Total.
+                  <strong> Satisfied:</strong> response ≤ {apdexT}ms |
+                  <strong> Tolerating:</strong> {apdexT}ms – {apdexT * 4}ms |
+                  <strong> Frustrated:</strong> &gt; {apdexT * 4}ms.
+                  Change <strong>T</strong> in Settings (⚙).
+                </div>
+              </div>
+              {apdexResult.isLoading ? <LoadingState /> : apdexData.length === 0 ? (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
+                  <Strong>No span data found in the last {timeframeDays} days</Strong>
+                </div>
+              ) : (
+                <>
+                  {/* Summary cards */}
+                  {(() => {
+                    const prevLoading = apdexCompare && apdexPrevResult.isLoading;
+                    const prevValues = Array.from(apdexPrevMap.values());
+                    const prevAvg = prevValues.length > 0 ? prevValues.reduce((s, v) => s + v, 0) / prevValues.length : null;
+                    const prevExcellent = prevValues.filter((v) => v >= 0.94).length;
+                    const prevGood = prevValues.filter((v) => v >= 0.85 && v < 0.94).length;
+                    const prevFair = prevValues.filter((v) => v >= 0.7 && v < 0.85).length;
+                    const prevPoor = prevValues.filter((v) => v < 0.7).length;
+                    const curAvg = apdexData.length > 0 ? apdexData.reduce((s, d) => s + d.ApdexNum, 0) / apdexData.length : 0;
+                    const curExcellent = apdexData.filter((d) => d.ApdexNum >= 0.94).length;
+                    const curGood = apdexData.filter((d) => d.ApdexNum >= 0.85 && d.ApdexNum < 0.94).length;
+                    const curFair = apdexData.filter((d) => d.ApdexNum >= 0.7 && d.ApdexNum < 0.85).length;
+                    const curPoor = apdexData.filter((d) => d.ApdexNum < 0.7).length;
+                    const delta = (cur: number, prev: number | null) => {
+                      if (prev === null) return null;
+                      return cur - prev;
+                    };
+                    const deltaTag = (d: number | null, higherIsGood = true) => {
+                      if (prevLoading) return <span style={{ fontSize: 13, fontWeight: 400, opacity: 0.6 }}>Loading…</span>;
+                      if (!apdexCompare || d === null) return null;
+                      const sign = d > 0 ? "+" : "";
+                      const isNum = typeof d === "number" && Math.abs(d) >= 0.005;
+                      const color = !isNum || d === 0 ? "var(--dt-colors-text-secondary)" : (d > 0) === higherIsGood ? GREEN : RED;
+                      return <div style={{ fontSize: 13, fontWeight: 500, color, marginTop: 2 }}>{sign}{typeof d === "number" && Math.abs(d) < 100 ? d.toFixed(2) : d}{d !== 0 && isNum ? (d > 0 ? " ▲" : " ▼") : ""}</div>;
+                    };
+                    const deltaTagInt = (d: number | null, higherIsGood = true) => {
+                      if (prevLoading) return <span style={{ fontSize: 13, fontWeight: 400, opacity: 0.6 }}>Loading…</span>;
+                      if (!apdexCompare || d === null) return null;
+                      const sign = d > 0 ? "+" : "";
+                      const color = d === 0 ? "var(--dt-colors-text-secondary)" : (d > 0) === higherIsGood ? GREEN : RED;
+                      return <div style={{ fontSize: 13, fontWeight: 500, color, marginTop: 2 }}>{sign}{d}{d !== 0 ? (d > 0 ? " ▲" : " ▼") : ""}</div>;
+                    };
+                    return (
+                    <Flex gap={16} flexWrap="wrap">
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Services</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: "#4589FF" }}>{apdexData.length}</div>
+                        {deltaTagInt(delta(apdexData.length, prevValues.length > 0 ? prevValues.length : null))}
+                      </div>
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Avg Apdex</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: curAvg >= 0.94 ? GREEN : curAvg >= 0.85 ? GREEN : curAvg >= 0.7 ? YELLOW : RED }}>
+                          {curAvg.toFixed(2)}
+                        </div>
+                        {deltaTag(delta(curAvg, prevAvg), true)}
+                      </div>
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Excellent (≥0.94)</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: GREEN }}>{curExcellent} <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.7 }}>services</span></div>
+                        {deltaTagInt(delta(curExcellent, prevValues.length > 0 ? prevExcellent : null), true)}
+                      </div>
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Good (0.85–0.94)</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: GREEN }}>{curGood} <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.7 }}>services</span></div>
+                        {deltaTagInt(delta(curGood, prevValues.length > 0 ? prevGood : null), true)}
+                      </div>
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Fair (0.7–0.85)</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: YELLOW }}>{curFair} <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.7 }}>services</span></div>
+                        {deltaTagInt(delta(curFair, prevValues.length > 0 ? prevFair : null), false)}
+                      </div>
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 180px" }}>
+                        <div className="chart-title">Poor / Unacceptable (&lt;0.7)</div>
+                        <div style={{ fontSize: 32, fontWeight: 700, color: RED }}>{curPoor} <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.7 }}>services</span></div>
+                        {deltaTagInt(delta(curPoor, prevValues.length > 0 ? prevPoor : null), false)}
+                      </div>
+                    </Flex>
+                    );
+                  })()}
+                  {/* Apdex table */}
+                  {apdexCompare && apdexPrevResult.isLoading && (
+                    <Flex alignItems="center" gap={8} style={{ padding: "8px 16px", background: "var(--dt-colors-surface-default)", borderRadius: 8, marginBottom: 8 }}>
+                      <ProgressCircle size="small" />
+                      <Text>Loading previous period data for comparison…</Text>
+                    </Flex>
+                  )}
+                  <div className="svc-table-tile">
+                    <DataTable
+                      data={apdexCompare ? apdexCompareData : apdexData}
+                      columns={[
+                        { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
+                        { id: "Total", header: "Total Requests", accessor: "Total", columnType: "number" as const },
+                        { id: "Apdex", header: "Apdex", accessor: "Apdex" },
+                        ...(apdexCompare ? [
+                          { id: "PrevApdex", header: "Prev Apdex", accessor: "Prev Apdex" },
+                          { id: "DeltaApdex", header: "Δ Apdex", accessor: "Δ Apdex" },
+                        ] : []),
+                        { id: "Rating", header: "Rating", accessor: "Rating",
+                          thresholds: [
+                            { comparator: "equal-to" as const, value: "Excellent", backgroundColor: GREEN, color: "#000" },
+                            { comparator: "equal-to" as const, value: "Good", backgroundColor: "#2da44e", color: "#fff" },
+                            { comparator: "equal-to" as const, value: "Fair", backgroundColor: YELLOW, color: "#000" },
+                            { comparator: "equal-to" as const, value: "Poor", backgroundColor: RED, color: "#fff" },
+                            { comparator: "equal-to" as const, value: "Unacceptable", backgroundColor: RED, color: "#fff" },
+                          ] },
+                        { id: "Satisfied", header: "Satisfied", accessor: "Satisfied", columnType: "number" as const },
+                        { id: "SatisfiedPct", header: "Satisfied %", accessor: "Satisfied %" },
+                        { id: "Tolerating", header: "Tolerating", accessor: "Tolerating", columnType: "number" as const },
+                        { id: "ToleratingPct", header: "Tolerating %", accessor: "Tolerating %" },
+                        { id: "Frustrated", header: "Frustrated", accessor: "Frustrated", columnType: "number" as const },
+                        { id: "FrustratedPct", header: "Frustrated %", accessor: "Frustrated %" },
+                      ]}
+                      sortable
+                      resizable
+                    >
+                      <DataTable.Pagination defaultPageSize={25} />
+                    </DataTable>
+                  </div>
+                </>
+              )}
+            </Flex>
+          </Tab>
+
+          {/* ═══════════════════════ Baselines ═══════════════════════ */}
+          <Tab title="Baselines">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              <SectionHeader title="Service Baselines — Track Latency & Failure Rate Over Time" />
+              <div className="svc-table-tile" style={{ padding: 16 }}>
+                <strong>How to use:</strong> Save a snapshot of the current service metrics as a named baseline (e.g., "Before deployment", "Post scale-out"). Compare future data against these baselines to verify that changes had the expected effect. Metrics are baselined for the <strong>top 10 services by request count</strong>: Latency Avg, P50, P90, P99 (µs), and Failure Rate (%).
+              </div>
+
+              {svcDetailsResult.isLoading ? (
+                <LoadingState />
+              ) : svcDetailsData.length > 0 ? (
+                <>
+                  <Heading level={6}>Current Top 10 Services (by Request Count)</Heading>
+                  <DataTable
+                    data={svcDetailsData.slice(0, 10).sort((a, b) => (b.Requests ?? 0) - (a.Requests ?? 0)).map((s) => ({
+                      Service: s.Service,
+                      "dt.entity.service": s["dt.entity.service"],
+                      "Latency Avg (µs)": Math.round((s.Latency_Avg ?? 0) * 100) / 100,
+                      "Latency P50 (µs)": Math.round((s.Latency_p50 ?? 0) * 100) / 100,
+                      "Latency P90 (µs)": Math.round((s.Latency_p90 ?? 0) * 100) / 100,
+                      "Latency P99 (µs)": Math.round((s.Latency_p99 ?? 0) * 100) / 100,
+                      "Failure Rate (%)": Math.round((s.FailureRate ?? 0) * 100) / 100,
+                    }))}
+                    columns={[
+                      { id: "svc", header: "Service", accessor: "Service", cell: serviceLinkCell },
+                      { id: "avg", header: "Latency Avg (µs)", accessor: "Latency Avg (µs)", columnType: "number" as const },
+                      { id: "p50", header: "Latency P50 (µs)", accessor: "Latency P50 (µs)", columnType: "number" as const },
+                      { id: "p90", header: "Latency P90 (µs)", accessor: "Latency P90 (µs)", columnType: "number" as const },
+                      { id: "p99", header: "Latency P99 (µs)", accessor: "Latency P99 (µs)", columnType: "number" as const },
+                      { id: "fr", header: "Failure Rate (%)", accessor: "Failure Rate (%)", columnType: "number" as const },
+                    ]}
+                    sortable
+                    resizable
+                  />
+
+                  <Flex gap={8} alignItems="flex-end" flexWrap="wrap">
+                    <Flex flexDirection="column" gap={4} style={{ flex: "1 1 200px" }}>
+                      <Strong>Baseline Name</Strong>
+                      <input
+                        value={baselineName}
+                        onChange={(e) => setBaselineName(e.target.value)}
+                        placeholder="e.g. Pre-deployment baseline"
+                        style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid rgba(99,130,191,0.3)", background: "rgba(30,35,55,0.7)", color: "#d0d4e0", fontSize: 13 }}
+                      />
+                    </Flex>
+                    <Button
+                      variant="emphasized"
+                      onClick={() => {
+                        if (svcDetailsData.length === 0 || !baselineName.trim()) return;
+                        const top10 = [...svcDetailsData].sort((a, b) => (b.Requests ?? 0) - (a.Requests ?? 0)).slice(0, 10);
+                        setBaselines((prev) => [
+                          ...prev,
+                          {
+                            id: Date.now(),
+                            name: baselineName.trim(),
+                            timestamp: new Date().toLocaleString(),
+                            services: top10.map((s) => ({
+                              service: s.Service,
+                              latencyAvg: Math.round((s.Latency_Avg ?? 0) * 100) / 100,
+                              latencyP50: Math.round((s.Latency_p50 ?? 0) * 100) / 100,
+                              latencyP90: Math.round((s.Latency_p90 ?? 0) * 100) / 100,
+                              latencyP99: Math.round((s.Latency_p99 ?? 0) * 100) / 100,
+                              failureRate: Math.round((s.FailureRate ?? 0) * 100) / 100,
+                            })),
+                          },
+                        ]);
+                        setBaselineName("");
+                      }}
+                      disabled={svcDetailsData.length === 0 || !baselineName.trim()}
+                    >
+                      Save Current as Baseline
+                    </Button>
+                  </Flex>
+                </>
+              ) : null}
+
+              {baselines.length > 0 && (
+                <>
+                  <Heading level={6}>Saved Baselines vs Current</Heading>
+                  <DataTable
+                    data={baselines.flatMap((b) => {
+                      const currentMap = new Map(svcDetailsData.map((s) => [s.Service, s]));
+                      return b.services.map((snap) => {
+                        const now = currentMap.get(snap.service);
+                        const r = (n: number) => Math.round(n * 100) / 100;
+                        return {
+                          Baseline: b.name,
+                          "Saved At": b.timestamp,
+                          Service: snap.service,
+                          "dt.entity.service": now ? now["dt.entity.service"] : "",
+                          "Avg (then)": snap.latencyAvg,
+                          "Avg (now)": now ? r(now.Latency_Avg ?? 0) : 0,
+                          "Avg \u0394": now ? r((now.Latency_Avg ?? 0) - snap.latencyAvg) : 0,
+                          "P50 (then)": snap.latencyP50,
+                          "P50 (now)": now ? r(now.Latency_p50 ?? 0) : 0,
+                          "P50 \u0394": now ? r((now.Latency_p50 ?? 0) - snap.latencyP50) : 0,
+                          "P90 (then)": snap.latencyP90,
+                          "P90 (now)": now ? r(now.Latency_p90 ?? 0) : 0,
+                          "P90 \u0394": now ? r((now.Latency_p90 ?? 0) - snap.latencyP90) : 0,
+                          "P99 (then)": snap.latencyP99,
+                          "P99 (now)": now ? r(now.Latency_p99 ?? 0) : 0,
+                          "P99 \u0394": now ? r((now.Latency_p99 ?? 0) - snap.latencyP99) : 0,
+                          "Fail% (then)": snap.failureRate,
+                          "Fail% (now)": now ? r(now.FailureRate ?? 0) : 0,
+                          "Fail% \u0394": now ? r((now.FailureRate ?? 0) - snap.failureRate) : 0,
+                          _baselineId: b.id,
+                        };
+                      });
+                    })}
+                    columns={[
+                      { id: "bl", header: "Baseline", accessor: "Baseline" },
+                      { id: "saved", header: "Saved At", accessor: "Saved At" },
+                      { id: "svc", header: "Service", accessor: "Service", cell: serviceLinkCell },
+                      { id: "avgThen", header: "Avg (then)", accessor: "Avg (then)", columnType: "number" as const },
+                      { id: "avgNow", header: "Avg (now)", accessor: "Avg (now)", columnType: "number" as const },
+                      { id: "avgD", header: "Avg \u0394", accessor: "Avg \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p50Then", header: "P50 (then)", accessor: "P50 (then)", columnType: "number" as const },
+                      { id: "p50Now", header: "P50 (now)", accessor: "P50 (now)", columnType: "number" as const },
+                      { id: "p50D", header: "P50 \u0394", accessor: "P50 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p90Then", header: "P90 (then)", accessor: "P90 (then)", columnType: "number" as const },
+                      { id: "p90Now", header: "P90 (now)", accessor: "P90 (now)", columnType: "number" as const },
+                      { id: "p90D", header: "P90 \u0394", accessor: "P90 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p99Then", header: "P99 (then)", accessor: "P99 (then)", columnType: "number" as const },
+                      { id: "p99Now", header: "P99 (now)", accessor: "P99 (now)", columnType: "number" as const },
+                      { id: "p99D", header: "P99 \u0394", accessor: "P99 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "frThen", header: "Fail% (then)", accessor: "Fail% (then)", columnType: "number" as const },
+                      { id: "frNow", header: "Fail% (now)", accessor: "Fail% (now)", columnType: "number" as const },
+                      { id: "frD", header: "Fail% \u0394", accessor: "Fail% \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                    ]}
+                    sortable
+                    resizable
+                  >
+                    <DataTable.Pagination defaultPageSize={10} />
+                  </DataTable>
+                  <Flex gap={8} flexWrap="wrap">
+                    {baselines.map((b) => (
+                      <Button key={b.id} variant="default" onClick={() => setBaselines((prev) => prev.filter((p) => p.id !== b.id))}>
+                        Remove "{b.name}"
+                      </Button>
+                    ))}
+                  </Flex>
+                </>
               )}
             </Flex>
           </Tab>
@@ -1708,7 +2679,7 @@ export const ServicesOverview = () => {
                   <DataTable
                     data={alertViolations}
                     columns={[
-                      { id: "Service", header: "Service", accessor: "Service" },
+                      { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
                       { id: "Rule", header: "Rule", accessor: "Rule" },
                       { id: "Value", header: "Current Value", accessor: "Value", columnType: "number" as const },
                       { id: "Threshold", header: "Threshold", accessor: "Threshold", columnType: "number" as const },

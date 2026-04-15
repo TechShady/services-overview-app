@@ -2020,9 +2020,11 @@ export const ServicesOverview = () => {
                   <Text>Min Request Count</Text>
                   <div style={{ width: 120 }}>
                     <Select value={String(depMinRequests)} onChange={(val) => setDepMinRequests(Number(val))}>
-                      {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((n) => (
-                        <Select.Option key={n} value={String(n)}>{n}</Select.Option>
-                      ))}
+                      <Select.Content>
+                        {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((n) => (
+                          <Select.Option key={n} value={String(n)}>{n}</Select.Option>
+                        ))}
+                      </Select.Content>
                     </Select>
                   </div>
                 </Flex>

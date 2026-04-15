@@ -322,7 +322,8 @@ export const ServicesOverview = () => {
   const [apdexT, setApdexT] = useState<number>(DEFAULT_APDEX_T);
 
   // Dependencies filter state
-  const [depMinRequests, setDepMinRequests] = useState<number>(10);
+  const DEP_FILTER_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+  const [depTopN, setDepTopN] = useState<number>(0);
 
   // --- Queries ---
 
@@ -584,19 +585,19 @@ export const ServicesOverview = () => {
   // ─── Dependencies ───
   const dependenciesData = useMemo(() => {
     if (!dependenciesResult.data?.records) return [];
-    // Build a map of service name → total requests from svcDetailsData
-    const requestMap = new Map<string, number>();
-    for (const svc of svcDetailsData) {
-      requestMap.set(svc.Service, svc.Requests ?? 0);
+    // Build top-N service set by request count
+    let allowedCallers: Set<string> | null = null;
+    if (depTopN > 0 && svcDetailsData.length > 0) {
+      const sorted = [...svcDetailsData].sort((a, b) => (b.Requests ?? 0) - (a.Requests ?? 0));
+      allowedCallers = new Set(sorted.slice(0, depTopN).map((s) => s.Service));
     }
     return dependenciesResult.data.records
       .map((r) => ({
         Caller: (r["Caller"] as string) ?? "",
         Callee: (r["Callee"] as string) ?? "",
-        RequestCount: requestMap.get((r["Caller"] as string) ?? "") ?? 0,
       }))
-      .filter((d) => d.RequestCount >= depMinRequests);
-  }, [dependenciesResult.data, svcDetailsData, depMinRequests]);
+      .filter((d) => !allowedCallers || allowedCallers.has(d.Caller));
+  }, [dependenciesResult.data, svcDetailsData, depTopN]);
 
   // ─── Endpoint Heatmap ───
   const endpointHeatmapData: HoneycombTileNumericData[] = useMemo(() => {
@@ -2017,12 +2018,15 @@ export const ServicesOverview = () => {
               <Flex alignItems="center" gap={12}>
                 <SectionHeader title="Service Topology Map" />
                 <Flex alignItems="center" gap={8} style={{ marginLeft: "auto" }}>
-                  <Text>Min Request Count</Text>
-                  <div style={{ width: 120 }}>
-                    <Select value={String(depMinRequests)} onChange={(val) => setDepMinRequests(Number(val))}>
+                  <Text>Top Services</Text>
+                  <div style={{ width: 140 }}>
+                    <Select
+                      value={depTopN}
+                      onChange={(val) => { if (val != null) setDepTopN(val as number); }}
+                    >
                       <Select.Content>
-                        {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((n) => (
-                          <Select.Option key={n} value={String(n)}>{n}</Select.Option>
+                        {DEP_FILTER_OPTIONS.map((n) => (
+                          <Select.Option key={n} value={n}>{n === 0 ? "All" : String(n)}</Select.Option>
                         ))}
                       </Select.Content>
                     </Select>
@@ -2067,7 +2071,6 @@ export const ServicesOverview = () => {
                       columns={[
                         { id: "Caller", header: "Caller (→)", accessor: "Caller" },
                         { id: "Callee", header: "Callee", accessor: "Callee" },
-                        { id: "RequestCount", header: "Request Count", accessor: "RequestCount" },
                       ]}
                       sortable
                       resizable

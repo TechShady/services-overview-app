@@ -1,35 +1,42 @@
+app-bundle-version: 0.1.0
+id: my.services.overview.app
 name: Services Overview
-version: "0.20.7"
+version: "0.21.2"
 description: SRE dashboard for service health, requests, latency and errors
-appId: my.services.overview.app
-platform: dynatrace-app
-author: John Kelly
-created: "2026-04-15"
-
-files:
-  - app.config.json
-  - package.json
-  - package-lock.json
-  - tsconfig.eslint.json
-  - eslint.config.mjs
-  - .gitignore
-  - ui/main.tsx
-  - ui/tsconfig.json
-  - ui/app/App.tsx
-  - ui/app/queries.ts
-  - ui/app/components/Header.tsx
-  - ui/app/components/ServiceTopology.tsx
-  - ui/app/pages/ServicesOverview.tsx
-  - ui/app/pages/ServicesOverview.css
-
+scopes:
+  - name: storage:logs:read
+    comment: read log data
+  - name: storage:buckets:read
+    comment: read storage buckets
+  - name: storage:metrics:read
+    comment: read host and service metrics
+  - name: storage:entities:read
+    comment: read entity data
+  - name: storage:events:read
+    comment: read Davis problems and events
+  - name: storage:spans:read
+    comment: read distributed traces
+  - name: storage:system:read
+    comment: read system data
+  - name: environment-api:metrics:read
+    comment: read metrics v2
+  - name: environment-api:entities:read
+    comment: read entities v2
+  - name: state:user-app-states:read
+    comment: read user alert rules
+  - name: state:user-app-states:write
+    comment: save user alert rules
+  - name: document:documents:write
+    comment: export to notebook
+  - name: document:documents:read
+    comment: read notebooks
+icon:
+  name: icon.svg
+  generated: true
 dependencies:
-  node: ">=16.13.0"
-  dt-app: "1.8.1"
-
-setup:
-  - npm install
-  - npm run start
-
-deploy:
-  - npm run build
-  - npm run deploy
+  - name: /platform/storage/query/v1
+    version: 1.15.0
+  - name: /platform/state/v1
+    version: 1.2.0
+  - name: /platform/document/v1
+    version: 1.29.0

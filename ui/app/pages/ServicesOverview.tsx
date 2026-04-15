@@ -321,6 +321,9 @@ export const ServicesOverview = () => {
   // Apdex state
   const [apdexT, setApdexT] = useState<number>(DEFAULT_APDEX_T);
 
+  // Dependencies filter state
+  const [depMinRequests, setDepMinRequests] = useState<number>(10);
+
   // --- Queries ---
 
   // Overview: Services Health
@@ -581,11 +584,19 @@ export const ServicesOverview = () => {
   // ─── Dependencies ───
   const dependenciesData = useMemo(() => {
     if (!dependenciesResult.data?.records) return [];
-    return dependenciesResult.data.records.map((r) => ({
-      Caller: (r["Caller"] as string) ?? "",
-      Callee: (r["Callee"] as string) ?? "",
-    }));
-  }, [dependenciesResult.data]);
+    // Build a map of service name → total requests from svcDetailsData
+    const requestMap = new Map<string, number>();
+    for (const svc of svcDetailsData) {
+      requestMap.set(svc.Service, svc.Requests ?? 0);
+    }
+    return dependenciesResult.data.records
+      .map((r) => ({
+        Caller: (r["Caller"] as string) ?? "",
+        Callee: (r["Callee"] as string) ?? "",
+        RequestCount: requestMap.get((r["Caller"] as string) ?? "") ?? 0,
+      }))
+      .filter((d) => d.RequestCount >= depMinRequests);
+  }, [dependenciesResult.data, svcDetailsData, depMinRequests]);
 
   // ─── Endpoint Heatmap ───
   const endpointHeatmapData: HoneycombTileNumericData[] = useMemo(() => {
@@ -2003,7 +2014,19 @@ export const ServicesOverview = () => {
           {/* ═══════════════════════ Dependencies ═══════════════════════ */}
           <Tab title="Dependencies">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
-              <SectionHeader title="Service Topology Map" />
+              <Flex alignItems="center" gap={12}>
+                <SectionHeader title="Service Topology Map" />
+                <Flex alignItems="center" gap={8} style={{ marginLeft: "auto" }}>
+                  <Text>Min Request Count</Text>
+                  <div style={{ width: 120 }}>
+                    <Select value={String(depMinRequests)} onChange={(val) => setDepMinRequests(Number(val))}>
+                      {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((n) => (
+                        <Select.Option key={n} value={String(n)}>{n}</Select.Option>
+                      ))}
+                    </Select>
+                  </div>
+                </Flex>
+              </Flex>
               {dependenciesResult.isLoading ? <LoadingState /> : dependenciesData.length === 0 ? (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
                   <Strong>No service dependencies found</Strong>
@@ -2042,6 +2065,7 @@ export const ServicesOverview = () => {
                       columns={[
                         { id: "Caller", header: "Caller (→)", accessor: "Caller" },
                         { id: "Callee", header: "Callee", accessor: "Callee" },
+                        { id: "RequestCount", header: "Request Count", accessor: "RequestCount" },
                       ]}
                       sortable
                       resizable

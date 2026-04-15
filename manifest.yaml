@@ -1,0 +1,35 @@
+name: Services Overview
+version: "0.20.7"
+description: SRE dashboard for service health, requests, latency and errors
+appId: my.services.overview.app
+platform: dynatrace-app
+author: John Kelly
+created: "2026-04-15"
+
+files:
+  - app.config.json
+  - package.json
+  - package-lock.json
+  - tsconfig.eslint.json
+  - eslint.config.mjs
+  - .gitignore
+  - ui/main.tsx
+  - ui/tsconfig.json
+  - ui/app/App.tsx
+  - ui/app/queries.ts
+  - ui/app/components/Header.tsx
+  - ui/app/components/ServiceTopology.tsx
+  - ui/app/pages/ServicesOverview.tsx
+  - ui/app/pages/ServicesOverview.css
+
+dependencies:
+  node: ">=16.13.0"
+  dt-app: "1.8.1"
+
+setup:
+  - npm install
+  - npm run start
+
+deploy:
+  - npm run build
+  - npm run deploy

@@ -1492,6 +1492,7 @@ export const ServicesOverview = () => {
 
           <h4>Dependencies</h4>
           <p>Pulls service-to-service call relationships from entity data. Shows Caller → Callee pairs with counts of unique callers and callees.</p>
+          <p>Click a service node in the topology map to pin its details popup. The popup includes a <strong>View in Smartscape</strong> link that opens the service in the Dynatrace Smartscape topology view. If the service has an active problem, the <strong>Active Problem</strong> notification is a clickable link that opens the problem details directly.</p>
 
           <h4>Endpoint Heatmap</h4>
           <p>Honeycomb visualization of endpoint failure rates. Green (&lt;0.5%), Yellow (0.5–2%), Red (&gt;2%). Quickly identify which endpoints are experiencing failures.</p>

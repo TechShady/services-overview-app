@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 
 const GREEN = "#0D9C29";
 const YELLOW = "#FCD53F";
@@ -15,6 +16,8 @@ interface ServiceMetrics {
   Requests: number;
   FailureRate: number;
   Status: string;
+  "dt.entity.service"?: string;
+  "event.id"?: string;
 }
 
 interface Props {
@@ -31,6 +34,8 @@ interface NodePos {
   status: string;
   outDegree: number;
   inDegree: number;
+  entityId: string;
+  eventId: string;
 }
 
 function getNodeColor(failureRate: number, status: string): string {
@@ -110,6 +115,8 @@ function layoutNodes(edges: Edge[], services: ServiceMetrics[], width: number, h
         status: m?.Status ?? "",
         outDegree: outDeg.get(name) ?? 0,
         inDegree: inDeg.get(name) ?? 0,
+        entityId: m?.["dt.entity.service"] ?? "",
+        eventId: m?.["event.id"] ?? "",
       });
     });
   });
@@ -126,6 +133,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; node: NodePos } | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [pinned, setPinned] = useState<string | null>(null);
+  const envUrl = useMemo(() => getEnvironmentUrl().replace(/\/$/, ""), []);
 
   // Active node = pinned takes priority over hovered
   const activeNode = pinned ?? hovered;
@@ -316,7 +324,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
             fontSize: 12,
             color: "#fff",
             zIndex: 10000,
-            pointerEvents: "none",
+            pointerEvents: pinned ? "auto" : "none",
             minWidth: 180,
             boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
           }}
@@ -330,8 +338,32 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
             </strong>
           </div>
           <div>Calls out: {tooltip.node.outDegree} &nbsp;|&nbsp; Called by: {tooltip.node.inDegree}</div>
-          {tooltip.node.status === "PROBLEM" && (
-            <div style={{ color: RED, fontWeight: 600, marginTop: 4 }}>⚠ Active Problem</div>
+          {tooltip.node.status === "PROBLEM" && tooltip.node.eventId && (
+            <div style={{ marginTop: 4 }}>
+              <a
+                href={`${envUrl}/ui/apps/dynatrace.davis.problems/problem/${tooltip.node.eventId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: RED, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+              >
+                Active Problem
+              </a>
+            </div>
+          )}
+          {tooltip.node.status === "PROBLEM" && !tooltip.node.eventId && (
+            <div style={{ color: RED, fontWeight: 600, marginTop: 4 }}>Active Problem</div>
+          )}
+          {tooltip.node.entityId && (
+            <div style={{ marginTop: 6 }}>
+              <a
+                href={`${envUrl}/ui/apps/dynatrace.smartscape/view/dynatrace.smartscape.vertical-topology/${tooltip.node.entityId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: BLUE, textDecoration: "underline", cursor: "pointer", fontSize: 11 }}
+              >
+                View in Smartscape
+              </a>
+            </div>
           )}
         </div>
       )}

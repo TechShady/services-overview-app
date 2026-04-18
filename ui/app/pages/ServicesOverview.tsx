@@ -278,6 +278,271 @@ const makeServiceLinkCell = (envUrl: string) =>
     );
   };
 
+// ---------------------------------------------------------------------------
+// What-If Analysis Tab
+// ---------------------------------------------------------------------------
+const GROWTH_MULTIPLIERS = [2, 3, 5, 10];
+
+function formatDuration(us: number): string {
+  if (us == null || isNaN(us)) return "N/A";
+  if (us >= 1_000_000) return (us / 1_000_000).toFixed(2) + " s";
+  if (us >= 1_000) return (us / 1_000).toFixed(1) + " ms";
+  return us.toFixed(0) + " µs";
+}
+
+function formatCount(val: number): string {
+  if (val >= 1_000_000) return (val / 1_000_000).toFixed(1) + "M";
+  if (val >= 1_000) return (val / 1_000).toFixed(1) + "k";
+  return val.toLocaleString();
+}
+
+interface WhatIfProps {
+  svcDetailsData: Array<{
+    Service: string;
+    "dt.entity.service": string;
+    Requests: number;
+    Latency_Avg: number;
+    Latency_p50: number;
+    Latency_p90: number;
+    Latency_p99: number;
+    FailureRate: number;
+    Failures: number;
+    "5xx": number;
+    "4xx": number;
+    Status: string;
+    "event.id": string;
+  }>;
+  reqDetailsData: Array<{
+    Service: string;
+    Request: string;
+    "dt.entity.service": string;
+    Requests: number;
+    Latency_Avg: number;
+    Latency_p50: number;
+    Latency_p90: number;
+    Latency_p99: number;
+    FailureRate: number;
+    Failures: number;
+    "5xx": number;
+    "4xx": number;
+  }>;
+  svcLoading: boolean;
+  reqLoading: boolean;
+  envUrl: string;
+  serviceLinkCell: any;
+}
+
+function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, envUrl, serviceLinkCell }: WhatIfProps) {
+  const [multiplier, setMultiplier] = useState(2);
+
+  const totalRequests = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0), [svcDetailsData]);
+  const totalFailures = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Failures ?? 0), 0), [svcDetailsData]);
+  const avgLatency = useMemo(() => {
+    if (!svcDetailsData.length) return 0;
+    return svcDetailsData.reduce((s, r) => s + (r.Latency_Avg ?? 0), 0) / svcDetailsData.length;
+  }, [svcDetailsData]);
+  const avgP50 = useMemo(() => {
+    if (!svcDetailsData.length) return 0;
+    return svcDetailsData.reduce((s, r) => s + (r.Latency_p50 ?? 0), 0) / svcDetailsData.length;
+  }, [svcDetailsData]);
+  const avgP90 = useMemo(() => {
+    if (!svcDetailsData.length) return 0;
+    return svcDetailsData.reduce((s, r) => s + (r.Latency_p90 ?? 0), 0) / svcDetailsData.length;
+  }, [svcDetailsData]);
+  const errRate = useMemo(() => (totalRequests > 0 ? (totalFailures / totalRequests) * 100 : 0), [totalRequests, totalFailures]);
+
+  const projectedLatency = avgLatency * (1 + Math.log2(multiplier) * 0.3);
+  const projectedP50 = avgP50 * (1 + Math.log2(multiplier) * 0.25);
+  const projectedP90 = avgP90 * (1 + Math.log2(multiplier) * 0.5);
+  const projectedErrors = Math.round(totalFailures * multiplier * (1 + Math.log2(multiplier) * 0.1));
+
+  const topEndpoints = useMemo(() =>
+    [...reqDetailsData]
+      .sort((a, b) => (b.Latency_p90 ?? 0) * (b.Requests ?? 0) - (a.Latency_p90 ?? 0) * (a.Requests ?? 0))
+      .slice(0, 20),
+    [reqDetailsData]
+  );
+
+  const metricBoxStyle = (bg: string): React.CSSProperties => ({
+    background: bg,
+    borderRadius: 10,
+    padding: "16px 24px",
+    minWidth: 160,
+    flex: "1 1 160px",
+  });
+
+  return (
+    <Flex flexDirection="column" gap={16} paddingTop={16}>
+      <SectionHeader title="Current Baseline" />
+      <Flex gap={16} flexWrap="wrap">
+        <div className="svc-chart-tile" style={{ flex: "1 1 140px", minHeight: "auto", padding: "16px 20px" }}>
+          <Text style={{ fontSize: 12, opacity: 0.7 }}>Total Requests</Text>
+          {svcLoading ? <LoadingState /> : <Heading level={2} style={{ margin: "8px 0 0" }}>{formatCount(totalRequests)}</Heading>}
+        </div>
+        <div className="svc-chart-tile" style={{ flex: "1 1 140px", minHeight: "auto", padding: "16px 20px" }}>
+          <Text style={{ fontSize: 12, opacity: 0.7 }}>Avg Latency</Text>
+          {svcLoading ? <LoadingState /> : <Heading level={2} style={{ color: avgLatency / 1000 >= 500 ? RED : avgLatency / 1000 >= 100 ? YELLOW : GREEN, margin: "8px 0 0" }}>{formatDuration(avgLatency)}</Heading>}
+        </div>
+        <div className="svc-chart-tile" style={{ flex: "1 1 140px", minHeight: "auto", padding: "16px 20px" }}>
+          <Text style={{ fontSize: 12, opacity: 0.7 }}>P50 Latency</Text>
+          {svcLoading ? <LoadingState /> : <Heading level={2} style={{ margin: "8px 0 0" }}>{formatDuration(avgP50)}</Heading>}
+        </div>
+        <div className="svc-chart-tile" style={{ flex: "1 1 140px", minHeight: "auto", padding: "16px 20px" }}>
+          <Text style={{ fontSize: 12, opacity: 0.7 }}>P90 Latency</Text>
+          {svcLoading ? <LoadingState /> : <Heading level={2} style={{ color: avgP90 / 1000 >= 500 ? RED : avgP90 / 1000 >= 100 ? YELLOW : GREEN, margin: "8px 0 0" }}>{formatDuration(avgP90)}</Heading>}
+        </div>
+        <div className="svc-chart-tile" style={{ flex: "1 1 140px", minHeight: "auto", padding: "16px 20px" }}>
+          <Text style={{ fontSize: 12, opacity: 0.7 }}>Error Rate</Text>
+          {svcLoading ? <LoadingState /> : <Heading level={2} style={{ color: errRate >= 5 ? RED : errRate >= 1 ? YELLOW : GREEN, margin: "8px 0 0" }}>{errRate.toFixed(2)}%</Heading>}
+        </div>
+      </Flex>
+
+      <SectionHeader title="Growth Projection" />
+      <div className="svc-table-tile" style={{ padding: 20 }}>
+        <Flex gap={12} alignItems="center" style={{ marginBottom: 16 }}>
+          <Strong>Traffic Multiplier:</Strong>
+          {GROWTH_MULTIPLIERS.map((m) => (
+            <Button key={m} variant={multiplier === m ? "accent" : "default"} onClick={() => setMultiplier(m)}>{m}x</Button>
+          ))}
+        </Flex>
+
+        <Flex gap={16} flexWrap="wrap" alignItems="stretch">
+          {/* Flux Capacitor */}
+          <Flex flexDirection="column" alignItems="center" justifyContent="center" style={{ background: "rgba(69,137,255,0.04)", borderRadius: 10, padding: "8px 12px", minWidth: 100 }}>
+            <svg width="80" height="80" viewBox="0 0 120 120" style={{ opacity: 0.85 }}>
+              <rect x="10" y="10" width="100" height="100" rx="14" fill="none" stroke="rgba(99,130,191,0.4)" strokeWidth="2.5" />
+              <rect x="16" y="16" width="88" height="88" rx="10" fill="rgba(20,24,40,0.9)" stroke="rgba(69,137,255,0.25)" strokeWidth="1" />
+              <circle cx="60" cy="60" r="8" fill="rgba(69,137,255,0.15)" stroke="#4589ff" strokeWidth="2">
+                <animate attributeName="r" values="7;10;7" dur="2s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.8;1;0.8" dur="2s" repeatCount="indefinite" />
+              </circle>
+              <circle cx="60" cy="60" r="3" fill="#4589ff">
+                <animate attributeName="fill" values="#4589ff;#fff;#4589ff" dur="1.5s" repeatCount="indefinite" />
+              </circle>
+              <line x1="60" y1="52" x2="60" y2="24" stroke="#4589ff" strokeWidth="3" strokeLinecap="round">
+                <animate attributeName="stroke" values="#4589ff;#82b1ff;#4589ff" dur="1.2s" repeatCount="indefinite" />
+              </line>
+              <circle cx="60" cy="22" r="4" fill="none" stroke="#4589ff" strokeWidth="1.5">
+                <animate attributeName="r" values="3;5;3" dur="1.2s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="1;0.4;1" dur="1.2s" repeatCount="indefinite" />
+              </circle>
+              <line x1="54" y1="64" x2="30" y2="92" stroke="#4589ff" strokeWidth="3" strokeLinecap="round">
+                <animate attributeName="stroke" values="#4589ff;#82b1ff;#4589ff" dur="1.2s" begin="0.4s" repeatCount="indefinite" />
+              </line>
+              <circle cx="28" cy="94" r="4" fill="none" stroke="#4589ff" strokeWidth="1.5">
+                <animate attributeName="r" values="3;5;3" dur="1.2s" begin="0.4s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="1;0.4;1" dur="1.2s" begin="0.4s" repeatCount="indefinite" />
+              </circle>
+              <line x1="66" y1="64" x2="90" y2="92" stroke="#4589ff" strokeWidth="3" strokeLinecap="round">
+                <animate attributeName="stroke" values="#4589ff;#82b1ff;#4589ff" dur="1.2s" begin="0.8s" repeatCount="indefinite" />
+              </line>
+              <circle cx="92" cy="94" r="4" fill="none" stroke="#4589ff" strokeWidth="1.5">
+                <animate attributeName="r" values="3;5;3" dur="1.2s" begin="0.8s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="1;0.4;1" dur="1.2s" begin="0.8s" repeatCount="indefinite" />
+              </circle>
+              <path d="M60 24 Q45 42 60 52" fill="none" stroke="rgba(69,137,255,0.3)" strokeWidth="1" strokeDasharray="3,3">
+                <animate attributeName="strokeDashoffset" values="0;-12" dur="0.8s" repeatCount="indefinite" />
+              </path>
+              <path d="M30 92 Q42 72 54 64" fill="none" stroke="rgba(69,137,255,0.3)" strokeWidth="1" strokeDasharray="3,3">
+                <animate attributeName="strokeDashoffset" values="0;-12" dur="0.8s" begin="0.3s" repeatCount="indefinite" />
+              </path>
+              <path d="M90 92 Q78 72 66 64" fill="none" stroke="rgba(69,137,255,0.3)" strokeWidth="1" strokeDasharray="3,3">
+                <animate attributeName="strokeDashoffset" values="0;-12" dur="0.8s" begin="0.6s" repeatCount="indefinite" />
+              </path>
+              <text x="60" y="114" textAnchor="middle" fill="rgba(255,255,255,0.35)" fontSize="7" fontWeight="500">FLUX CAPACITOR</text>
+            </svg>
+          </Flex>
+          <Flex flexDirection="column" style={metricBoxStyle("rgba(69,137,255,0.08)")}>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Projected Requests</Text>
+            <Strong style={{ fontSize: 22, color: "#4589ff" }}>{formatCount(totalRequests * multiplier)}</Strong>
+          </Flex>
+          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. Avg Latency ({multiplier}x)</Text>
+            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedLatency)}</Strong>
+            <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 30)}% contention est.</Text>
+          </Flex>
+          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P50 Latency ({multiplier}x)</Text>
+            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP50)}</Strong>
+            <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 25)}% median est.</Text>
+          </Flex>
+          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P90 Latency ({multiplier}x)</Text>
+            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP90)}</Strong>
+            <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 50)}% tail latency est.</Text>
+          </Flex>
+          <Flex flexDirection="column" style={metricBoxStyle("rgba(194,25,48,0.08)")}>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Projected Errors</Text>
+            <Strong style={{ fontSize: 22, color: RED }}>{formatCount(projectedErrors)}</Strong>
+            <Text style={{ fontSize: 10, opacity: 0.5 }}>Errors scale slightly above linear</Text>
+          </Flex>
+        </Flex>
+      </div>
+
+      <SectionHeader title="Per-Service Impact" />
+      <div className="svc-table-tile">
+        <Heading level={6}>Projected Metrics per Service at {multiplier}x Load</Heading>
+        {svcLoading ? <LoadingState /> : svcDetailsData.length === 0 ? (
+          <Text>No service data</Text>
+        ) : (
+          <DataTable
+            sortable
+            resizable
+            data={svcDetailsData.map((s) => ({
+              ...s,
+              Proj_Requests: Math.round(s.Requests * multiplier),
+              Proj_Latency_Avg: s.Latency_Avg * (1 + Math.log2(multiplier) * 0.3),
+              Proj_P90: s.Latency_p90 * (1 + Math.log2(multiplier) * 0.5),
+              Proj_Failures: Math.round(s.Failures * multiplier * (1 + Math.log2(multiplier) * 0.1)),
+            }))}
+            columns={[
+              { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
+              { id: "Requests", header: "Current Reqs", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
+              { id: "Proj_Requests", header: `Proj. Reqs (${multiplier}x)`, accessor: "Proj_Requests", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: "#4589ff" }}>{formatCount(value)}</Strong> },
+              { id: "Latency_Avg", header: "Curr Avg Latency", accessor: "Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
+              { id: "Proj_Latency_Avg", header: `Proj. Avg (${multiplier}x)`, accessor: "Proj_Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Latency_p90", header: "Curr P90", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
+              { id: "Proj_P90", header: `Proj. P90 (${multiplier}x)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "FailureRate", header: "Failure %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
+            ]}
+          >
+            <DataTable.Pagination defaultPageSize={25} />
+          </DataTable>
+        )}
+      </div>
+
+      <SectionHeader title="Top Endpoints by Impact (Optimize First)" />
+      <div className="svc-table-tile">
+        <Heading level={6}>Top 20 Endpoints Ranked by P90 × Volume</Heading>
+        {reqLoading ? <LoadingState /> : topEndpoints.length === 0 ? (
+          <Text>No endpoint data</Text>
+        ) : (
+          <DataTable
+            sortable
+            resizable
+            data={topEndpoints.map((e) => ({
+              ...e,
+              Impact: (e.Latency_p90 ?? 0) * (e.Requests ?? 0),
+              Proj_P90: (e.Latency_p90 ?? 0) * (1 + Math.log2(multiplier) * 0.5),
+            }))}
+            columns={[
+              { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
+              { id: "Request", header: "Endpoint", accessor: "Request" },
+              { id: "Requests", header: "Calls", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
+              { id: "Latency_p90", header: "P90 Latency", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
+              { id: "Proj_P90", header: `Proj. P90 (${multiplier}x)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "FailureRate", header: "Error %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
+              { id: "Impact", header: "Impact Score", accessor: "Impact", sortType: "number" as const, cell: ({ value }: any) => <Strong>{formatCount(value)}</Strong> },
+            ]}
+          >
+            <DataTable.Pagination defaultPageSize={20} />
+          </DataTable>
+        )}
+      </div>
+    </Flex>
+  );
+}
+
 export const ServicesOverview = () => {
   const envUrl = getEnvironmentUrl().replace(/\/$/, "");
   const serviceLinkCell = useMemo(() => makeServiceLinkCell(envUrl), [envUrl]);
@@ -1518,9 +1783,15 @@ export const ServicesOverview = () => {
           <h4>Service Topology Map</h4>
           <p>Interactive SVG dependency map in the Dependencies tab showing caller → callee relationships as a directed graph. Features:</p>
           <ul>
-            <li><strong>Focus Mode</strong> — Toggle to dim or hide unrelated services when hovering a node</li>
-            <li><strong>Click-to-Pin</strong> — Click a service node to lock the focus; click again or click the background to release</li>
-            <li><strong>Hover Highlighting</strong> — Hover over a node to see its upstream and downstream connections</li>
+            <li><strong>Drag Nodes</strong> — Click and drag any service circle to reposition it on the canvas</li>
+            <li><strong>Zoom In/Out</strong> — Use the +/− buttons or mouse wheel to zoom the topology view</li>
+            <li><strong>Pan</strong> — Click and drag on empty space to pan across the canvas</li>
+            <li><strong>Focus Mode</strong> — Toggle to hide unrelated nodes and edges when hovering a service, isolating its direct connections</li>
+            <li><strong>Reset</strong> — Reset zoom, pan, and all drag positions back to the default layout</li>
+            <li><strong>Click-to-Pin</strong> — Click a service node to lock the tooltip; click again to release</li>
+            <li><strong>Draggable Popup</strong> — When pinned, drag the popup header to reposition it anywhere on screen</li>
+            <li><strong>Hover Highlighting</strong> — Hover over a node to see its upstream and downstream connections; unrelated nodes dim</li>
+            <li><strong>Rich Tooltip</strong> — Shows Requests, Error Rate, P50 Latency (median), P90 Latency (90th pct), plus links to Problems and Service Details. Automatically clamped to stay within the viewport</li>
           </ul>
 
           <h4>Export to Notebook</h4>
@@ -1551,6 +1822,16 @@ export const ServicesOverview = () => {
           <h4>Scorecard Compare Colorization</h4>
           <p>When Compare mode is enabled on the Scorecards tab, the <strong>Δ Score</strong> column is color-coded: <span style={{ color: GREEN, fontWeight: 700 }}>green (+)</span> = score improved, <span style={{ color: RED, fontWeight: 700 }}>red (−)</span> = score degraded.</p>
 
+          <h4>What-If Analysis</h4>
+          <p>Model the impact of traffic growth on your services. Select a traffic multiplier (2×, 3×, 5×, 10×) to project how key metrics would change under increased load:</p>
+          <ul>
+            <li><strong>Current Baseline</strong> — Shows current Total Requests, Avg Latency, P50/P90 Latency, and Error Rate across all services</li>
+            <li><strong>Growth Projection</strong> — Estimates projected requests, latency (with logarithmic contention scaling), and error count at the selected multiplier</li>
+            <li><strong>Per-Service Impact</strong> — Table showing current vs projected metrics for each service, highlighting which services will be most affected</li>
+            <li><strong>Top Endpoints by Impact</strong> — Top 20 endpoints ranked by P90 × Volume ("Impact Score"), identifying the highest-priority optimization targets</li>
+          </ul>
+          <p>Latency projections use a logarithmic contention model: at 2× load, expect ~30% latency increase; at 10× load, expect ~100% increase. Errors scale slightly above linear due to cascading failure effects.</p>
+
           <h3>Tips for SREs</h3>
           <ul>
             <li>Use the <strong>Service filter</strong> to narrow down to services you own.</li>
@@ -1564,7 +1845,8 @@ export const ServicesOverview = () => {
             <li>Set up <strong>Alert Rules</strong> for metrics you care about — violations highlight instantly.</li>
             <li>Use <strong>Change Impact Analysis</strong> after deployments to verify no regressions were introduced.</li>
             <li>Maximize charts to inspect spikes in detail, then minimize to return to the dashboard.</li>
-            <li>Use the <strong>Topology Map</strong> focus/pin to trace the blast radius of a degraded service.</li>
+            <li>Use the <strong>Topology Map</strong> drag, zoom, and pin features to trace the blast radius of a degraded service.</li>
+            <li>Use <strong>What-If Analysis</strong> for capacity planning — project how your services will perform under 2×–10× traffic growth.</li>
             <li><strong>Export to Notebook</strong> to share findings with your team or document an investigation.</li>
             <li>Check <strong>Baselines</strong> to identify services that have drifted from their normal operating range.</li>
             <li>Use <strong>Apdex</strong> to quickly gauge user satisfaction — services scoring below 0.85 need attention.</li>
@@ -2722,6 +3004,18 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
+          </Tab>
+
+          {/* ═══════════════════════ What-If Analysis ═══════════════════════ */}
+          <Tab title="What-If">
+            <WhatIfTab
+              svcDetailsData={svcDetailsData}
+              reqDetailsData={reqDetailsData}
+              svcLoading={svcDetailsResult.isLoading}
+              reqLoading={reqDetailsResult.isLoading}
+              envUrl={envUrl}
+              serviceLinkCell={serviceLinkCell}
+            />
           </Tab>
         </Tabs>
       </Flex>

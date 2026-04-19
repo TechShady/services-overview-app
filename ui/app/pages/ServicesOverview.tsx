@@ -281,11 +281,7 @@ const makeServiceLinkCell = (envUrl: string) =>
 // ---------------------------------------------------------------------------
 // What-If Analysis Tab
 // ---------------------------------------------------------------------------
-const TRAFFIC_CHANGE_OPTIONS = [
-  0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75,
-  80, 85, 90, 95, 100, 110, 120, 130, 140, 147, 150, 200, 250, 300, 350, 400,
-  450, 500, 600, 700, 800, 900, 1000, 2000, 3000, 4000, 5000,
-];
+const TRAFFIC_CHANGE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 function formatDuration(us: number): string {
   if (us == null || isNaN(us)) return "N/A";
@@ -337,8 +333,9 @@ interface WhatIfProps {
 }
 
 function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, envUrl, serviceLinkCell }: WhatIfProps) {
-  const [trafficPercent, setTrafficPercent] = useState(100);
-  const multiplier = trafficPercent / 100 || 0.01;
+  const [trafficMultiplier, setTrafficMultiplier] = useState(1);
+  const multiplier = trafficMultiplier;
+  const trafficPercent = (trafficMultiplier - 1) * 100;
 
   const totalRequests = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0), [svcDetailsData]);
   const totalFailures = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Failures ?? 0), 0), [svcDetailsData]);
@@ -406,25 +403,21 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
       <div className="svc-table-tile" style={{ padding: 20 }}>
         <Flex flexDirection="column" gap={8} style={{ marginBottom: 16 }}>
           <Flex gap={12} alignItems="center">
-            <Strong>Traffic Change:</Strong>
-            <Strong style={{ color: "#4589ff", fontSize: 16 }}>{trafficPercent}%</Strong>
-            <Text style={{ fontSize: 12, opacity: 0.5 }}>({multiplier.toFixed(2)}x)</Text>
+            <Strong>Traffic Multiplier:</Strong>
+            <Strong style={{ color: "#4589ff", fontSize: 16 }}>{trafficMultiplier}x</Strong>
           </Flex>
           <input
             type="range"
             min={0}
             max={TRAFFIC_CHANGE_OPTIONS.length - 1}
-            value={TRAFFIC_CHANGE_OPTIONS.indexOf(trafficPercent)}
-            onChange={(e) => setTrafficPercent(TRAFFIC_CHANGE_OPTIONS[Number(e.target.value)])}
+            value={TRAFFIC_CHANGE_OPTIONS.indexOf(trafficMultiplier)}
+            onChange={(e) => setTrafficMultiplier(TRAFFIC_CHANGE_OPTIONS[Number(e.target.value)])}
             style={{ width: "100%", cursor: "pointer" }}
           />
-          <div style={{ position: "relative", width: "100%", height: 16, overflow: "hidden" }}>
-            {TRAFFIC_CHANGE_OPTIONS.filter((_, i) => i % 4 === 0 || TRAFFIC_CHANGE_OPTIONS[i] === trafficPercent).map((v, _, arr) => {
-              const idx = TRAFFIC_CHANGE_OPTIONS.indexOf(v);
-              return (
-                <span key={v} style={{ position: "absolute", left: `${(idx / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 9, color: v === trafficPercent ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === trafficPercent ? 700 : 400, whiteSpace: "nowrap" }}>{v}%</span>
-              );
-            })}
+          <div style={{ position: "relative", width: "100%", height: 16 }}>
+            {TRAFFIC_CHANGE_OPTIONS.map((v, i) => (
+              <span key={v} style={{ position: "absolute", left: `${(i / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 10, color: v === trafficMultiplier ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === trafficMultiplier ? 700 : 400, whiteSpace: "nowrap" }}>{v}x</span>
+            ))}
           </div>
         </Flex>
 

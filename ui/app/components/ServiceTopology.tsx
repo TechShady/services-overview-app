@@ -350,34 +350,38 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
   }, [activeNode, edges]);
 
   // Fit view to focused (connected) nodes when focus mode + pinned
-  const savedView = useRef<{ zoom: number; pan: { x: number; y: number } } | null>(null);
+  // Re-layout ONLY connected nodes into the visible viewport area
+  const savedView = useRef<{ zoom: number; pan: { x: number; y: number }; offsets: Record<string, { dx: number; dy: number }> } | null>(null);
   const [animating, setAnimating] = useState(false);
+  const focusLayout = useMemo(() => {
+    if (!(focusMode && pinned && connectedNodes.size > 0)) return null;
+    const visibleH = containerRef.current?.clientHeight ?? 600;
+    const containerW = dimensions.width;
+    // Filter edges and services to only connected nodes
+    const focusedEdges = edges.filter((e) => connectedNodes.has(e.Caller) && connectedNodes.has(e.Callee));
+    const focusedServices = services.filter((s) => connectedNodes.has(s.Service));
+    // Re-layout into the visible viewport
+    return layoutNodes(focusedEdges, focusedServices, containerW, visibleH);
+  }, [focusMode, pinned, connectedNodes, edges, services, dimensions.width]);
+
   useEffect(() => {
-    if (focusMode && pinned && connectedNodes.size > 0) {
+    if (focusLayout && focusMode && pinned) {
       // Save current view on first focus
       if (!savedView.current) {
-        savedView.current = { zoom, pan: { ...pan } };
+        savedView.current = { zoom, pan: { ...pan }, offsets: { ...nodeOffsets } };
       }
-      const focused = nodes.filter((n) => connectedNodes.has(n.name));
-      if (focused.length === 0) return;
-      const padding = 100;
-      const minX = Math.min(...focused.map((n) => n.x - nodeRadius(n)));
-      const maxX = Math.max(...focused.map((n) => n.x + nodeRadius(n)));
-      const minY = Math.min(...focused.map((n) => n.y - nodeRadius(n)));
-      const maxY = Math.max(...focused.map((n) => n.y + nodeRadius(n)));
-      const bboxW = maxX - minX + padding * 2;
-      const bboxH = maxY - minY + padding * 2;
-      const containerW = dimensions.width;
-      // Use actual visible height from the container element, not the full SVG height
-      const visibleH = containerRef.current?.clientHeight ?? 600;
-      const newZoom = Math.min(3, Math.max(0.3, Math.min(containerW / bboxW, visibleH / bboxH)));
-      const centerX = (minX + maxX) / 2;
-      const centerY = (minY + maxY) / 2;
-      const newPanX = containerW / 2 - centerX * newZoom;
-      const newPanY = visibleH / 2 - centerY * newZoom;
+      // Compute offsets so each connected node moves from its base position to the focus position
+      const newOffsets: Record<string, { dx: number; dy: number }> = {};
+      focusLayout.forEach((fn) => {
+        const base = baseNodes.find((b) => b.name === fn.name);
+        if (base) {
+          newOffsets[fn.name] = { dx: fn.x - base.x, dy: fn.y - base.y };
+        }
+      });
       setAnimating(true);
-      setZoom(newZoom);
-      setPan({ x: newPanX, y: newPanY });
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+      setNodeOffsets(newOffsets);
       const timer = setTimeout(() => setAnimating(false), 700);
       return () => clearTimeout(timer);
     } else if (savedView.current) {
@@ -385,11 +389,12 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
       setAnimating(true);
       setZoom(savedView.current.zoom);
       setPan(savedView.current.pan);
+      setNodeOffsets(savedView.current.offsets);
       savedView.current = null;
       const timer = setTimeout(() => setAnimating(false), 700);
       return () => clearTimeout(timer);
     }
-  }, [focusMode, pinned, connectedNodes]);
+  }, [focusLayout, focusMode, pinned]);
 
   const containerStyle: React.CSSProperties = { width: "100%", position: "relative", minHeight: 500, maxHeight: "80vh", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)" };
 
@@ -462,7 +467,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
                 strokeWidth={isHl ? 2.5 : 1.5}
                 markerEnd={isHl ? "url(#arrowhead-hl)" : "url(#arrowhead)"}
                 opacity={activeNode && !isHl ? (focusMode ? 0 : 0.12) : 1}
-                style={{ transition: "opacity 0.2s" }}
+                style={{ transition: animating ? "x1 0.6s cubic-bezier(0.4,0,0.2,1), y1 0.6s cubic-bezier(0.4,0,0.2,1), x2 0.6s cubic-bezier(0.4,0,0.2,1), y2 0.6s cubic-bezier(0.4,0,0.2,1), opacity 0.3s" : "opacity 0.2s" }}
               />
             );
           })}
@@ -492,7 +497,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
                   stroke={color}
                   strokeWidth={2.5}
                   opacity={hidden ? 0 : dimmed ? 0.15 : 0.9}
-                  style={{ transition: "opacity 0.2s" }}
+                  style={{ transition: animating ? "cx 0.6s cubic-bezier(0.4,0,0.2,1), cy 0.6s cubic-bezier(0.4,0,0.2,1), opacity 0.3s" : "opacity 0.2s" }}
                 />
                 {/* Inner fill */}
                 <circle
@@ -503,7 +508,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
                   opacity={hidden ? 0 : dimmed ? 0.15 : 0.85}
                   stroke={isHl ? "#fff" : "none"}
                   strokeWidth={isHl ? 2 : 0}
-                  style={{ transition: "opacity 0.2s" }}
+                  style={{ transition: animating ? "cx 0.6s cubic-bezier(0.4,0,0.2,1), cy 0.6s cubic-bezier(0.4,0,0.2,1), opacity 0.3s" : "opacity 0.2s" }}
                 />
                 <text
                   x={n.x}
@@ -512,7 +517,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
                   fill={hidden ? "rgba(255,255,255,0)" : dimmed ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.85)"}
                   fontSize={10}
                   fontWeight={isHl ? 700 : 500}
-                  style={{ transition: "fill 0.2s", pointerEvents: "none" }}
+                  style={{ transition: animating ? "x 0.6s cubic-bezier(0.4,0,0.2,1), y 0.6s cubic-bezier(0.4,0,0.2,1), fill 0.3s" : "fill 0.2s", pointerEvents: "none" }}
                 >
                   {(n.name ?? "").length > 16 ? n.name.slice(0, 14) + "…" : n.name}
                 </text>

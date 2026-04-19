@@ -3,7 +3,7 @@
   "environmentUrl": "https://guu84124.apps.dynatrace.com/",
   "app": {
     "name": "Services Overview",
-    "version": "0.22.1",
+    "version": "0.22.2",
     "description": "SRE dashboard for service health, requests, latency and errors",
     "id": "my.services.overview.app",
     "scopes": [

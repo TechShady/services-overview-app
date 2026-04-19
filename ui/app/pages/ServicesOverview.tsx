@@ -281,7 +281,11 @@ const makeServiceLinkCell = (envUrl: string) =>
 // ---------------------------------------------------------------------------
 // What-If Analysis Tab
 // ---------------------------------------------------------------------------
-const GROWTH_MULTIPLIERS = [2, 3, 5, 10];
+const TRAFFIC_CHANGE_OPTIONS = [
+  0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75,
+  80, 85, 90, 95, 100, 110, 120, 130, 140, 147, 150, 200, 250, 300, 350, 400,
+  450, 500, 600, 700, 800, 900, 1000, 2000, 3000, 4000, 5000,
+];
 
 function formatDuration(us: number): string {
   if (us == null || isNaN(us)) return "N/A";
@@ -333,7 +337,8 @@ interface WhatIfProps {
 }
 
 function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, envUrl, serviceLinkCell }: WhatIfProps) {
-  const [multiplier, setMultiplier] = useState(2);
+  const [trafficPercent, setTrafficPercent] = useState(100);
+  const multiplier = trafficPercent / 100 || 0.01;
 
   const totalRequests = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0), [svcDetailsData]);
   const totalFailures = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Failures ?? 0), 0), [svcDetailsData]);
@@ -399,11 +404,28 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
 
       <SectionHeader title="Growth Projection" />
       <div className="svc-table-tile" style={{ padding: 20 }}>
-        <Flex gap={12} alignItems="center" style={{ marginBottom: 16 }}>
-          <Strong>Traffic Multiplier:</Strong>
-          {GROWTH_MULTIPLIERS.map((m) => (
-            <Button key={m} variant={multiplier === m ? "accent" : "default"} onClick={() => setMultiplier(m)}>{m}x</Button>
-          ))}
+        <Flex flexDirection="column" gap={8} style={{ marginBottom: 16 }}>
+          <Flex gap={12} alignItems="center">
+            <Strong>Traffic Change:</Strong>
+            <Strong style={{ color: "#4589ff", fontSize: 16 }}>{trafficPercent}%</Strong>
+            <Text style={{ fontSize: 12, opacity: 0.5 }}>({multiplier.toFixed(2)}x)</Text>
+          </Flex>
+          <input
+            type="range"
+            min={0}
+            max={TRAFFIC_CHANGE_OPTIONS.length - 1}
+            value={TRAFFIC_CHANGE_OPTIONS.indexOf(trafficPercent)}
+            onChange={(e) => setTrafficPercent(TRAFFIC_CHANGE_OPTIONS[Number(e.target.value)])}
+            style={{ width: "100%", cursor: "pointer" }}
+          />
+          <div style={{ position: "relative", width: "100%", height: 16, overflow: "hidden" }}>
+            {TRAFFIC_CHANGE_OPTIONS.filter((_, i) => i % 4 === 0 || TRAFFIC_CHANGE_OPTIONS[i] === trafficPercent).map((v, _, arr) => {
+              const idx = TRAFFIC_CHANGE_OPTIONS.indexOf(v);
+              return (
+                <span key={v} style={{ position: "absolute", left: `${(idx / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 9, color: v === trafficPercent ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === trafficPercent ? 700 : 400, whiteSpace: "nowrap" }}>{v}%</span>
+              );
+            })}
+          </div>
         </Flex>
 
         <Flex gap={16} flexWrap="wrap" alignItems="stretch">
@@ -1823,7 +1845,7 @@ export const ServicesOverview = () => {
           <p>When Compare mode is enabled on the Scorecards tab, the <strong>Δ Score</strong> column is color-coded: <span style={{ color: GREEN, fontWeight: 700 }}>green (+)</span> = score improved, <span style={{ color: RED, fontWeight: 700 }}>red (−)</span> = score degraded.</p>
 
           <h4>What-If Analysis</h4>
-          <p>Model the impact of traffic growth on your services. Select a traffic multiplier (2×, 3×, 5×, 10×) to project how key metrics would change under increased load:</p>
+          <p>Model the impact of traffic growth on your services. Use the traffic change slider (0%–5000%) to project how key metrics would change under increased load:</p>
           <ul>
             <li><strong>Current Baseline</strong> — Shows current Total Requests, Avg Latency, P50/P90 Latency, and Error Rate across all services</li>
             <li><strong>Growth Projection</strong> — Estimates projected requests, latency (with logarithmic contention scaling), and error count at the selected multiplier</li>

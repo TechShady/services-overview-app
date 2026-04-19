@@ -283,6 +283,30 @@ const makeServiceLinkCell = (envUrl: string) =>
 // ---------------------------------------------------------------------------
 const TRAFFIC_CHANGE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
+function MultiplierSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <Flex flexDirection="column" gap={8} style={{ marginBottom: 12 }}>
+      <Flex gap={12} alignItems="center">
+        <Strong>Traffic Multiplier:</Strong>
+        <Strong style={{ color: "#4589ff", fontSize: 16 }}>{value}x</Strong>
+      </Flex>
+      <input
+        type="range"
+        min={0}
+        max={TRAFFIC_CHANGE_OPTIONS.length - 1}
+        value={TRAFFIC_CHANGE_OPTIONS.indexOf(value)}
+        onChange={(e) => onChange(TRAFFIC_CHANGE_OPTIONS[Number(e.target.value)])}
+        style={{ width: "100%", cursor: "pointer" }}
+      />
+      <div style={{ position: "relative", width: "100%", height: 16 }}>
+        {TRAFFIC_CHANGE_OPTIONS.map((v, i) => (
+          <span key={v} style={{ position: "absolute", left: `${(i / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 10, color: v === value ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === value ? 700 : 400, whiteSpace: "nowrap" }}>{v}x</span>
+        ))}
+      </div>
+    </Flex>
+  );
+}
+
 function formatDuration(us: number): string {
   if (us == null || isNaN(us)) return "N/A";
   if (us >= 1_000_000) return (us / 1_000_000).toFixed(2) + " s";
@@ -401,25 +425,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
 
       <SectionHeader title="Growth Projection" />
       <div className="svc-table-tile" style={{ padding: 20 }}>
-        <Flex flexDirection="column" gap={8} style={{ marginBottom: 16 }}>
-          <Flex gap={12} alignItems="center">
-            <Strong>Traffic Multiplier:</Strong>
-            <Strong style={{ color: "#4589ff", fontSize: 16 }}>{trafficMultiplier}x</Strong>
-          </Flex>
-          <input
-            type="range"
-            min={0}
-            max={TRAFFIC_CHANGE_OPTIONS.length - 1}
-            value={TRAFFIC_CHANGE_OPTIONS.indexOf(trafficMultiplier)}
-            onChange={(e) => setTrafficMultiplier(TRAFFIC_CHANGE_OPTIONS[Number(e.target.value)])}
-            style={{ width: "100%", cursor: "pointer" }}
-          />
-          <div style={{ position: "relative", width: "100%", height: 16 }}>
-            {TRAFFIC_CHANGE_OPTIONS.map((v, i) => (
-              <span key={v} style={{ position: "absolute", left: `${(i / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 10, color: v === trafficMultiplier ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === trafficMultiplier ? 700 : 400, whiteSpace: "nowrap" }}>{v}x</span>
-            ))}
-          </div>
-        </Flex>
+        <MultiplierSlider value={trafficMultiplier} onChange={setTrafficMultiplier} />
 
         <Flex gap={16} flexWrap="wrap" alignItems="stretch">
           {/* Flux Capacitor */}
@@ -496,6 +502,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
 
       <SectionHeader title="Per-Service Impact" />
       <div className="svc-table-tile">
+        <MultiplierSlider value={trafficMultiplier} onChange={setTrafficMultiplier} />
         <Heading level={6}>Projected Metrics per Service at {multiplier}x Load</Heading>
         {svcLoading ? <LoadingState /> : svcDetailsData.length === 0 ? (
           <Text>No service data</Text>
@@ -528,6 +535,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
 
       <SectionHeader title="Top Endpoints by Impact (Optimize First)" />
       <div className="svc-table-tile">
+        <MultiplierSlider value={trafficMultiplier} onChange={setTrafficMultiplier} />
         <Heading level={6}>Top 20 Endpoints Ranked by P90 × Volume</Heading>
         {reqLoading ? <LoadingState /> : topEndpoints.length === 0 ? (
           <Text>No endpoint data</Text>

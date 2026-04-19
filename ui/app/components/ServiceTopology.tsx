@@ -349,6 +349,40 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
     return s;
   }, [activeNode, edges]);
 
+  // Fit view to focused (connected) nodes when focus mode + pinned
+  const savedView = useRef<{ zoom: number; pan: { x: number; y: number } } | null>(null);
+  useEffect(() => {
+    if (focusMode && pinned && connectedNodes.size > 0) {
+      // Save current view on first focus
+      if (!savedView.current) {
+        savedView.current = { zoom, pan: { ...pan } };
+      }
+      const focused = nodes.filter((n) => connectedNodes.has(n.name));
+      if (focused.length === 0) return;
+      const padding = 80;
+      const minX = Math.min(...focused.map((n) => n.x - nodeRadius(n)));
+      const maxX = Math.max(...focused.map((n) => n.x + nodeRadius(n)));
+      const minY = Math.min(...focused.map((n) => n.y - nodeRadius(n)));
+      const maxY = Math.max(...focused.map((n) => n.y + nodeRadius(n)));
+      const bboxW = maxX - minX + padding * 2;
+      const bboxH = maxY - minY + padding * 2;
+      const containerW = dimensions.width;
+      const containerH = svgHeight < 600 ? 600 : svgHeight;
+      const newZoom = Math.min(3, Math.max(0.3, Math.min(containerW / bboxW, containerH / bboxH)));
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const newPanX = containerW / 2 - centerX * newZoom;
+      const newPanY = containerH / 2 - centerY * newZoom;
+      setZoom(newZoom);
+      setPan({ x: newPanX, y: newPanY });
+    } else if (savedView.current) {
+      // Restore previous view when leaving focus
+      setZoom(savedView.current.zoom);
+      setPan(savedView.current.pan);
+      savedView.current = null;
+    }
+  }, [focusMode, pinned, connectedNodes]);
+
   const containerStyle: React.CSSProperties = { width: "100%", position: "relative", minHeight: 500, overflow: "hidden", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)" };
 
   const btnStyle: React.CSSProperties = {

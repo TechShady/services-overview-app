@@ -351,6 +351,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
 
   // Fit view to focused (connected) nodes when focus mode + pinned
   const savedView = useRef<{ zoom: number; pan: { x: number; y: number } } | null>(null);
+  const [animating, setAnimating] = useState(false);
   useEffect(() => {
     if (focusMode && pinned && connectedNodes.size > 0) {
       // Save current view on first focus
@@ -359,7 +360,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
       }
       const focused = nodes.filter((n) => connectedNodes.has(n.name));
       if (focused.length === 0) return;
-      const padding = 80;
+      const padding = 100;
       const minX = Math.min(...focused.map((n) => n.x - nodeRadius(n)));
       const maxX = Math.max(...focused.map((n) => n.x + nodeRadius(n)));
       const minY = Math.min(...focused.map((n) => n.y - nodeRadius(n)));
@@ -367,23 +368,30 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
       const bboxW = maxX - minX + padding * 2;
       const bboxH = maxY - minY + padding * 2;
       const containerW = dimensions.width;
-      const containerH = svgHeight < 600 ? 600 : svgHeight;
-      const newZoom = Math.min(3, Math.max(0.3, Math.min(containerW / bboxW, containerH / bboxH)));
+      // Use actual visible height from the container element, not the full SVG height
+      const visibleH = containerRef.current?.clientHeight ?? 600;
+      const newZoom = Math.min(3, Math.max(0.3, Math.min(containerW / bboxW, visibleH / bboxH)));
       const centerX = (minX + maxX) / 2;
       const centerY = (minY + maxY) / 2;
       const newPanX = containerW / 2 - centerX * newZoom;
-      const newPanY = containerH / 2 - centerY * newZoom;
+      const newPanY = visibleH / 2 - centerY * newZoom;
+      setAnimating(true);
       setZoom(newZoom);
       setPan({ x: newPanX, y: newPanY });
+      const timer = setTimeout(() => setAnimating(false), 700);
+      return () => clearTimeout(timer);
     } else if (savedView.current) {
       // Restore previous view when leaving focus
+      setAnimating(true);
       setZoom(savedView.current.zoom);
       setPan(savedView.current.pan);
       savedView.current = null;
+      const timer = setTimeout(() => setAnimating(false), 700);
+      return () => clearTimeout(timer);
     }
   }, [focusMode, pinned, connectedNodes]);
 
-  const containerStyle: React.CSSProperties = { width: "100%", position: "relative", minHeight: 500, overflow: "hidden", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)" };
+  const containerStyle: React.CSSProperties = { width: "100%", position: "relative", minHeight: 500, maxHeight: "80vh", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)" };
 
   const btnStyle: React.CSSProperties = {
     background: "rgba(99, 130, 191, 0.15)",
@@ -430,7 +438,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
           </marker>
         </defs>
 
-        <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+        <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`} style={{ transition: animating ? "transform 0.6s cubic-bezier(0.4, 0, 0.2, 1)" : "none" }}>
           {/* Edges */}
           {edges.map((e, i) => {
             const src = nodeMap.get(e.Caller);

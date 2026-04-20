@@ -256,9 +256,14 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
   const handleSvgMouseDown = useCallback((evt: React.MouseEvent) => {
     if (dragNode) return;
     if ((evt.target as Element).closest("circle")) return;
+    // Clicking empty space clears pinned node and tooltip
+    if (pinned) {
+      setPinned(null);
+      setTooltip(null);
+    }
     setIsPanning(true);
     setPanStart({ x: evt.clientX - pan.x, y: evt.clientY - pan.y });
-  }, [pan, dragNode]);
+  }, [pan, dragNode, pinned]);
 
   useEffect(() => {
     if (!isPanning) return;
@@ -421,7 +426,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
         </span>
         <button style={btnStyle} onClick={() => setZoom((z) => Math.min(3, z + 0.2))} title="Zoom In">+</button>
         <button style={btnStyle} onClick={() => setZoom((z) => Math.max(0.3, z - 0.2))} title="Zoom Out">−</button>
-        <button style={btnStyle} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setNodeOffsets({}); }} title="Reset View">Reset</button>
+        <button style={btnStyle} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setNodeOffsets({}); setPinned(null); setTooltip(null); setFocusMode(false); savedView.current = null; }} title="Reset View">Reset</button>
         <button
           style={{ ...btnStyle, color: focusMode ? "#4589FF" : "rgba(255,255,255,0.6)", background: focusMode ? "rgba(69, 137, 255, 0.25)" : btnStyle.background, border: focusMode ? "1px solid rgba(69, 137, 255, 0.6)" : btnStyle.border }}
           onClick={() => setFocusMode(!focusMode)}

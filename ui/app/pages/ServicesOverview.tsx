@@ -1809,7 +1809,7 @@ export const ServicesOverview = () => {
             <li><strong>Drag Nodes</strong> — Click and drag any service circle to reposition it on the canvas</li>
             <li><strong>Zoom In/Out</strong> — Use the +/− buttons or mouse wheel to zoom the topology view</li>
             <li><strong>Pan</strong> — Click and drag on empty space to pan across the canvas</li>
-            <li><strong>Focus Mode</strong> — Toggle to hide unrelated nodes and edges when hovering a service, isolating its direct connections</li>
+            <li><strong>Focus Mode</strong> — Toggle to hide unrelated nodes and edges when hovering a service, isolating its direct connections. While focused on a service, clicking another service shows its popup without changing focus</li>
             <li><strong>Reset</strong> — Reset zoom, pan, and all drag positions back to the default layout</li>
             <li><strong>Click-to-Pin</strong> — Click a service node to lock the tooltip; click again to release</li>
             <li><strong>Draggable Popup</strong> — When pinned, drag the popup header to reposition it anywhere on screen</li>

@@ -322,12 +322,16 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
     if (pinned === node.name) {
       setPinned(null);
       setTooltip(null);
+    } else if (focusMode && pinned) {
+      // In focus mode with a pinned node, show popup for clicked node without changing focus
+      setTooltipOffset({ dx: 0, dy: 0 });
+      setTooltip({ x: evt.clientX, y: evt.clientY, node });
     } else {
       setPinned(node.name);
       setTooltipOffset({ dx: 0, dy: 0 });
       setTooltip({ x: evt.clientX, y: evt.clientY, node });
     }
-  }, [pinned]);
+  }, [pinned, focusMode]);
 
   const hoveredEdges = useMemo(() => {
     if (!activeNode) return new Set<number>();
@@ -567,7 +571,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
             <span style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{tooltip.node.name}</span>
             {pinned && (
               <span
-                onClick={() => { setPinned(null); setTooltip(null); }}
+                onClick={() => { if (focusMode && pinned && tooltip?.node.name !== pinned) { setTooltip(null); } else { setPinned(null); setTooltip(null); } }}
                 style={{ cursor: "pointer", fontSize: 16, color: "rgba(255,255,255,0.4)", lineHeight: 1 }}
               >×</span>
             )}

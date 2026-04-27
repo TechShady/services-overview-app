@@ -9,14 +9,14 @@ import {
 import type { HoneycombTileNumericData } from "@dynatrace/strato-components/charts";
 import { CategoricalBarChart, convertToTimeseries } from "@dynatrace/strato-components-preview/charts";
 import { Select, TextInput } from "@dynatrace/strato-components-preview/forms";
-import { NumberInput } from "@dynatrace/strato-components/forms";
+import { NumberInput, Switch } from "@dynatrace/strato-components/forms";
 import { DataTable } from "@dynatrace/strato-components-preview/tables";
 import { ProgressCircle } from "@dynatrace/strato-components/content";
 import { Tabs, Tab } from "@dynatrace/strato-components/navigation";
 import { Modal } from "@dynatrace/strato-components/overlays";
 import { Button } from "@dynatrace/strato-components/buttons";
 import { SettingIcon, HelpIcon, MaximizeIcon, MinimizeIcon, CompareIcon, XmarkIcon, DocumentIcon } from "@dynatrace/strato-icons";
-import { useDql } from "@dynatrace-sdk/react-hooks";
+import { useDql, useUserAppState, useSetUserAppState } from "@dynatrace-sdk/react-hooks";
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 import { documentsClient } from "@dynatrace-sdk/client-document";
 import { ServiceTopology } from "../components/ServiceTopology";
@@ -78,6 +78,20 @@ const DEFAULT_TENANT = "";
 const DEFAULT_SLO_TARGET = 99.9;
 const DEFAULT_APDEX_T = 500; // ms
 const NOOP_QUERY = "fetch logs | limit 0";
+
+const TAB_KEYS = [
+  "Overview", "Service Details", "Request Details", "Service Metrics",
+  "Process Metrics", "K8s Workloads", "SLO & Error Budget", "Scorecards",
+  "Dependencies", "Endpoint Heatmap", "MTTR / MTTA", "Anomaly Detection",
+  "Incident Timeline", "Change Impact", "Apdex", "Baselines", "Alert Rules", "What-If",
+] as const;
+type TabKey = typeof TAB_KEYS[number];
+const DEFAULT_TAB_VISIBILITY: Record<TabKey, boolean> =
+  Object.fromEntries(TAB_KEYS.map(k => [k, true])) as Record<TabKey, boolean>;
+const TAB_STATE_KEY = "svc-tab-visibility";
+const TAB_ORDER_STATE_KEY = "svc-tab-order";
+const DEFAULT_TAB_ORDER: TabKey[] = [...TAB_KEYS];
+const COMPARE_TABS: TabKey[] = ["Service Metrics", "Process Metrics", "K8s Workloads", "Scorecards", "Apdex"];
 
 interface AlertRule {
   id: string;
@@ -592,9 +606,67 @@ export const ServicesOverview = () => {
   const [reqDetailColSizing, setReqDetailColSizing] = useState<Record<string, number>>({});
   const [problemsColSizing, setProblemsColSizing] = useState<Record<string, number>>({});
 
+  // Tab order & visibility
+  const [tabVisibility, setTabVisibility] = useState<Record<TabKey, boolean>>(DEFAULT_TAB_VISIBILITY);
+  const [tabOrder, setTabOrder] = useState<TabKey[]>([...DEFAULT_TAB_ORDER]);
+  const [draggedTabIdx, setDraggedTabIdx] = useState<number | null>(null);
+  const savedTabVisibility = useUserAppState({ key: TAB_STATE_KEY });
+  const savedTabOrder = useUserAppState({ key: TAB_ORDER_STATE_KEY });
+  const { execute: saveAppState } = useSetUserAppState();
+
+  React.useEffect(() => {
+    if (savedTabVisibility.data?.value) {
+      try {
+        const parsed = JSON.parse(savedTabVisibility.data.value as string);
+        setTabVisibility(prev => ({ ...prev, ...parsed }));
+      } catch { /* ignore */ }
+    }
+  }, [savedTabVisibility.data]);
+
+  React.useEffect(() => {
+    if (savedTabOrder.data?.value) {
+      try {
+        const parsed = JSON.parse(savedTabOrder.data.value as string) as string[];
+        if (Array.isArray(parsed) && parsed.length) {
+          const validKeys = new Set<string>(TAB_KEYS);
+          const ordered = parsed.filter(k => validKeys.has(k)) as TabKey[];
+          const missing = DEFAULT_TAB_ORDER.filter(k => !ordered.includes(k));
+          setTabOrder([...ordered, ...missing]);
+        }
+      } catch { /* ignore */ }
+    }
+  }, [savedTabOrder.data]);
+
+  const toggleTab = (tab: TabKey) => {
+    setTabVisibility(prev => {
+      const next = { ...prev, [tab]: !prev[tab] };
+      saveAppState({ key: TAB_STATE_KEY, body: { value: JSON.stringify(next) } });
+      return next;
+    });
+  };
+
+  const isTabVisible = (tab: TabKey) => tabVisibility[tab] !== false;
+
+  const handleTabDragOver = (idx: number) => {
+    if (draggedTabIdx === null || draggedTabIdx === idx) return;
+    const updated = [...tabOrder];
+    const [moved] = updated.splice(draggedTabIdx, 1);
+    updated.splice(idx, 0, moved);
+    setTabOrder(updated);
+    setDraggedTabIdx(idx);
+  };
+
+  const saveTabOrder = (order: TabKey[]) => {
+    setTabOrder(order);
+    saveAppState({ key: TAB_ORDER_STATE_KEY, body: { value: JSON.stringify(order) } });
+  };
+
+  const visibleTabs = useMemo(() => tabOrder.filter(t => isTabVisible(t)), [tabOrder, tabVisibility]);
+
   // Enhancement state
   const [compareMode, setCompareMode] = useState(false);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const activeTabKey = visibleTabs[activeTabIndex] as TabKey | undefined;
   const [sloTarget, setSloTarget] = useState<number>(DEFAULT_SLO_TARGET);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [newRuleMetric, setNewRuleMetric] = useState<string>("FailureRate");
@@ -716,11 +788,11 @@ export const ServicesOverview = () => {
   const apdexResult = useDql({ query: apdexQuery(timeframeDays, apdexT) });
 
   // Comparison mode — previous period (no-op when disabled)
-  const svcCompare = compareMode && activeTabIndex === 3;
-  const procCompare = compareMode && activeTabIndex === 4;
-  const k8sCompare = compareMode && activeTabIndex === 5;
-  const apdexCompare = compareMode && activeTabIndex === 14;
-  const scorecardCompare = compareMode && activeTabIndex === 7;
+  const svcCompare = compareMode && activeTabKey === "Service Metrics";
+  const procCompare = compareMode && activeTabKey === "Process Metrics";
+  const k8sCompare = compareMode && activeTabKey === "K8s Workloads";
+  const apdexCompare = compareMode && activeTabKey === "Apdex";
+  const scorecardCompare = compareMode && activeTabKey === "Scorecards";
   const reqTotalPrev = useDql({ query: svcCompare ? requestsTotalPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
   const latP50Prev = useDql({ query: svcCompare ? latencyP50PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
   const latP90Prev = useDql({ query: svcCompare ? latencyP90PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
@@ -1516,7 +1588,7 @@ export const ServicesOverview = () => {
                 <HelpIcon />
               </Button.Prefix>
             </Button>
-            {(activeTabIndex === 3 || activeTabIndex === 4 || activeTabIndex === 5 || activeTabIndex === 7 || activeTabIndex === 14) && (
+            {activeTabKey && COMPARE_TABS.includes(activeTabKey) && (
               <Button variant={compareMode ? "emphasized" : "default"} onClick={() => setCompareMode(!compareMode)}>
                 {compareMode ? "Compare: ON" : "Compare"}
               </Button>
@@ -1608,6 +1680,43 @@ export const ServicesOverview = () => {
               max={10000}
             />
           </Flex>
+          <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", marginTop: 8, paddingTop: 12 }}>
+            <Strong style={{ marginBottom: 4, display: "block" }}>Tab Order &amp; Visibility</Strong>
+            <Text style={{ marginBottom: 12, opacity: 0.6, fontSize: 12, display: "block" }}>
+              Drag to reorder tabs and toggle visibility. Changes are saved per user and persist across sessions.
+            </Text>
+            {tabOrder.map((tab, idx) => (
+              <div
+                key={tab}
+                draggable
+                onDragStart={() => setDraggedTabIdx(idx)}
+                onDragOver={(e) => { e.preventDefault(); handleTabDragOver(idx); }}
+                onDragEnd={() => { setDraggedTabIdx(null); saveTabOrder(tabOrder); }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "6px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)",
+                  background: draggedTabIdx === idx ? "rgba(69,137,255,0.12)" : "transparent",
+                  cursor: "grab", transition: "background 0.15s ease",
+                }}
+              >
+                <Flex alignItems="center" gap={8}>
+                  <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 14, userSelect: "none" }}>☰</span>
+                  <Text style={{ fontSize: 13 }}>{tab}</Text>
+                </Flex>
+                <Switch value={tabVisibility[tab] !== false} onChange={() => toggleTab(tab)} />
+              </div>
+            ))}
+            <button
+              onClick={() => { saveTabOrder([...DEFAULT_TAB_ORDER]); }}
+              style={{
+                marginTop: 8, padding: "4px 12px", borderRadius: 6,
+                border: "1px solid rgba(99,130,191,0.3)", background: "transparent",
+                color: "#6babf5", fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Reset Tab Order
+            </button>
+          </div>
         </Flex>
       </Modal>
 
@@ -1881,8 +1990,10 @@ export const ServicesOverview = () => {
       {/* ---- Main Content ---- */}
       <Flex flexDirection="column" padding={16} gap={16}>
         <Tabs selectedIndex={activeTabIndex} onChange={(idx) => setActiveTabIndex(idx)}>
-          {/* ═══════════════════════ Overview ═══════════════════════ */}
-          <Tab title="Overview">
+          {visibleTabs.map((tabId) => {
+            switch (tabId) {
+              case "Overview": return (
+          <Tab key={tabId} title="Overview">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Services Status & Problems" />
               <div className="svc-overview-row">
@@ -1920,10 +2031,9 @@ export const ServicesOverview = () => {
                 </div>
               </div>
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Service Details ═══════════════════════ */}
-          <Tab title="Service Details">
+          </Tab>);
+              case "Service Details": return (
+          <Tab key={tabId} title="Service Details">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Service Summary" />
               {svcDetailsResult.isLoading ? (
@@ -1943,10 +2053,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Request Details ═══════════════════════ */}
-          <Tab title="Request Details">
+          </Tab>);
+              case "Request Details": return (
+          <Tab key={tabId} title="Request Details">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Request Summary" />
               {reqDetailsResult.isLoading ? (
@@ -1966,10 +2075,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Service Metrics ═══════════════════════ */}
-          <Tab title="Service Metrics">
+          </Tab>);
+              case "Service Metrics": return (
+          <Tab key={tabId} title="Service Metrics">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               {/* Deployment Events Banner */}
               {deploymentsData.length > 0 && (
@@ -2088,10 +2196,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Process Metrics ═══════════════════════ */}
-          <Tab title="Process Metrics">
+          </Tab>);
+              case "Process Metrics": return (
+          <Tab key={tabId} title="Process Metrics">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Process Resource Usage" />
               <div className="svc-chart-grid-2">
@@ -2146,10 +2253,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ K8s Workloads ═══════════════════════ */}
-          <Tab title="K8s Workloads">
+          </Tab>);
+              case "K8s Workloads": return (
+          <Tab key={tabId} title="K8s Workloads">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Kubernetes Workload Metrics" />
               <div className="svc-chart-grid-2">
@@ -2187,10 +2293,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ SLO & Error Budget ═══════════════════════ */}
-          <Tab title="SLO & Error Budget">
+          </Tab>);
+              case "SLO & Error Budget": return (
+          <Tab key={tabId} title="SLO & Error Budget">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title={`SLO: ${sloTarget}% — Error Budget Analysis`} />
               <Flex gap={16} flexWrap="wrap">
@@ -2248,10 +2353,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Service Scorecards ═══════════════════════ */}
-          <Tab title="Scorecards">
+          </Tab>);
+              case "Scorecards": return (
+          <Tab key={tabId} title="Scorecards">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Service Health Scorecards" />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
@@ -2316,10 +2420,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Dependencies ═══════════════════════ */}
-          <Tab title="Dependencies">
+          </Tab>);
+              case "Dependencies": return (
+          <Tab key={tabId} title="Dependencies">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <Flex alignItems="center" gap={12}>
                 <SectionHeader title="Service Topology Map" />
@@ -2387,10 +2490,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Endpoint Heatmap ═══════════════════════ */}
-          <Tab title="Endpoint Heatmap">
+          </Tab>);
+              case "Endpoint Heatmap": return (
+          <Tab key={tabId} title="Endpoint Heatmap">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Endpoint Failure Rate Heatmap" />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
@@ -2416,10 +2518,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ MTTR / MTTA ═══════════════════════ */}
-          <Tab title="MTTR / MTTA">
+          </Tab>);
+              case "MTTR / MTTA": return (
+          <Tab key={tabId} title="MTTR / MTTA">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Mean Time To Resolve (MTTR)" />
               <Flex gap={16} flexWrap="wrap">
@@ -2469,10 +2570,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Anomaly Detection ═══════════════════════ */}
-          <Tab title="Anomaly Detection">
+          </Tab>);
+              case "Anomaly Detection": return (
+          <Tab key={tabId} title="Anomaly Detection">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Anomaly Detection — Current vs Baseline" />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
@@ -2526,10 +2626,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Incident Timeline ═══════════════════════ */}
-          <Tab title="Incident Timeline">
+          </Tab>);
+              case "Incident Timeline": return (
+          <Tab key={tabId} title="Incident Timeline">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Incident Timeline — Problems & Deployments" />
               <Flex gap={16} flexWrap="wrap">
@@ -2576,10 +2675,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Change Impact Analysis ═══════════════════════ */}
-          <Tab title="Change Impact">
+          </Tab>);
+              case "Change Impact": return (
+          <Tab key={tabId} title="Change Impact">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Change Impact Analysis — Deployment Before/After" />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
@@ -2647,10 +2745,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Apdex / User Satisfaction ═══════════════════════ */}
-          <Tab title="Apdex">
+          </Tab>);
+              case "Apdex": return (
+          <Tab key={tabId} title="Apdex">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title={`Apdex / User Satisfaction — Threshold T = ${apdexT}ms`} />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
@@ -2780,10 +2877,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Baselines ═══════════════════════ */}
-          <Tab title="Baselines">
+          </Tab>);
+              case "Baselines": return (
+          <Tab key={tabId} title="Baselines">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Service Baselines — Track Latency & Failure Rate Over Time" />
               <div className="svc-table-tile" style={{ padding: 16 }}>
@@ -2926,10 +3022,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ Alert Rules ═══════════════════════ */}
-          <Tab title="Alert Rules">
+          </Tab>);
+              case "Alert Rules": return (
+          <Tab key={tabId} title="Alert Rules">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Custom Alert Rules" />
 
@@ -3027,10 +3122,9 @@ export const ServicesOverview = () => {
                 </div>
               )}
             </Flex>
-          </Tab>
-
-          {/* ═══════════════════════ What-If Analysis ═══════════════════════ */}
-          <Tab title="What-If">
+          </Tab>);
+              case "What-If": return (
+          <Tab key={tabId} title="What-If">
             <WhatIfTab
               svcDetailsData={svcDetailsData}
               reqDetailsData={reqDetailsData}
@@ -3039,7 +3133,10 @@ export const ServicesOverview = () => {
               envUrl={envUrl}
               serviceLinkCell={serviceLinkCell}
             />
-          </Tab>
+          </Tab>);
+              default: return null;
+            }
+          })}
         </Tabs>
       </Flex>
     </div>

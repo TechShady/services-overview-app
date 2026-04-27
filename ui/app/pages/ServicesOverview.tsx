@@ -1613,7 +1613,7 @@ export const ServicesOverview = () => {
         title="Settings"
         show={settingsOpen}
         onDismiss={() => setSettingsOpen(false)}
-        size="small"
+        size="medium"
         footer={
           <Flex justifyContent="flex-end" gap={8}>
             <Button variant="emphasized" onClick={handleSaveSettings}>

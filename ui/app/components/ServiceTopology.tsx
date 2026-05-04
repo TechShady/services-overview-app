@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 
 const GREEN = "#0D9C29";
@@ -308,15 +309,40 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
     };
   }, [draggingTooltip, tooltipDragStart]);
 
+  // Convert node SVG coords to screen coords using SVG's own coordinate system
+  const nodeToScreen = useCallback((node: NodePos): { x: number; y: number } => {
+    const svgEl = containerRef.current?.querySelector("svg") as SVGSVGElement | null;
+    if (!svgEl) return { x: 0, y: 0 };
+    const pt = svgEl.createSVGPoint();
+    pt.x = node.x;
+    pt.y = node.y;
+    // Get the transform group (first <g> child with the pan/zoom transform)
+    const transformGroup = svgEl.querySelector("g[transform]") as SVGGraphicsElement | null;
+    if (transformGroup) {
+      const ctm = transformGroup.getScreenCTM();
+      if (ctm) {
+        const screenPt = pt.matrixTransform(ctm);
+        return { x: screenPt.x, y: screenPt.y };
+      }
+    }
+    // Fallback: manual calculation
+    const rect = svgEl.getBoundingClientRect();
+    return {
+      x: rect.left + node.x * zoom + pan.x,
+      y: rect.top + node.y * zoom + pan.y,
+    };
+  }, [zoom, pan]);
+
   // --- Hover / click / tooltip ---
   const handleMouseEnter = useCallback((node: NodePos, evt: React.MouseEvent) => {
     if (dragNode) return;
     setHovered(node.name);
     if (!pinned) {
+      const pos = nodeToScreen(node);
       setTooltipOffset({ dx: 0, dy: 0 });
-      setTooltip({ x: evt.clientX, y: evt.clientY, node });
+      setTooltip({ x: pos.x, y: pos.y, node });
     }
-  }, [pinned, dragNode]);
+  }, [pinned, dragNode, nodeToScreen]);
 
   const handleMouseLeave = useCallback(() => {
     setHovered(null);
@@ -329,14 +355,16 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
       setTooltip(null);
     } else if (focusMode && pinned) {
       // In focus mode with a pinned node, show popup for clicked node without changing focus
+      const pos = nodeToScreen(node);
       setTooltipOffset({ dx: 0, dy: 0 });
-      setTooltip({ x: evt.clientX, y: evt.clientY, node });
+      setTooltip({ x: pos.x, y: pos.y, node });
     } else {
       setPinned(node.name);
+      const pos = nodeToScreen(node);
       setTooltipOffset({ dx: 0, dy: 0 });
-      setTooltip({ x: evt.clientX, y: evt.clientY, node });
+      setTooltip({ x: pos.x, y: pos.y, node });
     }
-  }, [pinned, focusMode]);
+  }, [pinned, focusMode, nodeToScreen]);
 
   const hoveredEdges = useMemo(() => {
     if (!activeNode) return new Set<number>();
@@ -536,7 +564,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
         </g>
       </svg>
 
-      {/* Tooltip */}
+      {/* Tooltip — rendered via portal to escape overflow:hidden container */}
       {tooltip && (() => {
         const ttW = 280;
         const ttH = 320;
@@ -544,7 +572,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
         const rawTop = tooltip.y - 20 + tooltipOffset.dy;
         const clampedLeft = Math.max(8, Math.min(rawLeft, window.innerWidth - ttW - 8));
         const clampedTop = Math.max(8, Math.min(rawTop, window.innerHeight - ttH - 8));
-        return (
+        const tooltipEl = (
         <div
           ref={tooltipRef}
           style={{
@@ -655,6 +683,7 @@ export function ServiceTopology({ edges: rawEdges, services }: Props) {
           </div>
         </div>
         );
+        return createPortal(tooltipEl, document.body);
       })()}
     </div>
   );

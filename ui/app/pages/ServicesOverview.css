@@ -237,6 +237,73 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
 }
 
+/* Table cell alignment & padding */
+.svc-table-tile th,
+.svc-table-tile td,
+.svc-table-tile [role="cell"],
+.svc-table-tile [role="columnheader"],
+.svc-table-tile [data-column-id] {
+  vertical-align: middle !important;
+  align-items: center !important;
+}
+
+.svc-table-tile tr,
+.svc-table-tile [role="row"] {
+  vertical-align: middle !important;
+  align-items: center !important;
+}
+
+/* Right padding on cell content to prevent adjacent columns running together.
+   Strato DataTable uses hashed CSS-in-JS class names, so target by structure:
+   any direct child element of any table cell-like container. */
+.svc-table-tile table th,
+.svc-table-tile table td {
+  padding-right: 24px !important;
+  padding-left: 8px !important;
+}
+
+/* Strato uses div-based grid; cells often have data-* attrs or testids.
+   Add right margin to the rendered content (link/span) inside each cell. */
+.svc-table-tile [class*="DataTableCell"],
+.svc-table-tile [class*="data-table-cell"],
+.svc-table-tile [class*="TableCell"],
+.svc-table-tile [class*="ColumnHeader"],
+.svc-table-tile [class*="HeaderCell"] {
+  padding-right: 24px !important;
+  padding-left: 8px !important;
+}
+
+/* Last-resort: add right margin to every direct child inside any element
+   that looks like a row's cell wrapper inside the table tile */
+.svc-table-tile [role="row"] > * {
+  padding-right: 24px !important;
+  box-sizing: border-box;
+}
+
+/* Force long text/links inside table cells to truncate with ellipsis instead
+   of overflowing into adjacent cells visually */
+.svc-table-tile [role="cell"],
+.svc-table-tile [role="columnheader"],
+.svc-table-tile [class*="DataTableCell"],
+.svc-table-tile [class*="TableCell"],
+.svc-table-tile td,
+.svc-table-tile th {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.svc-table-tile [role="cell"] a,
+.svc-table-tile [role="cell"] span,
+.svc-table-tile td a,
+.svc-table-tile td span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 /* Grid layouts */
 .svc-chart-grid-2 {
   display: grid;

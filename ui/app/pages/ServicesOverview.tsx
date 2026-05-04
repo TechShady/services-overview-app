@@ -20,6 +20,7 @@ import { useDql, useUserAppState, useSetUserAppState } from "@dynatrace-sdk/reac
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 import { documentsClient } from "@dynatrace-sdk/client-document";
 import { ServiceTopology } from "../components/ServiceTopology";
+import { useAppTimeframe, previousPeriod, toTF } from "../state/TimeframeContext";
 import {
   servicesHealthQuery,
   problemsQuery,
@@ -72,7 +73,6 @@ const YELLOW = "#FCD53F";
 const RED = "#C21930";
 const DEFAULT_TOP_N = 100;
 const DEFAULT_PROBLEMS_LOOKBACK_HOURS = 7;
-const DEFAULT_TIMEFRAME_DAYS = 7;
 const DEFAULT_CHART_TOP_N = 10;
 const DEFAULT_TENANT = "";
 const DEFAULT_SLO_TARGET = 99.9;
@@ -123,19 +123,6 @@ const ALERT_METRIC_OPTIONS = [
   { label: "Latency P90 (µs)", value: "Latency_p90" },
   { label: "5xx Count", value: "5xx" },
   { label: "4xx Count", value: "4xx" },
-];
-
-const TIMEFRAME_OPTIONS = [
-  { label: "2 hours", value: 0.083 },
-  { label: "6 hours", value: 0.25 },
-  { label: "1 day", value: 1 },
-  { label: "2 days", value: 2 },
-  { label: "3 days", value: 3 },
-  { label: "7 days", value: 7 },
-  { label: "14 days", value: 14 },
-  { label: "30 days", value: 30 },
-  { label: "90 days", value: 90 },
-  { label: "365 days", value: 365 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -295,14 +282,14 @@ const makeServiceLinkCell = (envUrl: string) =>
 // ---------------------------------------------------------------------------
 // What-If Analysis Tab
 // ---------------------------------------------------------------------------
-const TRAFFIC_CHANGE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const TRAFFIC_CHANGE_OPTIONS = [0,1,2,3,4,5,10,20,30,40,50,60,70,80,90,100,125,150,175,200,250,300,350,400,450,500,600,700,800,900,1000,2000,3000,4000,5000];
 
 function MultiplierSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <Flex flexDirection="column" gap={8} style={{ marginBottom: 12 }}>
       <Flex gap={12} alignItems="center">
-        <Strong>Traffic Multiplier:</Strong>
-        <Strong style={{ color: "#4589ff", fontSize: 16 }}>{value}x</Strong>
+        <Strong>Traffic Change:</Strong>
+        <Strong style={{ color: "#4589ff", fontSize: 16 }}>+{value}%</Strong>
       </Flex>
       <input
         type="range"
@@ -313,9 +300,10 @@ function MultiplierSlider({ value, onChange }: { value: number; onChange: (v: nu
         style={{ width: "100%", cursor: "pointer" }}
       />
       <div style={{ position: "relative", width: "100%", height: 16 }}>
-        {TRAFFIC_CHANGE_OPTIONS.map((v, i) => (
-          <span key={v} style={{ position: "absolute", left: `${(i / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 10, color: v === value ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === value ? 700 : 400, whiteSpace: "nowrap" }}>{v}x</span>
-        ))}
+        {TRAFFIC_CHANGE_OPTIONS.filter((_, i) => i % Math.max(1, Math.floor(TRAFFIC_CHANGE_OPTIONS.length / 12)) === 0 || i === TRAFFIC_CHANGE_OPTIONS.length - 1).map((v) => {
+          const idx = TRAFFIC_CHANGE_OPTIONS.indexOf(v);
+          return <span key={v} style={{ position: "absolute", left: `${(idx / (TRAFFIC_CHANGE_OPTIONS.length - 1)) * 100}%`, transform: "translateX(-50%)", fontSize: 10, color: v === value ? "#4589ff" : "rgba(255,255,255,0.35)", fontWeight: v === value ? 700 : 400, whiteSpace: "nowrap" }}>{v}%</span>;
+        })}
       </div>
     </Flex>
   );
@@ -371,9 +359,9 @@ interface WhatIfProps {
 }
 
 function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, envUrl, serviceLinkCell }: WhatIfProps) {
-  const [trafficMultiplier, setTrafficMultiplier] = useState(1);
-  const multiplier = trafficMultiplier;
-  const trafficPercent = (trafficMultiplier - 1) * 100;
+  const [trafficMultiplier, setTrafficMultiplier] = useState(0);
+  const multiplier = 1 + trafficMultiplier / 100;
+  const trafficPercent = trafficMultiplier;
 
   const totalRequests = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0), [svcDetailsData]);
   const totalFailures = useMemo(() => svcDetailsData.reduce((s, r) => s + (r.Failures ?? 0), 0), [svcDetailsData]);
@@ -492,17 +480,17 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
             <Strong style={{ fontSize: 22, color: "#4589ff" }}>{formatCount(totalRequests * multiplier)}</Strong>
           </Flex>
           <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
-            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. Avg Latency ({multiplier}x)</Text>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. Avg Latency (+{trafficPercent}%)</Text>
             <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedLatency)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 30)}% contention est.</Text>
           </Flex>
           <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
-            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P50 Latency ({multiplier}x)</Text>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P50 Latency (+{trafficPercent}%)</Text>
             <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP50)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 25)}% median est.</Text>
           </Flex>
           <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
-            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P90 Latency ({multiplier}x)</Text>
+            <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P90 Latency (+{trafficPercent}%)</Text>
             <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP90)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 50)}% tail latency est.</Text>
           </Flex>
@@ -517,7 +505,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
       <SectionHeader title="Per-Service Impact" />
       <div className="svc-table-tile">
         <MultiplierSlider value={trafficMultiplier} onChange={setTrafficMultiplier} />
-        <Heading level={6}>Projected Metrics per Service at {multiplier}x Load</Heading>
+        <Heading level={6}>Projected Metrics per Service at +{trafficPercent}% Load</Heading>
         {svcLoading ? <LoadingState /> : svcDetailsData.length === 0 ? (
           <Text>No service data</Text>
         ) : (
@@ -534,11 +522,11 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
             columns={[
               { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
               { id: "Requests", header: "Current Reqs", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
-              { id: "Proj_Requests", header: `Proj. Reqs (${multiplier}x)`, accessor: "Proj_Requests", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: "#4589ff" }}>{formatCount(value)}</Strong> },
+              { id: "Proj_Requests", header: `Proj. Reqs (+${trafficPercent}%)`, accessor: "Proj_Requests", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: "#4589ff" }}>{formatCount(value)}</Strong> },
               { id: "Latency_Avg", header: "Curr Avg Latency", accessor: "Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_Latency_Avg", header: `Proj. Avg (${multiplier}x)`, accessor: "Proj_Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_Latency_Avg", header: `Proj. Avg (+${trafficPercent}%)`, accessor: "Proj_Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
               { id: "Latency_p90", header: "Curr P90", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_P90", header: `Proj. P90 (${multiplier}x)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
               { id: "FailureRate", header: "Failure %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
             ]}
           >
@@ -567,7 +555,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
               { id: "Request", header: "Endpoint", accessor: "Request" },
               { id: "Requests", header: "Calls", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
               { id: "Latency_p90", header: "P90 Latency", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_P90", header: `Proj. P90 (${multiplier}x)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
               { id: "FailureRate", header: "Error %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
               { id: "Impact", header: "Impact Score", accessor: "Impact", sortType: "number" as const, cell: ({ value }: any) => <Strong>{formatCount(value)}</Strong> },
             ]}
@@ -585,7 +573,9 @@ export const ServicesOverview = () => {
   const serviceLinkCell = useMemo(() => makeServiceLinkCell(envUrl), [envUrl]);
 
   // --- State ---
-  const [timeframeDays, setTimeframeDays] = useState<number>(DEFAULT_TIMEFRAME_DAYS);
+  const { timeframe } = useAppTimeframe();
+  const tf = useMemo(() => toTF(timeframe), [timeframe]);
+  const prevTf = useMemo(() => previousPeriod(timeframe), [timeframe]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -715,7 +705,7 @@ export const ServicesOverview = () => {
 
   // Service Details
   const svcDetailsResult = useDql({
-    query: serviceDetailsQuery(topN, problemsLookbackHours, timeframeDays),
+    query: serviceDetailsQuery(topN, problemsLookbackHours, tf),
   });
   const svcDetailsData = useMemo(() => {
     if (!svcDetailsResult.data?.records) return [];
@@ -730,15 +720,15 @@ export const ServicesOverview = () => {
       Latency_p99: r["Latency_p99"] as number,
       FailureRate: r["FailureRate"] as number,
       Failures: r["Failures"] as number,
-      "5xx": r["5xx"] as number,
-      "4xx": r["4xx"] as number,
+      "5xx": (r["5xx"] as number) ?? 0,
+      "4xx": (r["4xx"] as number) ?? 0,
       "event.id": r["event.id"] as string,
     }));
   }, [svcDetailsResult.data]);
 
   // Request Details
   const reqDetailsResult = useDql({
-    query: requestDetailsQuery(topN, timeframeDays),
+    query: requestDetailsQuery(topN, tf),
   });
   const reqDetailsData = useMemo(() => {
     if (!reqDetailsResult.data?.records) return [];
@@ -759,33 +749,33 @@ export const ServicesOverview = () => {
   }, [reqDetailsResult.data]);
 
   // Service metric charts
-  const reqTotalResult = useDql({ query: requestsTotalQuery(chartTopN, timeframeDays) });
-  const latP50Result = useDql({ query: latencyP50Query(chartTopN, timeframeDays) });
-  const latP90Result = useDql({ query: latencyP90Query(chartTopN, timeframeDays) });
-  const failedReqResult = useDql({ query: failedRequestsQuery(chartTopN, timeframeDays) });
-  const failRateResult = useDql({ query: failureRateQuery(chartTopN, timeframeDays) });
-  const http5xxResult = useDql({ query: http5xxQuery(chartTopN, timeframeDays) });
-  const http4xxResult = useDql({ query: http4xxQuery(chartTopN, timeframeDays) });
-  const statusCodeResult = useDql({ query: requestsByStatusCodeQuery(chartTopN, timeframeDays) });
+  const reqTotalResult = useDql({ query: requestsTotalQuery(chartTopN, tf) });
+  const latP50Result = useDql({ query: latencyP50Query(chartTopN, tf) });
+  const latP90Result = useDql({ query: latencyP90Query(chartTopN, tf) });
+  const failedReqResult = useDql({ query: failedRequestsQuery(chartTopN, tf) });
+  const failRateResult = useDql({ query: failureRateQuery(chartTopN, tf) });
+  const http5xxResult = useDql({ query: http5xxQuery(chartTopN, tf) });
+  const http4xxResult = useDql({ query: http4xxQuery(chartTopN, tf) });
+  const statusCodeResult = useDql({ query: requestsByStatusCodeQuery(chartTopN, tf) });
 
   // Process metric charts
-  const procCpuResult = useDql({ query: processCpuQuery(chartTopN, timeframeDays) });
-  const procMemPctResult = useDql({ query: processMemoryPercentQuery(chartTopN, timeframeDays) });
-  const procMemUsedResult = useDql({ query: processMemoryUsedQuery(chartTopN, timeframeDays) });
-  const procGcResult = useDql({ query: processGcTimeQuery(chartTopN, timeframeDays) });
+  const procCpuResult = useDql({ query: processCpuQuery(chartTopN, tf) });
+  const procMemPctResult = useDql({ query: processMemoryPercentQuery(chartTopN, tf) });
+  const procMemUsedResult = useDql({ query: processMemoryUsedQuery(chartTopN, tf) });
+  const procGcResult = useDql({ query: processGcTimeQuery(chartTopN, tf) });
 
   // K8s charts
-  const k8sCpuResult = useDql({ query: k8sCpuQuery(chartTopN, timeframeDays) });
-  const k8sMemResult = useDql({ query: k8sMemoryQuery(chartTopN, timeframeDays) });
+  const k8sCpuResult = useDql({ query: k8sCpuQuery(chartTopN, tf) });
+  const k8sMemResult = useDql({ query: k8sMemoryQuery(chartTopN, tf) });
 
   // Enhancement queries
-  const deploymentsResult = useDql({ query: deploymentEventsQuery(timeframeDays) });
-  const changeImpactResult = useDql({ query: changeImpactMetricsQuery(timeframeDays) });
+  const deploymentsResult = useDql({ query: deploymentEventsQuery(tf) });
+  const changeImpactResult = useDql({ query: changeImpactMetricsQuery(tf) });
   const dependenciesResult = useDql({ query: serviceDependenciesQuery() });
-  const closedProblemsResult = useDql({ query: closedProblemsQuery(timeframeDays) });
-  const anomalyCurrentResult = useDql({ query: anomalyCurrentQuery(timeframeDays) });
-  const anomalyBaselineResult = useDql({ query: anomalyBaselineQuery(timeframeDays) });
-  const apdexResult = useDql({ query: apdexQuery(timeframeDays, apdexT) });
+  const closedProblemsResult = useDql({ query: closedProblemsQuery(tf) });
+  const anomalyCurrentResult = useDql({ query: anomalyCurrentQuery(tf) });
+  const anomalyBaselineResult = useDql({ query: anomalyBaselineQuery(prevTf) });
+  const apdexResult = useDql({ query: apdexQuery(tf, apdexT) });
 
   // Comparison mode — previous period (no-op when disabled)
   const svcCompare = compareMode && activeTabKey === "Service Metrics";
@@ -793,22 +783,22 @@ export const ServicesOverview = () => {
   const k8sCompare = compareMode && activeTabKey === "K8s Workloads";
   const apdexCompare = compareMode && activeTabKey === "Apdex";
   const scorecardCompare = compareMode && activeTabKey === "Scorecards";
-  const reqTotalPrev = useDql({ query: svcCompare ? requestsTotalPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const latP50Prev = useDql({ query: svcCompare ? latencyP50PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const latP90Prev = useDql({ query: svcCompare ? latencyP90PrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const failedReqPrev = useDql({ query: svcCompare ? failedRequestsPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const failRatePrev = useDql({ query: svcCompare ? failureRatePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const http5xxPrev = useDql({ query: svcCompare ? http5xxPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const http4xxPrev = useDql({ query: svcCompare ? http4xxPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const statusCodePrev = useDql({ query: svcCompare ? requestsByStatusCodePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const procCpuPrev = useDql({ query: procCompare ? processCpuPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const procMemPctPrev = useDql({ query: procCompare ? processMemoryPercentPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const procMemUsedPrev = useDql({ query: procCompare ? processMemoryUsedPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const procGcPrev = useDql({ query: procCompare ? processGcTimePrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const k8sCpuPrev = useDql({ query: k8sCompare ? k8sCpuPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const k8sMemPrev = useDql({ query: k8sCompare ? k8sMemoryPrevQuery(chartTopN, timeframeDays) : NOOP_QUERY });
-  const apdexPrevResult = useDql({ query: apdexCompare ? apdexPrevQuery(timeframeDays, apdexT) : NOOP_QUERY });
-  const scorecardPrevResult = useDql({ query: scorecardCompare ? scorecardPrevQuery(topN, timeframeDays) : NOOP_QUERY });
+  const reqTotalPrev = useDql({ query: svcCompare ? requestsTotalPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const latP50Prev = useDql({ query: svcCompare ? latencyP50PrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const latP90Prev = useDql({ query: svcCompare ? latencyP90PrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const failedReqPrev = useDql({ query: svcCompare ? failedRequestsPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const failRatePrev = useDql({ query: svcCompare ? failureRatePrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const http5xxPrev = useDql({ query: svcCompare ? http5xxPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const http4xxPrev = useDql({ query: svcCompare ? http4xxPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const statusCodePrev = useDql({ query: svcCompare ? requestsByStatusCodePrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const procCpuPrev = useDql({ query: procCompare ? processCpuPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const procMemPctPrev = useDql({ query: procCompare ? processMemoryPercentPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const procMemUsedPrev = useDql({ query: procCompare ? processMemoryUsedPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const procGcPrev = useDql({ query: procCompare ? processGcTimePrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const k8sCpuPrev = useDql({ query: k8sCompare ? k8sCpuPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const k8sMemPrev = useDql({ query: k8sCompare ? k8sMemoryPrevQuery(chartTopN, prevTf) : NOOP_QUERY });
+  const apdexPrevResult = useDql({ query: apdexCompare ? apdexPrevQuery(prevTf, apdexT) : NOOP_QUERY });
+  const scorecardPrevResult = useDql({ query: scorecardCompare ? scorecardPrevQuery(topN, prevTf) : NOOP_QUERY });
 
   // Convert timeseries data for charts using Strato's built-in converter
   const toTs = (result: { data?: { records?: any; types?: any } | null }) =>
@@ -855,7 +845,7 @@ export const ServicesOverview = () => {
   const sloData = useMemo(() => {
     if (!svcDetailsData.length) return [];
     const budgetPercent = 100 - sloTarget; // e.g., 0.1% for 99.9%
-    const periodMinutes = timeframeDays * 24 * 60;
+    const periodMinutes = Math.max(1, (timeframe.toMs - timeframe.fromMs) / 60000);
     return svcDetailsData.map((svc) => {
       const errorRate = (svc.FailureRate as number) ?? 0;
       const budgetUsed = budgetPercent > 0 ? (errorRate / budgetPercent) * 100 : 0;
@@ -874,7 +864,7 @@ export const ServicesOverview = () => {
         Status: budgetRemaining <= 0 ? "EXHAUSTED" : budgetUsed >= 80 ? "WARNING" : "OK",
       };
     }).sort((a, b) => (b["Budget Used %"] ?? 0) - (a["Budget Used %"] ?? 0));
-  }, [svcDetailsData, sloTarget, timeframeDays]);
+  }, [svcDetailsData, sloTarget, timeframe]);
 
   // ─── Service Scorecards ───
   const scorecardData = useMemo(() => {
@@ -1268,56 +1258,59 @@ export const ServicesOverview = () => {
     setExporting(true);
     try {
       const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
-      const tf = `now()-${timeframeDays}d`;
+      // Notebook timeframe: prefer the raw expression/iso strings from the
+      // current selector, so the notebook reflects the user's selection.
+      const nbTimeframe = { from: timeframe.from, to: timeframe.to };
+      const tfLabel = `${timeframe.from} → ${timeframe.to}`;
       const uid = () => crypto.randomUUID();
 
       const sections: any[] = [
-        { id: uid(), type: "markdown", markdown: `# Services Overview — Exported ${ts}\n\nAuto-generated notebook from the **Services Overview** app.\n\n**Settings:** Top N = ${topN}, Chart Top N = ${chartTopN}, Timeframe = ${timeframeDays}d` },
+        { id: uid(), type: "markdown", markdown: `# Services Overview — Exported ${ts}\n\nAuto-generated notebook from the **Services Overview** app.\n\n**Settings:** Top N = ${topN}, Chart Top N = ${chartTopN}, Timeframe = ${tfLabel}` },
 
         // Service Health
         { id: uid(), type: "markdown", markdown: "## Service Health" },
-        { id: uid(), type: "dql", title: "Services Health Overview", showTitle: true, height: 400, state: { input: { value: servicesHealthQuery(problemsLookbackHours), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Services Health Overview", showTitle: true, height: 400, state: { input: { value: servicesHealthQuery(problemsLookbackHours), timeframe: nbTimeframe }, visualization: "table" } },
 
         // Service Details
         { id: uid(), type: "markdown", markdown: "## Service Details" },
-        { id: uid(), type: "dql", title: "Service Details", showTitle: true, height: 400, state: { input: { value: serviceDetailsQuery(topN, timeframeDays, problemsLookbackHours), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Service Details", showTitle: true, height: 400, state: { input: { value: serviceDetailsQuery(topN, problemsLookbackHours, tf), timeframe: nbTimeframe }, visualization: "table" } },
 
         // Request Details
         { id: uid(), type: "markdown", markdown: "## Request Details" },
-        { id: uid(), type: "dql", title: "Request Details", showTitle: true, height: 400, state: { input: { value: requestDetailsQuery(topN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Request Details", showTitle: true, height: 400, state: { input: { value: requestDetailsQuery(topN, tf), timeframe: nbTimeframe }, visualization: "table" } },
 
         // Service Metrics
         { id: uid(), type: "markdown", markdown: "## Service Metrics" },
-        { id: uid(), type: "dql", title: "Requests Total", showTitle: true, height: 300, state: { input: { value: requestsTotalQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Latency P50", showTitle: true, height: 300, state: { input: { value: latencyP50Query(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Latency P90", showTitle: true, height: 300, state: { input: { value: latencyP90Query(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Failure Rate %", showTitle: true, height: 300, state: { input: { value: failureRateQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Requests by Status Code", showTitle: true, height: 300, state: { input: { value: requestsByStatusCodeQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "barChart" } },
-        { id: uid(), type: "dql", title: "Failed Requests", showTitle: true, height: 300, state: { input: { value: failedRequestsQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "5xx Errors", showTitle: true, height: 300, state: { input: { value: http5xxQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "4xx Errors", showTitle: true, height: 300, state: { input: { value: http4xxQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Requests Total", showTitle: true, height: 300, state: { input: { value: requestsTotalQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Latency P50", showTitle: true, height: 300, state: { input: { value: latencyP50Query(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Latency P90", showTitle: true, height: 300, state: { input: { value: latencyP90Query(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Failure Rate %", showTitle: true, height: 300, state: { input: { value: failureRateQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Requests by Status Code", showTitle: true, height: 300, state: { input: { value: requestsByStatusCodeQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "barChart" } },
+        { id: uid(), type: "dql", title: "Failed Requests", showTitle: true, height: 300, state: { input: { value: failedRequestsQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "5xx Errors", showTitle: true, height: 300, state: { input: { value: http5xxQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "4xx Errors", showTitle: true, height: 300, state: { input: { value: http4xxQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
 
         // Process Metrics
         { id: uid(), type: "markdown", markdown: "## Process Metrics" },
-        { id: uid(), type: "dql", title: "Process CPU Usage %", showTitle: true, height: 300, state: { input: { value: processCpuQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Process Memory Usage %", showTitle: true, height: 300, state: { input: { value: processMemoryPercentQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "Process Memory Used", showTitle: true, height: 300, state: { input: { value: processMemoryUsedQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "GC Suspension Time %", showTitle: true, height: 300, state: { input: { value: processGcTimeQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Process CPU Usage %", showTitle: true, height: 300, state: { input: { value: processCpuQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Process Memory Usage %", showTitle: true, height: 300, state: { input: { value: processMemoryPercentQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "Process Memory Used", showTitle: true, height: 300, state: { input: { value: processMemoryUsedQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "GC Suspension Time %", showTitle: true, height: 300, state: { input: { value: processGcTimeQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
 
         // K8s Workloads
         { id: uid(), type: "markdown", markdown: "## K8s Workload Metrics" },
-        { id: uid(), type: "dql", title: "K8s Workload CPU Usage", showTitle: true, height: 300, state: { input: { value: k8sCpuQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
-        { id: uid(), type: "dql", title: "K8s Workload Memory Usage", showTitle: true, height: 300, state: { input: { value: k8sMemoryQuery(chartTopN, timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "K8s Workload CPU Usage", showTitle: true, height: 300, state: { input: { value: k8sCpuQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
+        { id: uid(), type: "dql", title: "K8s Workload Memory Usage", showTitle: true, height: 300, state: { input: { value: k8sMemoryQuery(chartTopN, tf), timeframe: nbTimeframe }, visualization: "lineChart" } },
 
         // Problems & MTTR
         { id: uid(), type: "markdown", markdown: "## Problems & MTTR" },
-        { id: uid(), type: "dql", title: "Active Problems", showTitle: true, height: 400, state: { input: { value: problemsQuery(), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
-        { id: uid(), type: "dql", title: "Closed Problems (MTTR)", showTitle: true, height: 400, state: { input: { value: closedProblemsQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Active Problems", showTitle: true, height: 400, state: { input: { value: problemsQuery(), timeframe: nbTimeframe }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Closed Problems (MTTR)", showTitle: true, height: 400, state: { input: { value: closedProblemsQuery(tf), timeframe: nbTimeframe }, visualization: "table" } },
 
         // Anomaly Detection
         { id: uid(), type: "markdown", markdown: "## Anomaly Detection" },
-        { id: uid(), type: "dql", title: "Current Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyCurrentQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
-        { id: uid(), type: "dql", title: "Baseline Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyBaselineQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Current Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyCurrentQuery(tf), timeframe: nbTimeframe }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Baseline Period Analysis", showTitle: true, height: 400, state: { input: { value: anomalyBaselineQuery(prevTf), timeframe: nbTimeframe }, visualization: "table" } },
 
         // Dependencies
         { id: uid(), type: "markdown", markdown: "## Service Dependencies" },
@@ -1325,12 +1318,12 @@ export const ServicesOverview = () => {
 
         // Deployments
         { id: uid(), type: "markdown", markdown: "## Deployment Events" },
-        { id: uid(), type: "dql", title: "Recent Deployments", showTitle: true, height: 400, state: { input: { value: deploymentEventsQuery(timeframeDays), timeframe: { from: tf, to: "now()" } }, visualization: "table" } },
+        { id: uid(), type: "dql", title: "Recent Deployments", showTitle: true, height: 400, state: { input: { value: deploymentEventsQuery(tf), timeframe: nbTimeframe }, visualization: "table" } },
       ];
 
       const notebookContent = {
         version: "7",
-        defaultTimeframe: { from: tf, to: "now()" },
+        defaultTimeframe: nbTimeframe,
         sections,
       };
 
@@ -1352,7 +1345,7 @@ export const ServicesOverview = () => {
     } finally {
       setExporting(false);
     }
-  }, [topN, chartTopN, timeframeDays, problemsLookbackHours]);
+  }, [topN, chartTopN, tf, prevTf, problemsLookbackHours, timeframe.from, timeframe.to]);
 
   // --- Column Definitions ---
   const problemsColumns = useMemo(
@@ -1393,7 +1386,19 @@ export const ServicesOverview = () => {
       { id: "RootCause", header: "Root Cause", accessor: "RootCause" },
       { id: "StartTime", header: "Start Time", accessor: "StartTime" },
       { id: "EndTime", header: "End Time", accessor: "EndTime" },
-      { id: "Duration", header: "Duration", accessor: "Duration" },
+      {
+        id: "Duration",
+        header: "Duration",
+        accessor: "Duration",
+        cell: ({ value }: { value: any }) => {
+          if (value == null) return <span>N/A</span>;
+          const totalSeconds = Math.floor(Number(value) / 1_000_000_000);
+          const h = Math.floor(totalSeconds / 3600);
+          const m = Math.floor((totalSeconds % 3600) / 60);
+          const s = totalSeconds % 60;
+          return <span>{`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`}</span>;
+        },
+      },
     ],
     []
   );
@@ -1441,40 +1446,42 @@ export const ServicesOverview = () => {
         header: "Failure Rate %",
         accessor: "FailureRate",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "greater-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than-or-equal-to" as const, value: 2, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          const bg = v >= 2 ? RED : v > 0 ? YELLOW : GREEN;
+          const fg = v >= 2 ? "#fff" : "#000";
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v < 1 && v > 0 ? "< 1" : Math.round(v).toLocaleString()}</span>;
+        },
       },
       {
         id: "Failures",
         header: "Failures",
         accessor: "Failures",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "greater-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than-or-equal-to" as const, value: 1, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? RED : GREEN, color: v >= 1 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
       {
         id: "5xx",
         header: "5xx",
         accessor: "5xx",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? RED : GREEN, color: v >= 1 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
       {
         id: "4xx",
         header: "4xx",
         accessor: "4xx",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? RED : GREEN, color: v >= 1 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
     ],
     []
@@ -1513,41 +1520,42 @@ export const ServicesOverview = () => {
         header: "Failure Rate %",
         accessor: "FailureRate",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "greater-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than-or-equal-to" as const, value: 1, backgroundColor: YELLOW, color: "#000" },
-          { comparator: "greater-than-or-equal-to" as const, value: 2, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          const bg = v >= 2 ? RED : v >= 1 ? YELLOW : GREEN;
+          const fg = v >= 2 ? "#fff" : "#000";
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v < 1 && v > 0 ? "< 1" : Math.round(v).toLocaleString()}</span>;
+        },
       },
       {
         id: "Failures",
         header: "Failures",
         accessor: "Failures",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "greater-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than-or-equal-to" as const, value: 1, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? RED : GREEN, color: v >= 1 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
       {
         id: "5xx",
         header: "5xx",
         accessor: "5xx",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#fff" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? RED : GREEN, color: v >= 1 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
       {
         id: "4xx",
         header: "4xx",
         accessor: "4xx",
         columnType: "number" as const,
-        thresholds: [
-          { comparator: "equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-          { comparator: "greater-than" as const, value: 0, backgroundColor: YELLOW, color: "#000" },
-        ],
+        cell: ({ value }: { value: number }) => {
+          const v = value ?? 0;
+          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v >= 1 ? YELLOW : GREEN, color: "#000", fontWeight: 700, textAlign: "center" }}>{v.toLocaleString()}</span>;
+        },
       },
     ],
     []
@@ -1565,24 +1573,6 @@ export const ServicesOverview = () => {
       <div className="svc-filter-bar">
         <Flex gap={16} alignItems="flex-end" flexWrap="wrap">
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <Flex flexDirection="column" gap={4} style={{ minWidth: 140 }}>
-              <Strong>Timeframe</Strong>
-              <Select
-                value={timeframeDays}
-                onChange={(val) => {
-                  if (val != null) setTimeframeDays(val as number);
-                }}
-              >
-                <Select.Content>
-                  {TIMEFRAME_OPTIONS.map((opt) => (
-                    <Select.Option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </Select.Option>
-                  ))}
-                </Select.Content>
-              </Select>
-            </Flex>
-
             <Button variant="default" onClick={() => setHelpOpen(true)}>
               <Button.Prefix>
                 <HelpIcon />
@@ -2325,18 +2315,20 @@ export const ServicesOverview = () => {
                       { id: "ErrorRate", header: "Error Rate %", accessor: "Error Rate %", columnType: "number" as const },
                       { id: "SloTarget", header: "SLO Target", accessor: "SLO Target" },
                       { id: "BudgetUsed", header: "Budget Used %", accessor: "Budget Used %", columnType: "number" as const,
-                        thresholds: [
-                          { comparator: "less-than" as const, value: 80, backgroundColor: GREEN, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 80, backgroundColor: YELLOW, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 100, backgroundColor: RED, color: "#fff" },
-                        ] },
+                        cell: ({ value }: { value: number }) => {
+                          const v = value ?? 0;
+                          const bg = v >= 100 ? RED : v >= 80 ? YELLOW : GREEN;
+                          const fg = v >= 100 ? "#fff" : "#000";
+                          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(1)}</span>;
+                        } },
                       { id: "BudgetRem", header: "Budget Remaining %", accessor: "Budget Remaining %", columnType: "number" as const },
                       { id: "BurnRate", header: "Burn Rate", accessor: "Burn Rate", columnType: "number" as const,
-                        thresholds: [
-                          { comparator: "less-than" as const, value: 1, backgroundColor: GREEN, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 1, backgroundColor: YELLOW, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 2, backgroundColor: RED, color: "#fff" },
-                        ] },
+                        cell: ({ value }: { value: number }) => {
+                          const v = value ?? 0;
+                          const bg = v >= 2 ? RED : v >= 1 ? YELLOW : GREEN;
+                          const fg = v >= 2 ? "#fff" : "#000";
+                          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>;
+                        } },
                       { id: "Status", header: "Status", accessor: "Status",
                         cell: ({ value }: { value: string }) => (
                           <span className={`svc-status-badge ${value === "EXHAUSTED" ? "svc-status-active" : value === "WARNING" ? "" : "svc-status-closed"}`}
@@ -2377,11 +2369,12 @@ export const ServicesOverview = () => {
                       columns={[
                         { id: "Service", header: "Service", accessor: "Service", cell: serviceLinkCell },
                         { id: "Score", header: "Score", accessor: "Score", columnType: "number" as const,
-                          thresholds: [
-                            { comparator: "less-than" as const, value: 60, backgroundColor: RED, color: "#fff" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 60, backgroundColor: YELLOW, color: "#000" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 75, backgroundColor: GREEN, color: "#000" },
-                          ] },
+                          cell: ({ value }: { value: number }) => {
+                            const v = value ?? 0;
+                            const bg = v >= 75 ? GREEN : v >= 60 ? YELLOW : RED;
+                            const fg = v < 60 ? "#fff" : "#000";
+                            return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v}</span>;
+                          } },
                         ...(scorecardCompare ? [
                           { id: "PrevScore", header: "Prev Score", accessor: "Prev Score" },
                           { id: "DeltaScore", header: "Δ Score", accessor: "Δ Score", columnType: "number" as const,
@@ -2555,11 +2548,12 @@ export const ServicesOverview = () => {
                       { id: "Start", header: "Start", accessor: "Start" },
                       { id: "End", header: "End", accessor: "End" },
                       { id: "Duration", header: "Duration (min)", accessor: "Duration (min)", columnType: "number" as const,
-                        thresholds: [
-                          { comparator: "less-than" as const, value: 30, backgroundColor: GREEN, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 30, backgroundColor: YELLOW, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 120, backgroundColor: RED, color: "#fff" },
-                        ] },
+                        cell: ({ value }: { value: number }) => {
+                          const v = value ?? 0;
+                          const bg = v >= 120 ? RED : v >= 30 ? YELLOW : GREEN;
+                          const fg = v >= 120 ? "#fff" : "#000";
+                          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(1)}</span>;
+                        } },
                       { id: "RootCause", header: "Root Cause", accessor: "Root Cause" },
                     ]}
                     sortable
@@ -2609,10 +2603,12 @@ export const ServicesOverview = () => {
                       { id: "LatNow", header: "Latency P90 (now)", accessor: "Latency P90 (now)", columnType: "number" as const },
                       { id: "LatBase", header: "Latency P90 (base)", accessor: "Latency P90 (baseline)", columnType: "number" as const },
                       { id: "LatChange", header: "Latency Δ %", accessor: "Latency Change %", columnType: "number" as const,
-                        thresholds: [
-                          { comparator: "less-than" as const, value: 50, backgroundColor: GREEN, color: "#000" },
-                          { comparator: "greater-than-or-equal-to" as const, value: 50, backgroundColor: RED, color: "#fff" },
-                        ] },
+                        cell: ({ value }: { value: number }) => {
+                          const v = value ?? 0;
+                          const bg = v >= 50 ? RED : GREEN;
+                          const fg = v >= 50 ? "#fff" : "#000";
+                          return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(1)}</span>;
+                        } },
                       { id: "ErrNow", header: "Error Rate (now)", accessor: "Error Rate (now)", columnType: "number" as const },
                       { id: "ErrBase", header: "Error Rate (base)", accessor: "Error Rate (baseline)", columnType: "number" as const },
                       { id: "ErrChange", header: "Error Δ %", accessor: "Error Rate Change %", columnType: "number" as const },
@@ -2689,7 +2685,7 @@ export const ServicesOverview = () => {
               </div>
               {deploymentsResult.isLoading || changeImpactResult.isLoading ? <LoadingState /> : changeImpactData.length === 0 ? (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
-                  <Strong>No deployment events found in the last {timeframeDays} days</Strong>
+                  <Strong>No deployment events found in the selected timeframe</Strong>
                 </div>
               ) : (
                 <>
@@ -2721,19 +2717,21 @@ export const ServicesOverview = () => {
                         { id: "LatBefore", header: "Latency P90 (Before)", accessor: "Latency P90 (Before)", columnType: "number" as const },
                         { id: "LatAfter", header: "Latency P90 (After)", accessor: "Latency P90 (After)", columnType: "number" as const },
                         { id: "LatDelta", header: "Latency Δ %", accessor: "Latency Δ %", columnType: "number" as const,
-                          thresholds: [
-                            { comparator: "less-than" as const, value: -10, backgroundColor: GREEN, color: "#000" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 20, backgroundColor: YELLOW, color: "#000" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 50, backgroundColor: RED, color: "#fff" },
-                          ] },
+                          cell: ({ value }: { value: number }) => {
+                            const v = value ?? 0;
+                            const bg = v >= 50 ? RED : v >= 20 ? YELLOW : v < -10 ? GREEN : "transparent";
+                            const fg = v >= 50 ? "#fff" : v >= 20 || v < -10 ? "#000" : "inherit";
+                            return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(1)}</span>;
+                          } },
                         { id: "ErrBefore", header: "Error Rate (Before)", accessor: "Error Rate (Before)", columnType: "number" as const },
                         { id: "ErrAfter", header: "Error Rate (After)", accessor: "Error Rate (After)", columnType: "number" as const },
                         { id: "ErrDelta", header: "Error Δ pp", accessor: "Error Δ pp", columnType: "number" as const,
-                          thresholds: [
-                            { comparator: "less-than" as const, value: 0, backgroundColor: GREEN, color: "#000" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 0.5, backgroundColor: YELLOW, color: "#000" },
-                            { comparator: "greater-than-or-equal-to" as const, value: 2, backgroundColor: RED, color: "#fff" },
-                          ] },
+                          cell: ({ value }: { value: number }) => {
+                            const v = value ?? 0;
+                            const bg = v >= 2 ? RED : v >= 0.5 ? YELLOW : v < 0 ? GREEN : "transparent";
+                            const fg = v >= 2 ? "#fff" : v >= 0.5 || v < 0 ? "#000" : "inherit";
+                            return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>;
+                          } },
                         { id: "Verdict", header: "Verdict", accessor: "Verdict" },
                       ]}
                       sortable
@@ -2761,7 +2759,7 @@ export const ServicesOverview = () => {
               </div>
               {apdexResult.isLoading ? <LoadingState /> : apdexData.length === 0 ? (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
-                  <Strong>No span data found in the last {timeframeDays} days</Strong>
+                  <Strong>No span data found in the selected timeframe</Strong>
                 </div>
               ) : (
                 <>
@@ -2854,13 +2852,12 @@ export const ServicesOverview = () => {
                           { id: "DeltaApdex", header: "Δ Apdex", accessor: "Δ Apdex" },
                         ] : []),
                         { id: "Rating", header: "Rating", accessor: "Rating",
-                          thresholds: [
-                            { comparator: "equal-to" as const, value: "Excellent", backgroundColor: GREEN, color: "#000" },
-                            { comparator: "equal-to" as const, value: "Good", backgroundColor: "#2da44e", color: "#fff" },
-                            { comparator: "equal-to" as const, value: "Fair", backgroundColor: YELLOW, color: "#000" },
-                            { comparator: "equal-to" as const, value: "Poor", backgroundColor: RED, color: "#fff" },
-                            { comparator: "equal-to" as const, value: "Unacceptable", backgroundColor: RED, color: "#fff" },
-                          ] },
+                          cell: ({ value }: { value: string }) => {
+                            const v = value ?? "";
+                            const bg = v === "Excellent" ? GREEN : v === "Good" ? "#2da44e" : v === "Fair" ? YELLOW : RED;
+                            const fg = v === "Excellent" || v === "Fair" ? "#000" : "#fff";
+                            return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: bg, color: fg, fontWeight: 700, textAlign: "center" }}>{v}</span>;
+                          } },
                         { id: "Satisfied", header: "Satisfied", accessor: "Satisfied", columnType: "number" as const },
                         { id: "SatisfiedPct", header: "Satisfied %", accessor: "Satisfied %" },
                         { id: "Tolerating", header: "Tolerating", accessor: "Tolerating", columnType: "number" as const },
@@ -2993,19 +2990,19 @@ export const ServicesOverview = () => {
                       { id: "svc", header: "Service", accessor: "Service", cell: serviceLinkCell },
                       { id: "avgThen", header: "Avg (then)", accessor: "Avg (then)", columnType: "number" as const },
                       { id: "avgNow", header: "Avg (now)", accessor: "Avg (now)", columnType: "number" as const },
-                      { id: "avgD", header: "Avg \u0394", accessor: "Avg \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "avgD", header: "Avg \u0394", accessor: "Avg \u0394", columnType: "number" as const, cell: ({ value }: { value: number }) => { const v = value ?? 0; return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v > 0 ? RED : GREEN, color: v > 0 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>; } },
                       { id: "p50Then", header: "P50 (then)", accessor: "P50 (then)", columnType: "number" as const },
                       { id: "p50Now", header: "P50 (now)", accessor: "P50 (now)", columnType: "number" as const },
-                      { id: "p50D", header: "P50 \u0394", accessor: "P50 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p50D", header: "P50 \u0394", accessor: "P50 \u0394", columnType: "number" as const, cell: ({ value }: { value: number }) => { const v = value ?? 0; return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v > 0 ? RED : GREEN, color: v > 0 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>; } },
                       { id: "p90Then", header: "P90 (then)", accessor: "P90 (then)", columnType: "number" as const },
                       { id: "p90Now", header: "P90 (now)", accessor: "P90 (now)", columnType: "number" as const },
-                      { id: "p90D", header: "P90 \u0394", accessor: "P90 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p90D", header: "P90 \u0394", accessor: "P90 \u0394", columnType: "number" as const, cell: ({ value }: { value: number }) => { const v = value ?? 0; return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v > 0 ? RED : GREEN, color: v > 0 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>; } },
                       { id: "p99Then", header: "P99 (then)", accessor: "P99 (then)", columnType: "number" as const },
                       { id: "p99Now", header: "P99 (now)", accessor: "P99 (now)", columnType: "number" as const },
-                      { id: "p99D", header: "P99 \u0394", accessor: "P99 \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "p99D", header: "P99 \u0394", accessor: "P99 \u0394", columnType: "number" as const, cell: ({ value }: { value: number }) => { const v = value ?? 0; return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v > 0 ? RED : GREEN, color: v > 0 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>; } },
                       { id: "frThen", header: "Fail% (then)", accessor: "Fail% (then)", columnType: "number" as const },
                       { id: "frNow", header: "Fail% (now)", accessor: "Fail% (now)", columnType: "number" as const },
-                      { id: "frD", header: "Fail% \u0394", accessor: "Fail% \u0394", columnType: "number" as const, thresholds: [{ comparator: "greater-than" as const, value: 0, backgroundColor: RED, color: "#000" }, { comparator: "less-than-or-equal-to" as const, value: 0, backgroundColor: GREEN, color: "#000" }] },
+                      { id: "frD", header: "Fail% \u0394", accessor: "Fail% \u0394", columnType: "number" as const, cell: ({ value }: { value: number }) => { const v = value ?? 0; return <span style={{ display: "inline-block", width: "100%", padding: "2px 8px", borderRadius: 4, background: v > 0 ? RED : GREEN, color: v > 0 ? "#fff" : "#000", fontWeight: 700, textAlign: "center" }}>{v.toFixed(2)}</span>; } },
                     ]}
                     sortable
                     resizable

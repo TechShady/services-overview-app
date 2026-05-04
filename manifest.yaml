@@ -1,7 +1,7 @@
 app-bundle-version: 0.1.0
 id: my.services.overview.app
 name: Services Overview
-version: "0.21.2"
+version: "0.23.0"
 description: SRE dashboard for service health, requests, latency and errors
 scopes:
   - name: storage:logs:read

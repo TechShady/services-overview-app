@@ -3,29 +3,6 @@ This project was created by myself, an SE of Dynatrace. This is not an official 
 
 The Services Overview App is a Dynatrace platform application that provides a comprehensive, multi-tab SRE command center for monitoring, analyzing, and managing service reliability across an entire fleet. It aggregates RED metrics (Rate, Errors, Duration), Kubernetes workload health, dependency topology, SLO error budgets, anomaly detection, blast radius simulation, and capacity planning into a single unified interface.
 
-Architecture
-ui/
-├── main.tsx                          # Entry point (IntlProvider + AppRoot)
-├── app/
-│   ├── App.tsx                       # Root component (ErrorBoundary + TimeframeProvider + Page + Router)
-│   ├── queries.ts                    # All DQL query builder functions
-│   ├── components/
-│   │   ├── Header.tsx                # App navigation link (shell chrome)
-│   │   ├── ServiceTopology.tsx       # D3 force-directed dependency graph
-│   │   ├── BlastRadiusGraph.tsx      # Service-mode blast radius graph
-│   │   ├── HostBlastRadiusGraph.tsx  # Host-mode blast radius graph
-│   │   ├── K8sWorkloadBlastRadiusGraph.tsx
-│   │   ├── K8sClusterBlastRadiusGraph.tsx
-│   │   ├── K8sNodeBlastRadiusGraph.tsx
-│   │   ├── K8sNamespaceBlastRadiusGraph.tsx
-│   │   ├── K8sPodBlastRadiusGraph.tsx
-│   │   └── K8sContainerBlastRadiusGraph.tsx
-│   ├── pages/
-│   │   ├── ServicesOverview.tsx       # Main page with all tab logic
-│   │   └── ServicesOverview.css       # Styling
-│   └── state/
-│       └── TimeframeContext.tsx       # Global timeframe state + DQL helpers
-
 ## Getting Started
 
 ### Prerequisites

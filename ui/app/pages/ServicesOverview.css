@@ -1,0 +1,781 @@
+/* Services Overview — Premium styling */
+
+.svc-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 100%;
+}
+
+/* Sticky header bar */
+.svc-filter-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(20, 22, 38, 0.97);
+  backdrop-filter: blur(12px);
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.15);
+}
+
+/* Section header gradient bar */
+.svc-section-header {
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #0d3fb8 0%, #134fc9 50%, #1a6bef 100%);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(19, 79, 201, 0.35);
+}
+
+.svc-section-header h5,
+.svc-section-header h6 {
+  color: #fff;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+/* Chart tile */
+.svc-chart-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+  transition: box-shadow 0.2s ease, transform 0.15s ease;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.svc-chart-tile:hover {
+  box-shadow: 0 4px 16px rgba(19, 79, 201, 0.25), 0 0 2px rgba(99, 130, 191, 0.35);
+  transform: translateY(-1px);
+}
+
+.svc-chart-tile .chart-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.svc-chart-tile .chart-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.svc-chart-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s ease;
+}
+
+.svc-chart-toggle:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Related metrics button on KPI cards */
+.kpi-card .kpi-related-btn {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  font-size: 11px;
+  opacity: 0;
+  background: rgba(128, 128, 128, 0.1);
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: rgba(165, 110, 255, 0.8);
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.15s;
+  line-height: 1.2;
+  z-index: 2;
+}
+
+.kpi-card:hover .kpi-related-btn {
+  opacity: 1;
+}
+
+.kpi-card .kpi-related-btn:hover {
+  background: rgba(165, 110, 255, 0.15);
+  border-color: rgba(165, 110, 255, 0.4);
+}
+
+/* Maximized chart overlay */
+.svc-chart-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.75);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.svc-chart-maximized {
+  width: 90vw;
+  height: 85vh;
+  border: 1px solid rgba(99, 130, 191, 0.35);
+  border-radius: 12px;
+  padding: 20px 24px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.95) 0%, rgba(22, 26, 42, 0.98) 100%);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.svc-chart-maximized .chart-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.svc-chart-maximized .chart-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.svc-chart-maximized .chart-description {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 0 12px 0;
+}
+
+.svc-chart-maximized .chart-body {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.svc-chart-maximized .chart-body > * {
+  height: 100% !important;
+}
+
+/* Compare split-screen overlay */
+.svc-compare-split {
+  width: 95vw;
+  height: 88vh;
+  display: flex;
+  gap: 16px;
+  position: relative;
+}
+
+.svc-compare-half {
+  flex: 1;
+  border: 1px solid rgba(99, 130, 191, 0.35);
+  border-radius: 12px;
+  padding: 20px 24px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.95) 0%, rgba(22, 26, 42, 0.98) 100%);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.svc-compare-half .chart-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.svc-compare-half .chart-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.chart-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(99, 130, 191, 0.2);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.svc-compare-half .chart-body {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.svc-compare-half .chart-body > * {
+  height: 100% !important;
+}
+
+.svc-compare-close {
+  position: absolute;
+  top: -16px;
+  right: -16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(99, 130, 191, 0.4);
+  background: rgba(30, 35, 55, 0.95);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  z-index: 1;
+}
+
+.svc-compare-close:hover {
+  color: rgba(255, 255, 255, 1);
+  border-color: rgba(99, 130, 191, 0.7);
+}
+
+.svc-chart-tile .chart-description {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 0 8px 0;
+  line-height: 1.4;
+}
+
+.svc-chart-tile .chart-body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Table tile */
+.svc-table-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+}
+
+/* Table cell alignment & padding */
+.svc-table-tile th,
+.svc-table-tile td,
+.svc-table-tile [role="cell"],
+.svc-table-tile [role="columnheader"],
+.svc-table-tile [data-column-id] {
+  vertical-align: middle !important;
+  align-items: center !important;
+}
+
+.svc-table-tile tr,
+.svc-table-tile [role="row"] {
+  vertical-align: middle !important;
+  align-items: center !important;
+}
+
+/* Right padding on cell content to prevent adjacent columns running together.
+   Strato DataTable uses hashed CSS-in-JS class names, so target by structure:
+   any direct child element of any table cell-like container. */
+.svc-table-tile table th,
+.svc-table-tile table td {
+  padding-right: 24px !important;
+  padding-left: 8px !important;
+}
+
+/* Strato uses div-based grid; cells often have data-* attrs or testids.
+   Add right margin to the rendered content (link/span) inside each cell. */
+.svc-table-tile [class*="DataTableCell"],
+.svc-table-tile [class*="data-table-cell"],
+.svc-table-tile [class*="TableCell"],
+.svc-table-tile [class*="ColumnHeader"],
+.svc-table-tile [class*="HeaderCell"] {
+  padding-right: 24px !important;
+  padding-left: 8px !important;
+}
+
+/* Last-resort: add right margin to every direct child inside any element
+   that looks like a row's cell wrapper inside the table tile */
+.svc-table-tile [role="row"] > * {
+  padding-right: 24px !important;
+  box-sizing: border-box;
+}
+
+/* Force long text/links inside table cells to truncate with ellipsis instead
+   of overflowing into adjacent cells visually */
+.svc-table-tile [role="cell"],
+.svc-table-tile [role="columnheader"],
+.svc-table-tile [class*="DataTableCell"],
+.svc-table-tile [class*="TableCell"],
+.svc-table-tile td,
+.svc-table-tile th {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.svc-table-tile [role="cell"] a,
+.svc-table-tile [role="cell"] span,
+.svc-table-tile td a,
+.svc-table-tile td span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Grid layouts */
+.svc-chart-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+.svc-chart-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 1400px) {
+  .svc-chart-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 900px) {
+  .svc-chart-grid-4,
+  .svc-chart-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Overview row: honeycomb + problems */
+.svc-overview-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 16px;
+}
+@media (max-width: 1200px) {
+  .svc-overview-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Honeycomb tile */
+.svc-honeycomb-tile {
+  border: 1px solid rgba(99, 130, 191, 0.25);
+  border-radius: 10px;
+  padding: 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.6) 0%, rgba(22, 26, 42, 0.8) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(99, 130, 191, 0.2);
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Status badges */
+.svc-status-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.svc-status-active {
+  background: #C21930;
+  color: #fff;
+}
+.svc-status-closed {
+  background: #0D9C29;
+  color: #fff;
+}
+
+/* Help modal content */
+.svc-help-content {
+  padding: 16px;
+  max-height: 70vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.svc-help-content h3 {
+  margin-top: 24px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.2);
+  padding-bottom: 4px;
+}
+.svc-help-content h3:first-child {
+  margin-top: 0;
+}
+.svc-help-content h4 {
+  margin-top: 16px;
+  margin-bottom: 6px;
+}
+.svc-help-content ul {
+  padding-left: 20px;
+}
+.svc-help-content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.svc-help-content th,
+.svc-help-content td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(99, 130, 191, 0.15);
+}
+.svc-help-content code {
+  background: rgba(69, 137, 255, 0.12);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* Loading center */
+.svc-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 48px;
+}
+
+/* AI Insights */
+.svc-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(165, 110, 255, 0.35);
+  background: rgba(165, 110, 255, 0.08);
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.svc-ai-btn:hover {
+  background: rgba(165, 110, 255, 0.18);
+  border-color: rgba(165, 110, 255, 0.5);
+}
+.svc-ai-btn.active {
+  background: rgba(165, 110, 255, 0.15);
+  border-color: rgba(165, 110, 255, 0.5);
+  box-shadow: 0 0 8px rgba(165, 110, 255, 0.15);
+}
+.svc-ai-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.svc-ai-panel {
+  border: 1px solid rgba(165, 110, 255, 0.25);
+  border-radius: 10px;
+  background: rgba(165, 110, 255, 0.04);
+  overflow: hidden;
+  animation: svc-ai-slide-in 0.25s ease-out;
+}
+@keyframes svc-ai-slide-in {
+  from { opacity: 0; max-height: 0; transform: translateY(-8px); }
+  to   { opacity: 1; max-height: 2000px; transform: translateY(0); }
+}
+.svc-ai-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(165, 110, 255, 0.15);
+}
+.svc-ai-panel-header svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.svc-ai-panel-body {
+  padding: 16px;
+}
+.svc-ai-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  opacity: 0.5;
+  margin-bottom: 8px;
+}
+.svc-ai-insight-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+.svc-ai-insight-row.good {
+  background: rgba(13, 156, 41, 0.06);
+  border-left: 3px solid #0D9C29;
+}
+.svc-ai-insight-row.warning {
+  background: rgba(255, 131, 43, 0.06);
+  border-left: 3px solid #FF832B;
+}
+.svc-ai-insight-row.critical {
+  background: rgba(194, 25, 48, 0.06);
+  border-left: 3px solid #C21930;
+}
+.svc-ai-insight-row.info {
+  background: rgba(69, 137, 255, 0.06);
+  border-left: 3px solid #4589FF;
+}
+.svc-ai-recommendation {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.04);
+  margin-bottom: 4px;
+}
+.svc-ai-rec-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.svc-ai-rec-badge.high {
+  background: rgba(194, 25, 48, 0.12);
+  color: #C21930;
+}
+.svc-ai-rec-badge.medium {
+  background: rgba(255, 131, 43, 0.12);
+  color: #FF832B;
+}
+.svc-ai-rec-badge.low {
+  background: rgba(128, 128, 128, 0.1);
+}
+@keyframes svc-ai-typewriter {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.svc-ai-stream-word {
+  display: inline;
+  opacity: 0;
+  animation: svc-ai-typewriter 0.3s ease forwards;
+}
+
+/* Executive Summary bar */
+.svc-exec-summary {
+  border: 1px solid rgba(69, 137, 255, 0.2);
+  border-radius: 10px;
+  padding: 16px;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.4) 0%, rgba(22, 26, 42, 0.6) 100%);
+}
+
+/* KPI Scrolling Marquee */
+.svc-kpi-marquee {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(69, 137, 255, 0.2);
+  border-radius: 10px;
+  padding: 16px 0;
+  background: linear-gradient(145deg, rgba(30, 35, 55, 0.4) 0%, rgba(22, 26, 42, 0.6) 100%);
+}
+
+.svc-kpi-marquee::before,
+.svc-kpi-marquee::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 80px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.svc-kpi-marquee::before {
+  left: 0;
+  background: linear-gradient(to right, rgba(22, 24, 42, 0.95), transparent);
+}
+
+.svc-kpi-marquee::after {
+  right: 0;
+  background: linear-gradient(to left, rgba(22, 24, 42, 0.95), transparent);
+}
+
+.svc-kpi-marquee-track {
+  display: flex;
+  gap: 12px;
+  width: max-content;
+  padding: 0 16px;
+  animation: svc-kpi-scroll 30s linear infinite;
+}
+
+.svc-kpi-marquee:hover .svc-kpi-marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes svc-kpi-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* Top 3 Risks Callout */
+.svc-risks-callout {
+  border: 1px solid rgba(252, 213, 63, 0.25);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: linear-gradient(145deg, rgba(252, 213, 63, 0.03) 0%, rgba(194, 25, 48, 0.03) 100%);
+}
+
+/* Service Metrics — Metric toggle controls */
+.svc-metric-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.06);
+  border: 1px solid rgba(128, 128, 128, 0.15);
+}
+
+/* Forecast banner */
+.svc-forecast-banner {
+  border: 1px solid rgba(69, 137, 255, 0.2);
+  border-radius: 10px;
+  padding: 16px;
+  background: rgba(69, 137, 255, 0.03);
+}
+.svc-forecast-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.svc-forecast-card {
+  flex: 1 1 140px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  background: rgba(128, 128, 128, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Anomaly Deviation */
+.svc-anomaly-deviation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.svc-anomaly-deviation-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(194, 25, 48, 0.15);
+  background: rgba(194, 25, 48, 0.03);
+}
+.svc-deviation-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Memory Leak Banner */
+.svc-memleak-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.svc-memleak-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 140, 0, 0.2);
+  background: rgba(255, 140, 0, 0.03);
+}
+
+/* Team Leaderboard */
+.svc-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.svc-leaderboard-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  background: rgba(128, 128, 128, 0.04);
+}
+.svc-leaderboard-rank {
+  font-size: 18px;
+  font-weight: 800;
+  min-width: 36px;
+  color: rgba(128, 128, 128, 0.6);
+}
+.svc-leaderboard-row:nth-child(1) .svc-leaderboard-rank { color: #FFD700; }
+.svc-leaderboard-row:nth-child(2) .svc-leaderboard-rank { color: #C0C0C0; }
+.svc-leaderboard-row:nth-child(3) .svc-leaderboard-rank { color: #CD7F32; }
+
+/* SLO Composite Section */
+.svc-composite-section {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  background: rgba(128, 128, 128, 0.03);
+}
+
+/* Batch 4: Heatmap Grid */
+.svc-heatmap-grid {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  background: rgba(128, 128, 128, 0.03);
+  overflow-x: auto;
+}
+
+/* Metric-Stream spinner animation */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Anti-Pattern Report — Print to PDF */
+@media print {
+  body * { visibility: hidden; }
+  .svc-print-report, .svc-print-report * { visibility: visible; }
+  .svc-print-report {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%;
+    background: #fff;
+    color: #000;
+    padding: 24px;
+    font-size: 12px;
+  }
+  .svc-print-report strong, .svc-print-report b { color: #000 !important; }
+  .svc-print-report-noprint { display: none !important; }
+}
+
+@media print {
+  .svc-print-report-header-print { display: block !important; }
+}

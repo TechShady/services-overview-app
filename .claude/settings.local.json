@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(dtctl config *)",
+      "Bash(dtctl auth *)",
+      "Bash(npm run *)",
+      "Bash(git revert *)",
+      "Skill(dtctl)",
+      "Skill(dtctl:*)"
+    ]
+  }
+}

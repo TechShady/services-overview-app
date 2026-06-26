@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log *)",
+      "Bash(xargs grep -l \"closedProblemsQuery\")",
+      "Bash(npx dt-app@latest deploy --environment-url https://guu84124.apps.dynatrace.com)",
+      "Bash(set NODE_OPTIONS=--max-old-space-size=8192)",
+      "Bash(NODE_OPTIONS=\"--max-old-space-size=8192\" npx dt-app@latest deploy --environment-url https://guu84124.apps.dynatrace.com)",
+      "Bash(git commit -m ' *)",
+      "Bash(ls \"c:/Users/john.kelly/Documents/GitHub/\" 2>&1)",
+      "Read(//c/Users/john.kelly/Documents/GitHub/**)",
+      "Read(//c/Users/john.kelly/AppData/Local/Temp/claude/c--Users-john-kelly-Documents-GitHub-services-overview-app/77c2cfb4-c882-44d4-bca8-c28216179a6b/tasks/**)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\john.kelly\\Documents\\GitHub\\user-journey-app\\ui\\app\\pages"
+    ]
+  }
+}

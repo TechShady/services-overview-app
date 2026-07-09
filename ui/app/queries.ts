@@ -1238,3 +1238,25 @@ export function reliabilityTrendQuery(tf: TF): string {
 | fields Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service)), FailureRate
 | sort FailureRate desc`;
 }
+
+// ---------------------------------------------------------------------------
+// Flame Graph — span distribution by operation for a selected service
+// ---------------------------------------------------------------------------
+export function flameGraphQuery(serviceName: string, tf: TF): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter entityAttr(dt.entity.service, "entity.name") == "${serviceName}"
+| summarize {
+    count = count(),
+    total_duration = sum(duration),
+    avg_duration = avg(duration),
+    p50 = percentile(duration, 50),
+    p90 = percentile(duration, 90),
+    p99 = percentile(duration, 99),
+    errors = countIf(request.is_failed == true)
+  }, by: {
+    operation = coalesce(endpoint.name, "unknown"),
+    kind = coalesce(span.kind, "internal")
+  }
+| sort total_duration desc
+| limit 50`;
+}

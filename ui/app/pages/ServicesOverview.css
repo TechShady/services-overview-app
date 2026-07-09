@@ -779,3 +779,8 @@
 @media print {
   .svc-print-report-header-print { display: block !important; }
 }
+
+/* Flame Graph — hover tooltip */
+.svc-flame-row:hover .svc-flame-tooltip {
+  display: block !important;
+}

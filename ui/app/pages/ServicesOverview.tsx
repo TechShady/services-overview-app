@@ -122,6 +122,7 @@ import {
   k8sContainerPodWorkloadMapQuery,
   reliabilityTrendQuery,
   problemsPrevSummaryQuery,
+  flameGraphQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -179,7 +180,7 @@ const SUB_TAB_KEYS = {
   "Metrics": ["Service Metrics", "Process Metrics", "K8s Workloads"],
   "Reliability": ["SLO & Error Budget", "MTTR / MTTA", "Budget Forecast", "Reliability Report"],
   "Quality": ["Scorecards", "Service Maturity"],
-  "Performance": ["Endpoint Heatmap", "Apdex"],
+  "Performance": ["Endpoint Heatmap", "Apdex", "Flame Graph"],
   "Dependencies & Impact": ["Dependencies", "Blast Radius"],
   "Incidents & Changes": ["Incident Timeline", "Change Impact", "Deploy Readiness", "On-Call Health"],
   "Detection & Analysis": ["Anomaly Detection", "Correlation Engine", "Anti-Patterns", "Baselines", "Alert Rules"],
@@ -1412,6 +1413,30 @@ function analyzeApdex(apdexData: any[], apdexT: number, geo?: any[] | null, coho
   return { summary, insights, recommendations: recs };
 }
 
+function analyzeFlameGraph(data: any[], serviceName: string): AIInsightsData {
+  const insights: InsightItem[] = [];
+  const recs: RecommendationItem[] = [];
+  if (!serviceName) return { summary: "Select a service to load its flame graph and generate AI insights.", insights: [{ severity: "info", icon: "🔥", text: "Choose a service from the dropdown to visualize span distribution and identify hotspots." }], recommendations: [] };
+  if (!data.length) return { summary: `No span data found for ${serviceName} in the selected timeframe.`, insights: [{ severity: "warning", icon: "⚠️", text: "No spans were recorded. Ensure the service is instrumented and receiving traffic." }], recommendations: [] };
+
+  const totalCalls = data.reduce((s, d) => s + d.count, 0);
+  const totalDuration = data.reduce((s, d) => s + d.total_duration, 0);
+  const maxDuration = data[0]?.total_duration ?? 0;
+  const topOp = data[0]?.operation ?? "unknown";
+  const topShare = totalDuration > 0 ? ((maxDuration / totalDuration) * 100).toFixed(1) : "0";
+  const errorOps = data.filter(d => d.count > 0 && (d.errors / d.count) > 0.05);
+  const slowOps = data.filter(d => d.p90 > 1_000_000);
+
+  insights.push({ severity: "info", icon: "🔥", text: `${data.length} unique operations across ${totalCalls.toLocaleString()} total spans for ${serviceName}.` });
+  insights.push({ severity: "info", icon: "📊", text: `Top hotspot: "${topOp}" accounts for ${topShare}% of total observed duration.` });
+  if (errorOps.length > 0) { insights.push({ severity: "critical", icon: "🔴", text: `${errorOps.length} operation(s) with >5% error rate: ${errorOps.slice(0, 3).map(d => d.operation).join(", ")}.` }); recs.push({ impact: "high", text: "High-error operations are impacting reliability. Investigate error logs and exception traces for these endpoints." }); }
+  if (slowOps.length > 0) { insights.push({ severity: "warning", icon: "⏱️", text: `${slowOps.length} operation(s) with P90 latency >1s — potential bottleneck.` }); recs.push({ impact: "medium", text: "Operations with high P90 latency are likely bottlenecks. Profile them to identify slow queries, lock contention, or downstream dependency issues." }); }
+  if (errorOps.length === 0 && slowOps.length === 0) insights.push({ severity: "good", icon: "✅", text: "No high-error or high-latency operations detected. Service appears healthy." });
+
+  const summary = `Flame Graph for ${serviceName}: ${data.length} operations, ${totalCalls.toLocaleString()} total spans. Top hotspot "${topOp}" (${topShare}% of duration). ${errorOps.length} error-prone ops, ${slowOps.length} slow ops (P90>1s).`;
+  return { summary, insights, recommendations: recs };
+}
+
 function analyzeBaselines(baselines: any[], svcDetailsData: any[], streaks?: Array<{ service: string; metric: string; streak: number }> | null): AIInsightsData {
   const insights: InsightItem[] = [];
   const recs: RecommendationItem[] = [];
@@ -2180,6 +2205,7 @@ export const ServicesOverview = () => {
   const [qualitySubTab, setQualitySubTab] = useState(0);
   const [performanceSubTab, setPerformanceSubTab] = useState(0);
   const [depsImpactSubTab, setDepsImpactSubTab] = useState(0);
+  const [flameGraphService, setFlameGraphService] = useState<string>("");
 
   // Settings state
   const [topN, setTopN] = useState<number>(DEFAULT_TOP_N);
@@ -2660,6 +2686,26 @@ export const ServicesOverview = () => {
   const anomalyCurrentResult = useDql({ query: anomalyCurrentQuery(tf) }, refetchOpts);
   const anomalyBaselineResult = useDql({ query: anomalyBaselineQuery(prevTf) }, refetchOpts);
   const apdexResult = useDql({ query: apdexQuery(tf, apdexT) }, refetchOpts);
+
+  // Flame Graph — lazy-loaded only when the tab is active and a service is selected
+  const flameGraphActive = activeTabKey === "Performance" && performanceSubTab === 2;
+  const flameGraphResult = useDql({
+    query: flameGraphActive && flameGraphService ? flameGraphQuery(flameGraphService, tf) : NOOP_QUERY,
+  }, refetchOpts);
+  const flameGraphData = useMemo(() => {
+    if (!flameGraphResult.data?.records) return [];
+    return flameGraphResult.data.records.map((r: any) => ({
+      operation: String(r["operation"] ?? "unknown"),
+      kind: String(r["kind"] ?? "internal"),
+      count: Number(r["count"] ?? 0),
+      total_duration: Number(r["total_duration"] ?? 0),
+      avg_duration: Number(r["avg_duration"] ?? 0),
+      p50: Number(r["p50"] ?? 0),
+      p90: Number(r["p90"] ?? 0),
+      p99: Number(r["p99"] ?? 0),
+      errors: Number(r["errors"] ?? 0),
+    }));
+  }, [flameGraphResult.data]);
 
   // Service ownership
   const ownershipResult = useDql({ query: serviceOwnershipQuery() }, refetchOpts);
@@ -6411,6 +6457,7 @@ export const ServicesOverview = () => {
         switch (performanceSubTab) {
           case 0: return analyzeEndpointHeatmap(reqDetailsData, heatmapGridData);
           case 1: return analyzeApdex(apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus);
+          case 2: return analyzeFlameGraph(flameGraphData, flameGraphService);
           default: return analyzeEndpointHeatmap(reqDetailsData, heatmapGridData);
         }
       case "Dependencies & Impact":
@@ -6688,6 +6735,18 @@ export const ServicesOverview = () => {
       <Modal title="Services Overview — Help Guide" show={helpOpen} onDismiss={() => setHelpOpen(false)} size="large">
         <div className="svc-help-content">
           <h3>What's New</h3>
+          <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid rgba(69,137,255,0.6)" }}>
+            <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>July 9, 2026 — v0.38.54</p>
+            <p><strong>Flame Graph — Performance Sub-Tab</strong></p>
+            <ul style={{ margin: "4px 0", paddingLeft: 20 }}>
+              <li><strong>New Flame Graph Sub-Tab</strong>: Added a third sub-tab under Performance. Select any service from the dropdown to instantly load its span distribution as a flame graph — no page navigation required.</li>
+              <li><strong>Operation-Level Profiling</strong>: Each bar represents a unique operation (endpoint/span name) with width proportional to its share of total observed trace duration, giving an at-a-glance hotspot profile of where time is actually spent in the service.</li>
+              <li><strong>Error-Rate Color Coding</strong>: Bars are color-coded green (0% errors), yellow (1–5% errors), and red (&gt;5% errors) so error-prone operations are immediately visible alongside their latency footprint.</li>
+              <li><strong>Rich Hover Tooltips</strong>: Hover any bar to see call count, error count, total/avg duration, P50/P90/P99 latency, and percentage share of overall duration.</li>
+              <li><strong>Lazy DQL Execution</strong>: The span query only fires when the Flame Graph sub-tab is active and a service is selected — no wasted data scans while on other tabs.</li>
+              <li><strong>AI Insights</strong>: The AI Assist panel for Flame Graph identifies the top hotspot operation, flags operations with &gt;5% error rates or P90 &gt;1s, and generates targeted remediation recommendations.</li>
+            </ul>
+          </div>
           <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid rgba(69,137,255,0.6)" }}>
             <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>June 17, 2026 — v0.38.48</p>
             <p><strong>Right-Sizing Sub-Sub Tab Settings + AI Assist Fix</strong></p>
@@ -6979,10 +7038,11 @@ export const ServicesOverview = () => {
           </ul>
 
           <h3>Tab: Performance</h3>
-          <p>Contains two sub-tabs: <strong>Endpoint Heatmap</strong> and <strong>Apdex</strong>.</p>
+          <p>Contains three sub-tabs: <strong>Endpoint Heatmap</strong>, <strong>Apdex</strong>, and <strong>Flame Graph</strong>.</p>
           <ul>
             <li><strong>Endpoint Heatmap</strong> — Hour-of-day × endpoint grid showing failure rate, P50, P90, and P99 latency with anomaly highlighting.</li>
             <li><strong>Apdex</strong> — Application Performance Index scoring with geo segmentation, cohort analysis, and SLO compliance tracking.</li>
+            <li><strong>Flame Graph</strong> — Select a service from the dropdown to visualize how trace span duration is distributed across operations. Each bar's width represents its share of total observed time; color indicates error rate (green = 0%, yellow = 1–5%, red = &gt;5%). Hover any bar for P50/P90/P99 and call count details. Top 50 operations by total duration. AI Insights surfaces hotspot and error-prone operation analysis.</li>
           </ul>
 
           <h3>Tab: Dependencies &amp; Impact</h3>
@@ -10334,6 +10394,160 @@ export const ServicesOverview = () => {
                     </>
                   )}
                 </>
+              )}
+            </Flex>
+                </Tab>
+                <Tab title="Flame Graph">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              <SectionHeader title="Service Trace Flame Graph" />
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                <div className="chart-description">
+                  Visualizes span distribution across operations for a selected service. Bar width = share of total observed duration. Color = error rate:{" "}
+                  <span style={{ color: GREEN }}>green = 0%</span>,{" "}
+                  <span style={{ color: YELLOW }}>yellow = 1–5%</span>,{" "}
+                  <span style={{ color: RED }}>red = &gt;5%</span>.
+                  Hover a bar for P50/P90/P99 details.
+                </div>
+              </div>
+
+              {/* Service selector */}
+              <Flex alignItems="center" gap={12} flexWrap="wrap">
+                <Text style={{ fontSize: 13, fontWeight: 600 }}>Service:</Text>
+                <div style={{ width: 340 }}>
+                  <Select
+                    value={flameGraphService || null}
+                    onChange={(val) => setFlameGraphService((val as string) ?? "")}
+                  >
+                    <Select.Content>
+                      {[...new Set(svcDetailsData.map((s: any) => s.Service).filter(Boolean))]
+                        .sort()
+                        .map((name: string) => (
+                          <Select.Option key={name} value={name}>{name}</Select.Option>
+                        ))}
+                    </Select.Content>
+                  </Select>
+                </div>
+                {flameGraphService && (
+                  <Button variant="default" onClick={() => setFlameGraphService("")}>Clear</Button>
+                )}
+              </Flex>
+
+              {!flameGraphService ? (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
+                  <Strong>Select a service above to load its flame graph</Strong>
+                </div>
+              ) : flameGraphResult.isLoading ? (
+                <LoadingState />
+              ) : flameGraphData.length === 0 ? (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
+                  <Strong>No span data found for {flameGraphService} in the selected timeframe</Strong>
+                </div>
+              ) : (
+                <div className="svc-chart-tile" style={{ padding: 16 }}>
+                  {/* Root service bar */}
+                  {(() => {
+                    const totalCalls = flameGraphData.reduce((s, d) => s + d.count, 0);
+                    const totalDuration = flameGraphData.reduce((s, d) => s + d.total_duration, 0);
+                    const maxDuration = flameGraphData[0]?.total_duration ?? 1;
+
+                    const formatUs = (us: number) => {
+                      if (us >= 1_000_000) return (us / 1_000_000).toFixed(2) + " s";
+                      if (us >= 1_000) return (us / 1_000).toFixed(1) + " ms";
+                      return us.toFixed(0) + " µs";
+                    };
+
+                    return (
+                      <div>
+                        {/* Service root bar */}
+                        <div style={{ height: 34, background: BLUE, borderRadius: 4, display: "flex", alignItems: "center", paddingLeft: 12, marginBottom: 10, color: "#fff", fontWeight: 700, fontSize: 13, overflow: "hidden" }}>
+                          {flameGraphService} &mdash; {totalCalls.toLocaleString()} spans &nbsp;&middot;&nbsp; {formatUs(totalDuration)} total
+                        </div>
+
+                        {/* Operation rows */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {flameGraphData.map((entry, i) => {
+                            const pct = maxDuration > 0 ? (entry.total_duration / maxDuration) * 100 : 0;
+                            const errRate = entry.count > 0 ? (entry.errors / entry.count) * 100 : 0;
+                            const barColor = errRate === 0 ? GREEN : errRate < 5 ? YELLOW : RED;
+                            const textColor = errRate >= 1 && errRate < 5 ? "#000" : "#fff";
+
+                            return (
+                              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, position: "relative" }}>
+                                {/* Label column */}
+                                <div style={{ width: 240, fontSize: 11, textAlign: "right", opacity: 0.75, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}
+                                  title={`${entry.operation} (${entry.kind})`}>
+                                  {entry.operation}
+                                </div>
+
+                                {/* Bar + tooltip group */}
+                                <div style={{ flex: 1, position: "relative" }} className="svc-flame-row">
+                                  <div
+                                    style={{
+                                      width: `${Math.max(pct, 0.3)}%`,
+                                      minWidth: 6,
+                                      height: 28,
+                                      background: barColor,
+                                      borderRadius: 3,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      paddingLeft: 8,
+                                      overflow: "hidden",
+                                      boxSizing: "border-box",
+                                    }}>
+                                    {pct > 10 && (
+                                      <span style={{ fontSize: 10, color: textColor, fontWeight: 600, whiteSpace: "nowrap" }}>
+                                        {entry.count.toLocaleString()} calls &nbsp;&middot;&nbsp; {formatUs(entry.avg_duration)} avg
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Hover tooltip rendered via CSS group hover */}
+                                  <div className="svc-flame-tooltip" style={{
+                                    display: "none",
+                                    position: "absolute",
+                                    left: `${Math.min(pct + 1, 55)}%`,
+                                    top: "100%",
+                                    marginTop: 4,
+                                    zIndex: 200,
+                                    background: "var(--dt-colors-surface-overlay, #1a1b2e)",
+                                    border: "1px solid var(--dt-colors-border-default, #444)",
+                                    borderRadius: 6,
+                                    padding: "10px 14px",
+                                    minWidth: 230,
+                                    pointerEvents: "none",
+                                    boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+                                    fontSize: 11,
+                                  }}>
+                                    <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 12, wordBreak: "break-all" }}>{entry.operation}</div>
+                                    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 10px" }}>
+                                      <span style={{ opacity: 0.65 }}>Kind</span><span>{entry.kind}</span>
+                                      <span style={{ opacity: 0.65 }}>Calls</span><span>{entry.count.toLocaleString()}</span>
+                                      <span style={{ opacity: 0.65 }}>Errors</span><span style={{ color: errRate > 0 ? RED : "inherit" }}>{entry.errors.toLocaleString()} ({errRate.toFixed(1)}%)</span>
+                                      <span style={{ opacity: 0.65 }}>Total</span><span>{formatUs(entry.total_duration)}</span>
+                                      <span style={{ opacity: 0.65 }}>Avg</span><span>{formatUs(entry.avg_duration)}</span>
+                                      <span style={{ opacity: 0.65 }}>P50</span><span>{formatUs(entry.p50)}</span>
+                                      <span style={{ opacity: 0.65 }}>P90</span><span>{formatUs(entry.p90)}</span>
+                                      <span style={{ opacity: 0.65 }}>P99</span><span>{formatUs(entry.p99)}</span>
+                                      <span style={{ opacity: 0.65 }}>Share</span><span>{pct.toFixed(1)}%</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Legend */}
+                        <Flex gap={20} style={{ marginTop: 14 }}>
+                          <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: GREEN, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>0% errors</Text></Flex>
+                          <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: YELLOW, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>1–5% errors</Text></Flex>
+                          <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: RED, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>&gt;5% errors</Text></Flex>
+                          <Text style={{ fontSize: 11, opacity: 0.5 }}>Width = share of total duration &nbsp;|&nbsp; Top 50 operations by total duration</Text>
+                        </Flex>
+                      </div>
+                    );
+                  })()}
+                </div>
               )}
             </Flex>
                 </Tab>

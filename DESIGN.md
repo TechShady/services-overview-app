@@ -634,6 +634,47 @@ timeseries {
 
 ---
 
+## Tab: Flame Graph (Performance → sub-tab 3)
+
+### Purpose
+Per-service span distribution profiler. Select a service from the dropdown to visualize how total trace duration is distributed across its operations. Bar width = share of total observed duration; color = error rate (green 0%, yellow 1–5%, red >5%). Hover reveals P50/P90/P99 and call count details. Top 50 operations by total duration.
+
+### DQL Query
+```dql
+fetch spans, samplingRatio:1, scanLimitGBytes:50, from:..., to:...
+| filter entityAttr(dt.entity.service, "entity.name") == "<selectedService>"
+| summarize {
+    count = count(),
+    total_duration = sum(duration),
+    avg_duration = avg(duration),
+    p50 = percentile(duration, 50),
+    p90 = percentile(duration, 90),
+    p99 = percentile(duration, 99),
+    errors = countIf(request.is_failed == true)
+  }, by: {
+    operation = coalesce(endpoint.name, "unknown"),
+    kind = coalesce(span.kind, "internal")
+  }
+| sort total_duration desc
+| limit 50
+```
+
+**Logic**: Fetches all spans for the selected service (not just root spans), groups by operation name and span kind, computes duration statistics and error count per operation. Duration values are in microseconds (matching the `formatDuration` helper). The query only executes when `activeTabKey === "Performance" && performanceSubTab === 2` and a service is selected; otherwise falls back to `NOOP_QUERY`.
+
+### Rendering
+- **Root bar**: Full-width blue bar showing service name, total span count, and total observed duration.
+- **Operation rows**: One horizontal bar per operation, sorted descending by `total_duration`. Width = `(op.total_duration / max_total_duration) * 100%`.
+- **Color**: `GREEN` (#0D9C29) for 0% errors, `YELLOW` (#FCD53F) for 1–5%, `RED` (#C21930) for >5%.
+- **In-bar label**: Operation call count and avg duration shown when bar width >10%.
+- **Hover tooltip**: CSS `.svc-flame-row:hover .svc-flame-tooltip { display: block }` — shows kind, call count, errors/%, total/avg/P50/P90/P99 duration, and share %.
+
+### AI Insights (`analyzeFlameGraph`)
+- Identifies top hotspot operation (widest bar) and its share of total duration.
+- Flags operations with >5% error rate (critical) or P90 >1s (warning).
+- Generates targeted remediation recommendations for error-prone and slow operations.
+
+---
+
 ## Tab: Apdex
 
 ### Purpose
@@ -998,7 +1039,7 @@ graph TD
 
 ---
 
-## KPI Card System (v0.38.17)
+## KPI Card System (v0.38.17+)
 
 Every single-value metric across all 28 tabs is rendered via the shared `KpiCard` component (`ui/app/components/KpiCard.tsx`).
 

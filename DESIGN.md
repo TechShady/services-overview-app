@@ -820,9 +820,28 @@ timeseries avg(dt.kubernetes.container.cpu_usage), by:{target_entity, dt.entity.
 
 ### Cascade Logic (client-side)
 1. Identify services on the target (host/workload/node/etc.)
-2. Walk the dependency graph (from `serviceDependenciesQuery`) upstream — find all callers of those services
-3. Recursively find callers-of-callers up to max depth
-4. Compute cascade depth, direct/indirect affected services, impacted request volume
+2. Build dependency graph maps (`caller -> callees`, `callee -> callers`)
+3. Compute service hop depth with BFS (target=0, direct=1, indirect=2+)
+4. Run fixed-point probabilistic propagation across all tiers:
+  - `p_fail(caller) = 1 - Π(1 - p_fail(callee) * weight(caller->callee))`
+5. Compute impact metrics:
+  - `Expected Failed Requests = requests * p_fail`
+  - `At-Risk Request Volume = total requests on impacted path`
+6. Feed per-service probabilities into graph node heat, labels, and tooltips
+
+### Services-Mode Weighting Selector
+Services-mode Blast Radius includes a weighting control that chooses how `weight(caller->callee)` is estimated:
+
+| Mode | Description | Typical Use |
+|------|-------------|-------------|
+| Smart guess (traffic-weighted) | Uses downstream service traffic as a proxy weight (default) | Best general default when edge-level call shares are unavailable |
+| Simple split (equal share) | Splits dependency weight equally across downstream dependencies | Sanity check / conservative baseline |
+| Real edge % (if available) | Uses observed per-edge call percentages from telemetry | Highest fidelity when edge-share fields exist |
+
+If Real edge % is selected but telemetry is missing, UI transparently falls back to Smart guess.
+
+### Business Impact Placement
+In Services mode, the Business Impact Simulator is rendered directly below the Blast Radius graph (before detail tables) so users can immediately quantify outage impact from the visualized cascade.
 
 ---
 

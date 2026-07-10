@@ -1745,11 +1745,12 @@ function analyzeBlastRadius(data: any, mode: "services" | "hosts" | "k8s" | "clu
   // ─── Service Mode (existing logic) ───
   if (!data.target) {
     return {
-      summary: "The Blast Radius tab is your crown-jewel SRE command center for failure impact analysis across six infrastructure layers: ⚙️ Services (cascade through the dependency graph), 🖥️ Hosts (which hosts take down which services), ☸️ K8s Workloads (which Kubernetes deployments/daemonsets/statefulsets are critical), 🌐 K8s Clusters (full cluster failure — the worst-case Kubernetes scenario), 📦 K8s Namespaces (namespace-level failure — quota exhaustion, accidental deletion, network policy misconfiguration), and 🖥️ K8s Nodes (node-level failure). Each mode includes: (1) Blast Radius Simulator — select a target to model failure impact; (2) ⚡ Cascade Failure Simulation — animate the failure wave in real time; (3) Business Impact Simulator — drag the outage duration slider to see affected request volume, revenue loss, and SLO breach; (4) In Services mode: Recovery Sequence Optimizer + SPOF Scanner. Start by selecting a service, host, K8s workload, K8s cluster, namespace, or node from the dropdown above.",
+      summary: "The Blast Radius tab is your command center for failure impact analysis across services and infrastructure layers: ⚙️ Services, 🖥️ Hosts, ☸️ K8s Workloads, 🌐 K8s Clusters, 📦 K8s Namespaces, 🖥️ K8s Nodes, 🫛 K8s Pods, and 📦 K8s Containers. In Services mode, impact is now probabilistic across all tiers (not just direct neighbors): each hop compounds failure probability (for example 50% then 50% becomes 25%). You can choose weighting mode (Smart guess, Equal split, or Real edge %) based on telemetry fidelity. Start by selecting a target from the dropdown above.",
       insights: [
         { severity: "info", icon: "📊", text: "Select a service to begin blast radius simulation." },
+        { severity: "info", icon: "🧠", text: "Choose a weighting mode: Smart guess (traffic-weighted), Equal split, or Real edge % (most accurate when available)." },
         { severity: "info", icon: "⚡", text: "Use the '⚡ Simulate Cascade' button in the graph toolbar to animate the failure wave." },
-        { severity: "info", icon: "📊", text: "Drag the Impact Simulator slider to model outage duration and see SLO breach points." },
+        { severity: "info", icon: "📊", text: "Drag the Impact Simulator slider to model outage duration and see expected failed requests, revenue loss, and SLO breach points." },
         { severity: "info", icon: "📊", text: "Select failing services in the Recovery Optimizer to get the optimal restore sequence." },
       ],
       recommendations: [{ impact: "medium", text: "Start with services that have the highest SPOF Score in the scanner below — these represent the biggest blast radius risk in your fleet." }]
@@ -1761,12 +1762,17 @@ function analyzeBlastRadius(data: any, mode: "services" | "hosts" | "k8s" | "clu
   else if (data.totalAffected <= 2) insights.push({ severity: "warning", icon: "⚠️", text: `"${data.target}" failure would affect ${data.totalAffected} service(s) (${impactPct}% of fleet), impacting ${reqPct}% of total request volume.` });
   else { insights.push({ severity: "critical", icon: "🔴", text: `"${data.target}" failure would cascade to ${data.totalAffected} services (${impactPct}% of fleet) across ${data.cascadeDepth} hop(s), impacting ${reqPct}% of total request volume.` }); recs.push({ impact: "high", text: `"${data.target}" is a critical dependency. Implement circuit breakers, fallback responses, and multi-AZ redundancy. Use the Cascade Simulation to visualize the exact failure propagation path.` }); }
   if (data.cascadeDepth > 2) { insights.push({ severity: "critical", icon: "🔴", text: `Cascade depth of ${data.cascadeDepth} hops — failures propagate through a deep synchronous dependency chain.` }); recs.push({ impact: "high", text: "Deep cascade chains amplify failure impact exponentially. Introduce bulkheads and async communication (queues/events) to break synchronous dependency chains and limit propagation." }); }
+  if (data.weightModeEffective) {
+    const modeLabel = data.weightModeEffective === "requestProxy" ? "Smart guess (traffic-weighted)" : data.weightModeEffective === "equalSplit" ? "Equal split" : "Real edge %";
+    const fallback = data.weightModeRequested && data.weightModeRequested !== data.weightModeEffective;
+    insights.push({ severity: "info", icon: "🧠", text: `Weighting mode in use: ${modeLabel}${fallback ? " (fallback because edge-share telemetry is missing)" : ""}.` });
+  }
   if (data.directlyAffected.length > 0) insights.push({ severity: "info", icon: "📊", text: `Direct callers (1st hop): ${data.directlyAffected.slice(0, 5).join(", ")}${data.directlyAffected.length > 5 ? ` +${data.directlyAffected.length - 5} more` : ""}.` });
   if (data.indirectlyAffected.length > 0) insights.push({ severity: "info", icon: "📊", text: `Indirect callers (2+ hops): ${data.indirectlyAffected.slice(0, 5).join(", ")}${data.indirectlyAffected.length > 5 ? ` +${data.indirectlyAffected.length - 5} more` : ""}.` });
   insights.push({ severity: "info", icon: "⚡", text: "Tip: Click '⚡ Simulate Cascade' in the graph toolbar to animate the failure wave propagating service by service in real time." });
-  insights.push({ severity: "info", icon: "📊", text: "Tip: Use the Business Impact Simulator below to quantify affected requests, revenue loss, and SLO budget consumption for any outage duration." });
+  insights.push({ severity: "info", icon: "📊", text: "Tip: Use the Business Impact Simulator below to quantify expected failed requests (traffic-weighted), revenue loss, and SLO budget consumption for any outage duration." });
   if (data.totalAffected > 0) insights.push({ severity: "info", icon: "📊", text: "Tip: Select the affected services in the Recovery Optimizer to generate an optimal step-by-step restore sequence." });
-  const summary = `Blast Radius analysis for "${data.target}": ${data.totalAffected} service(s) affected (${impactPct}% of ${data.totalServices}-service fleet), ${reqPct}% of total request volume impacted, cascade depth ${data.cascadeDepth} hop(s). Use the five integrated tools on this tab: ⚡ Cascade Simulation animates the live failure wave; the Business Impact Simulator models outage duration vs. revenue loss and SLO breach; the Recovery Optimizer computes the optimal restore sequence for multi-service failures; and the SPOF Scanner continuously ranks your fleet's most dangerous single points of failure. Industry context: Google's Production Excellence framework classifies services whose failure impacts >30% of fleet as Tier-1 critical (99.99%+ SLO required). Netflix's Chaos Engineering (Chaos Monkey) deliberately simulates these failures to validate resilience. AWS Well-Architected recommends blast radius analysis as a core input to cell-based architecture and disaster recovery strategy.`;
+  const summary = `Blast Radius analysis for "${data.target}": ${data.totalAffected} service(s) affected (${impactPct}% of ${data.totalServices}-service fleet), ${reqPct}% of total request volume at risk, cascade depth ${data.cascadeDepth} hop(s). Service-mode impact is probabilistic across all dependency tiers using ${data.weightModeEffective === "requestProxy" ? "Smart guess (traffic-weighted)" : data.weightModeEffective === "equalSplit" ? "Equal split" : "Real edge %"} weighting. Use the integrated tools on this tab: ⚡ Cascade Simulation animates the live failure wave; the Business Impact Simulator models outage duration vs. revenue loss and SLO breach; the Recovery Optimizer computes the optimal restore sequence for multi-service failures; and the SPOF Scanner ranks the fleet's most dangerous single points of failure.`;
   return { summary, insights, recommendations: recs };
 }
 
@@ -2461,6 +2467,21 @@ export const ServicesOverview = () => {
     const order = subTabOrder[parent] ?? SUB_TAB_KEYS[parent as SubTabParent] ?? [];
     return order.filter(s => subTabVisibility[parent]?.[s] !== false);
   };
+
+  const metricsVisibleSubTabs = useMemo(() => getVisibleSubTabs("Metrics"), [subTabOrder, subTabVisibility]);
+  const showServiceMetricsTab = metricsVisibleSubTabs.includes("Service Metrics");
+  const showProcessMetricsTab = metricsVisibleSubTabs.includes("Process Metrics");
+  const showK8sWorkloadsTab = metricsVisibleSubTabs.includes("K8s Workloads");
+  const safeMetricsSubTab = useMemo(() => {
+    if (!metricsVisibleSubTabs.length) return 0;
+    return Math.min(metricsSubTab, metricsVisibleSubTabs.length - 1);
+  }, [metricsSubTab, metricsVisibleSubTabs]);
+
+  React.useEffect(() => {
+    if (metricsSubTab !== safeMetricsSubTab) {
+      setMetricsSubTab(safeMetricsSubTab);
+    }
+  }, [metricsSubTab, safeMetricsSubTab]);
 
   const visibleTabs = useMemo(() => tabOrder.filter(t => isTabVisible(t)), [tabOrder, tabVisibility]);
 
@@ -4800,6 +4821,7 @@ export const ServicesOverview = () => {
   const [blastRadiusNamespaceTarget, setBlastRadiusNamespaceTarget] = useState<string>("");
   const [blastRadiusPodTarget, setBlastRadiusPodTarget] = useState<string>("");
   const [blastRadiusContainerTarget, setBlastRadiusContainerTarget] = useState<string>("");
+  const [blastRadiusWeightMode, setBlastRadiusWeightMode] = useState<"requestProxy" | "equalSplit" | "edgeShare">("requestProxy");
 
   // Auto-select first visible blast radius mode if current is hidden
   React.useEffect(() => {
@@ -4824,6 +4846,14 @@ export const ServicesOverview = () => {
   const [revenuePerRequest, setRevenuePerRequest] = useState(0.001);
   const [rightSizingSubTab, setRightSizingSubTab] = useState<"hosts" | "databases" | "k8s" | "k8s-clusters" | "k8s-nodes" | "k8s-namespaces" | "k8s-services" | "k8s-pods" | "k8s-containers">("hosts");
   const [rsVerdictFilter, setRsVerdictFilter] = useState<string[]>([]);
+
+  const blastEdgeShareAvailable = useMemo(() => {
+    return dependenciesData.some((d: any) => {
+      const raw = d.callShare ?? d.edgeShare ?? d.CallShare ?? d["Call Share %"] ?? d.weight;
+      const v = Number(raw);
+      return Number.isFinite(v) && v > 0;
+    });
+  }, [dependenciesData]);
 
   // ─── Host-Service Map (for Host blast radius) ───
   const hostServiceMap = useMemo(() => {
@@ -5628,43 +5658,177 @@ export const ServicesOverview = () => {
   }, [blastRadiusNodeTarget, k8sNodeBlastRadiusData, svcDetailsData, impactDurationMin, revenuePerRequest, timeframe]);
 
   const blastRadiusData = useMemo(() => {
-    if (!dependenciesData.length || !svcDetailsData.length) return { target: "", directlyAffected: [] as string[], indirectlyAffected: [] as string[], totalAffected: 0, totalServices: svcDetailsData.length, impactedRequests: 0, totalRequests: 0, affectedErrorRate: 0, cascadeDepth: 0 };
+    const empty = {
+      target: "",
+      directlyAffected: [] as string[],
+      indirectlyAffected: [] as string[],
+      totalAffected: 0,
+      totalServices: svcDetailsData.length,
+      impactedRequests: 0,
+      atRiskRequests: 0,
+      totalRequests: svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0),
+      affectedErrorRate: 0,
+      cascadeDepth: 0,
+      propagatedFailureByService: {} as Record<string, number>,
+      expectedFailedRequestsByService: {} as Record<string, number>,
+      serviceDepthByService: {} as Record<string, number>,
+      weightedAffectedServices: [] as Array<{ service: string; depth: number; failureProbability: number; requests: number; expectedFailedRequests: number }>,
+      weightModeRequested: blastRadiusWeightMode,
+      weightModeEffective: blastRadiusWeightMode,
+    };
+    if (!dependenciesData.length || !svcDetailsData.length) return empty;
+
     const target = blastRadiusTarget;
-    if (!target) return { target: "", directlyAffected: [] as string[], indirectlyAffected: [] as string[], totalAffected: 0, totalServices: svcDetailsData.length, impactedRequests: 0, totalRequests: svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0), affectedErrorRate: 0, cascadeDepth: 0 };
-    // Build adjacency: callee -> callers (who depends on this service)
-    const callerMap = new Map<string, Set<string>>();
+    if (!target) return { ...empty, totalServices: svcDetailsData.length, totalRequests: svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0) };
+
+    const svcMap = new Map(svcDetailsData.map(s => [s.Service, s]));
+    const totalRequests = svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0);
+
+    const callerMap = new Map<string, Set<string>>(); // callee -> callers
+    const calleeMap = new Map<string, Set<string>>(); // caller -> callees
     dependenciesData.forEach(d => {
+      if (!d.Caller || !d.Callee) return;
       if (!callerMap.has(d.Callee)) callerMap.set(d.Callee, new Set());
       callerMap.get(d.Callee)!.add(d.Caller);
+      if (!calleeMap.has(d.Caller)) calleeMap.set(d.Caller, new Set());
+      calleeMap.get(d.Caller)!.add(d.Callee);
     });
-    // BFS from target
-    const directCallers = callerMap.get(target) ?? new Set<string>();
-    const allAffected = new Set<string>([target]);
+
+    const weightModeEffective = blastRadiusWeightMode === "edgeShare" && !blastEdgeShareAvailable
+      ? "requestProxy"
+      : blastRadiusWeightMode;
+
+    // Estimate per-edge dependency weight for caller->callee.
+    // - requestProxy: use callee request volume as a proxy
+    // - equalSplit: each downstream call gets equal weight
+    // - edgeShare: use explicit edge share from dependency records when present
+    const edgeWeight = new Map<string, number>();
+    const explicitEdgeShare = new Map<string, number>();
+    if (weightModeEffective === "edgeShare") {
+      dependenciesData.forEach((d: any) => {
+        const raw = d.callShare ?? d.edgeShare ?? d.CallShare ?? d["Call Share %"] ?? d.weight;
+        const v = Number(raw);
+        if (!d.Caller || !d.Callee || !Number.isFinite(v) || v <= 0) return;
+        const normalized = v > 1 ? v / 100 : v;
+        explicitEdgeShare.set(`${d.Caller}=>${d.Callee}`, Math.max(0, Math.min(1, normalized)));
+      });
+    }
+    calleeMap.forEach((callees, caller) => {
+      const calleeArr = [...callees];
+      if (!calleeArr.length) return;
+      const bases = calleeArr.map(callee => {
+        if (weightModeEffective === "equalSplit") return 1;
+        if (weightModeEffective === "edgeShare") return Math.max(0, explicitEdgeShare.get(`${caller}=>${callee}`) ?? 0);
+        return Math.max(1, Number(svcMap.get(callee)?.Requests ?? 0));
+      });
+      const sumBase = bases.reduce((s, v) => s + v, 0);
+      calleeArr.forEach((callee, idx) => {
+        const w = sumBase > 0 ? (bases[idx] / sumBase) : (1 / calleeArr.length);
+        edgeWeight.set(`${caller}=>${callee}`, Math.max(0, Math.min(1, w)));
+      });
+    });
+
+    // BFS for hop depth across ALL tiers (target=0, direct=1, indirect=2+)
+    const depthMap: Record<string, number> = { [target]: 0 };
+    const visited = new Set<string>([target]);
     let frontier = new Set<string>([target]);
-    let depth = 0;
     while (frontier.size > 0) {
       const next = new Set<string>();
       frontier.forEach(svc => {
+        const parentDepth = depthMap[svc] ?? 0;
         (callerMap.get(svc) ?? new Set()).forEach(caller => {
-          if (!allAffected.has(caller)) { allAffected.add(caller); next.add(caller); }
+          if (!visited.has(caller)) {
+            visited.add(caller);
+            depthMap[caller] = parentDepth + 1;
+            next.add(caller);
+          }
         });
       });
       frontier = next;
-      if (next.size > 0) depth++;
     }
-    const svcMap = new Map(svcDetailsData.map(s => [s.Service, s]));
-    const totalRequests = svcDetailsData.reduce((s, r) => s + (r.Requests ?? 0), 0);
-    let impactedRequests = 0;
-    let weightedErrorRate = 0;
-    allAffected.forEach(name => {
-      const svc = svcMap.get(name);
-      if (svc) { impactedRequests += svc.Requests ?? 0; weightedErrorRate += (svc.FailureRate ?? 0) * (svc.Requests ?? 0); }
+
+    // Fixed-point propagation:
+    // p_fail(caller) = 1 - Π(1 - p_fail(callee) * weight(caller->callee))
+    const allServices = [...new Set([...dependenciesData.map(d => d.Caller), ...dependenciesData.map(d => d.Callee), ...svcDetailsData.map(s => s.Service)])];
+    let p: Record<string, number> = Object.fromEntries(allServices.map(s => [s, 0]));
+    p[target] = 1;
+
+    const maxIterations = 40;
+    for (let iter = 0; iter < maxIterations; iter++) {
+      const next: Record<string, number> = { ...p, [target]: 1 };
+      let maxDelta = 0;
+      allServices.forEach(svc => {
+        if (svc === target) return;
+        const callees = calleeMap.get(svc);
+        if (!callees || callees.size === 0) {
+          next[svc] = 0;
+          maxDelta = Math.max(maxDelta, Math.abs((next[svc] ?? 0) - (p[svc] ?? 0)));
+          return;
+        }
+        let survival = 1;
+        callees.forEach(callee => {
+          const depProb = Math.max(0, Math.min(1, p[callee] ?? 0));
+          if (depProb <= 0) return;
+          const w = edgeWeight.get(`${svc}=>${callee}`) ?? 0;
+          survival *= (1 - Math.max(0, Math.min(1, depProb * w)));
+        });
+        const failProb = Math.max(0, Math.min(1, 1 - survival));
+        next[svc] = failProb;
+        maxDelta = Math.max(maxDelta, Math.abs(failProb - (p[svc] ?? 0)));
+      });
+      p = next;
+      if (maxDelta < 0.0001) break;
+    }
+
+    const epsilon = 0.001;
+    const propagatedFailureByService: Record<string, number> = {};
+    const expectedFailedRequestsByService: Record<string, number> = {};
+    const weightedAffectedServices: Array<{ service: string; depth: number; failureProbability: number; requests: number; expectedFailedRequests: number }> = [];
+
+    allServices.forEach(name => {
+      const failProb = Math.max(0, Math.min(1, p[name] ?? 0));
+      if (failProb < epsilon) return;
+      const requests = Number(svcMap.get(name)?.Requests ?? 0);
+      const expectedFailed = requests * failProb;
+      propagatedFailureByService[name] = failProb;
+      expectedFailedRequestsByService[name] = expectedFailed;
+      weightedAffectedServices.push({
+        service: name,
+        depth: depthMap[name] ?? (name === target ? 0 : -1),
+        failureProbability: failProb,
+        requests,
+        expectedFailedRequests: expectedFailed,
+      });
     });
-    const avgErrorRate = impactedRequests > 0 ? weightedErrorRate / impactedRequests : 0;
-    const directArr = [...directCallers].filter(c => c !== target);
-    const indirectArr = [...allAffected].filter(c => c !== target && !directCallers.has(c));
-    return { target, directlyAffected: directArr, indirectlyAffected: indirectArr, totalAffected: allAffected.size - 1, totalServices: svcDetailsData.length, impactedRequests, totalRequests, affectedErrorRate: avgErrorRate, cascadeDepth: depth };
-  }, [blastRadiusTarget, dependenciesData, svcDetailsData]);
+
+    weightedAffectedServices.sort((a, b) => b.expectedFailedRequests - a.expectedFailedRequests || a.service.localeCompare(b.service));
+
+    const directlyAffected = weightedAffectedServices.filter(s => s.depth === 1).map(s => s.service);
+    const indirectlyAffected = weightedAffectedServices.filter(s => s.depth >= 2).map(s => s.service);
+    const impactedRequests = weightedAffectedServices.reduce((s, r) => s + r.expectedFailedRequests, 0);
+    const atRiskRequests = weightedAffectedServices.reduce((s, r) => s + r.requests, 0);
+    const cascadeDepth = Math.max(0, ...weightedAffectedServices.map(s => s.depth).filter(d => d >= 0));
+    const affectedErrorRate = atRiskRequests > 0 ? (impactedRequests / atRiskRequests) * 100 : 0;
+
+    return {
+      target,
+      directlyAffected,
+      indirectlyAffected,
+      totalAffected: Math.max(0, weightedAffectedServices.filter(s => s.service !== target).length),
+      totalServices: svcDetailsData.length,
+      impactedRequests,
+      atRiskRequests,
+      totalRequests,
+      affectedErrorRate,
+      cascadeDepth,
+      propagatedFailureByService,
+      expectedFailedRequestsByService,
+      serviceDepthByService: depthMap,
+      weightedAffectedServices,
+      weightModeRequested: blastRadiusWeightMode,
+      weightModeEffective,
+    };
+  }, [blastRadiusTarget, dependenciesData, svcDetailsData, blastRadiusWeightMode, blastEdgeShareAvailable]);
 
   // Pre-compute blast radius size for each service (for sorted dropdown)
   const blastRadiusSortedServices = useMemo(() => {
@@ -5693,13 +5857,13 @@ export const ServicesOverview = () => {
   const impactSimulation = useMemo(() => {
     if (!blastRadiusTarget || !svcDetailsData.length) return null;
     const durationMinutes = Math.max(1, (timeframe.toMs - timeframe.fromMs) / 60000);
-    const affectedServices = [blastRadiusTarget, ...blastRadiusData.directlyAffected, ...blastRadiusData.indirectlyAffected];
-    const totalAffectedRpm = affectedServices.reduce((sum, name) => {
-      const svc = svcDetailsData.find(s => s.Service === name);
-      return sum + (svc?.Requests ?? 0) / durationMinutes;
+    const totalAffectedRpm = Object.entries(blastRadiusData.expectedFailedRequestsByService).reduce((sum, [, expectedFailed]) => {
+      return sum + (Number(expectedFailed) / durationMinutes);
     }, 0);
+    const totalAtRiskRpm = blastRadiusData.atRiskRequests / durationMinutes;
     const targetSvc = svcDetailsData.find(s => s.Service === blastRadiusTarget);
-    const targetRpm = (targetSvc?.Requests ?? 0) / durationMinutes;
+    const targetFailureProb = blastRadiusData.propagatedFailureByService[blastRadiusTarget] ?? 0;
+    const targetRpm = ((targetSvc?.Requests ?? 0) / durationMinutes) * targetFailureProb;
     const affectedRequests = totalAffectedRpm * impactDurationMin;
     const revenueLoss = affectedRequests * revenuePerRequest;
     const allowedDowntime999 = 0.001 * 60 * 24 * 30;
@@ -5707,6 +5871,7 @@ export const ServicesOverview = () => {
     return {
       targetRpm: Math.round(targetRpm * 10) / 10,
       totalAffectedRpm: Math.round(totalAffectedRpm * 10) / 10,
+      totalAtRiskRpm: Math.round(totalAtRiskRpm * 10) / 10,
       affectedRequests: Math.round(affectedRequests),
       revenueLoss,
       slo999breached: impactDurationMin > allowedDowntime999,
@@ -7281,12 +7446,21 @@ export const ServicesOverview = () => {
 
           <h4>Blast Radius Simulator</h4>
           <p>Six modes available via the toggle at the top of the tab:</p>
-          <p><strong>⚙️ Services Mode</strong> — Select a service to simulate its failure and see the cascading impact across your service topology. Uses BFS traversal of the dependency graph to find all upstream callers (direct and indirect) that would be affected.</p>
+          <p><strong>⚙️ Services Mode</strong> — Select a service to simulate its failure and see cascading impact across your topology. Uses probabilistic propagation across all tiers (not just one extra hop): if A depends on B by 50% and B depends on C by 50%, then C-failure contributes ~25% risk to A through that path.</p>
           <ul>
-            <li><strong>Direct Callers</strong> — Services that directly call the target (1st hop) — would fail immediately</li>
-            <li><strong>Indirect Callers</strong> — Services 2+ hops upstream — would experience cascading failures</li>
+            <li><strong>Direct Callers</strong> — Services that directly call the target (1st hop)</li>
+            <li><strong>Indirect Callers</strong> — Services 2+ hops upstream, with compounded probability per hop</li>
             <li><strong>Cascade Depth</strong> — How many hops the failure propagates through the dependency chain</li>
-            <li><strong>Impacted Request Volume</strong> — Total requests handled by all affected services</li>
+            <li><strong>Expected Failed Requests</strong> — Traffic-weighted expected failures (requests × failure probability)</li>
+            <li><strong>At-Risk Request Volume</strong> — Total request volume on impacted paths</li>
+            <li><strong>Weighting Mode Selector</strong> — Choose how dependency strength is estimated:
+              <ul>
+                <li><strong>Smart guess (traffic-weighted)</strong> — Busier downstream dependencies count more</li>
+                <li><strong>Simple split (equal share)</strong> — Every downstream dependency gets equal weight</li>
+                <li><strong>Real edge %</strong> — Uses observed per-edge call percentages when telemetry provides them</li>
+              </ul>
+            </li>
+            <li><strong>Tiny i Tooltips</strong> — Hover the small <strong>i</strong> icons next to each option for plain-English explanations</li>
           </ul>
           <p><strong>🖥️ Hosts Mode</strong> — Select a host to simulate its failure. Shows which services run on that host and which services on <em>other</em> hosts depend on them. Visualizes the infrastructure-level blast radius.</p>
           <ul>
@@ -7316,7 +7490,7 @@ export const ServicesOverview = () => {
             <li><strong>External Workloads Affected</strong> — Workloads on other nodes whose services depend on this node's services</li>
             <li><strong>Graph Visualization</strong> — Center = target node (🖥️), inner ring = workloads (☸️), outer ring = affected external workloads</li>
             <li><strong>Business Impact Simulator</strong> — Model node-level outage duration and see total request volume, revenue loss, and SLO breach across all affected services</li>
-            <li><strong>Impacted Request Volume</strong> — Total requests handled by all affected services (shown in all modes)</li>
+            <li><strong>Expected Failed Requests / At-Risk Throughput</strong> — Quantifies both expected lost traffic and total traffic exposed to risk</li>
           </ul>
           <p><strong>📦 K8s Namespaces Mode</strong> — Select a Kubernetes namespace to simulate a full namespace failure (e.g., accidental deletion, resource quota exhaustion, network policy misconfiguration). All workloads and services within the namespace are destroyed.</p>
           <ul>
@@ -7826,8 +8000,11 @@ export const ServicesOverview = () => {
           <Tab key={tabId} title="Metrics">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               {aiPanel}
-              <Tabs selectedIndex={metricsSubTab} onChange={(idx) => setMetricsSubTab(idx)}>
-                <Tab title="Service Metrics">
+              {metricsVisibleSubTabs.length === 0 ? (
+                <div className="svc-empty-state">No Metrics sub-tabs are enabled in settings.</div>
+              ) : (
+                <Tabs selectedIndex={safeMetricsSubTab} onChange={(idx) => setMetricsSubTab(idx)}>
+                {showServiceMetricsTab && (<Tab title="Service Metrics">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               {/* Controls: Percentile Mode, Forecast, CSV Export */}
               <Flex gap={12} alignItems="center" flexWrap="wrap">
@@ -8085,8 +8262,8 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-                </Tab>
-                <Tab title="Process Metrics">
+              </Tab>)}
+              {showProcessMetricsTab && (<Tab title="Process Metrics">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
 
               {/* Memory Leak Indicator */}
@@ -8180,8 +8357,8 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-                </Tab>
-                <Tab title="K8s Workloads">
+              </Tab>)}
+              {showK8sWorkloadsTab && (<Tab title="K8s Workloads">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
 
               {/* Node-Level Resource Pressure */}
@@ -8316,8 +8493,9 @@ export const ServicesOverview = () => {
                 </>
               )}
             </Flex>
-                </Tab>
+                </Tab>)}
               </Tabs>
+              )}
             </Flex>
           </Tab>);
               case "Reliability": return (
@@ -10683,19 +10861,70 @@ export const ServicesOverview = () => {
 
               {blastRadiusMode === "services" && (<>
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
-                <div style={{ maxWidth: 800 }}>
-                  <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 4, display: "block" }}>Select a service to simulate its failure:</Text>
-                  <Select
-                    value={blastRadiusTarget || null}
-                    onChange={(val) => setBlastRadiusTarget(val as string ?? "")}
-                  >
-                    <Select.Filter />
-                    <Select.Content>
-                      {blastRadiusSortedServices.map(s => (
-                        <Select.Option key={s.name} value={s.name}>{s.name} ({s.affected} affected)</Select.Option>
-                      ))}
-                    </Select.Content>
-                  </Select>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, alignItems: "start" }}>
+                  <div style={{ maxWidth: 800 }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 4, display: "block" }}>Select a service to simulate its failure:</Text>
+                    <Select
+                      value={blastRadiusTarget || null}
+                      onChange={(val) => setBlastRadiusTarget(val as string ?? "")}
+                    >
+                      <Select.Filter />
+                      <Select.Content>
+                        {blastRadiusSortedServices.map(s => (
+                          <Select.Option key={s.name} value={s.name}>{s.name} ({s.affected} affected)</Select.Option>
+                        ))}
+                      </Select.Content>
+                    </Select>
+                  </div>
+                  <div>
+                    <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 4, display: "block" }}>How should we estimate "how much this dependency matters"?</Text>
+                    <Select
+                      value={blastRadiusWeightMode}
+                      onChange={(val) => { if (val) setBlastRadiusWeightMode(val as "requestProxy" | "equalSplit" | "edgeShare"); }}
+                    >
+                      <Select.Content>
+                        <Select.Option value="requestProxy">Smart guess (traffic-weighted)</Select.Option>
+                        <Select.Option value="equalSplit">Simple split (equal share)</Select.Option>
+                        <Select.Option value="edgeShare">Real edge % (if available)</Select.Option>
+                      </Select.Content>
+                    </Select>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, opacity: 0.8 }}>
+                        <span>Smart guess (traffic-weighted)</span>
+                        <span title="Uses service traffic as a smart proxy. If one downstream service is busier, we assume that dependency matters more." style={{ cursor: "help", border: "1px solid rgba(128,128,128,0.35)", borderRadius: "50%", width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10, lineHeight: 1 }}>i</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, opacity: 0.8 }}>
+                        <span>Simple split (equal share)</span>
+                        <span title="Splits dependency evenly. If a service calls 4 downstream services, each one is treated as 25% of the dependency." style={{ cursor: "help", border: "1px solid rgba(128,128,128,0.35)", borderRadius: "50%", width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10, lineHeight: 1 }}>i</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, opacity: 0.8 }}>
+                        <span>Real edge % (if available)</span>
+                        <span title="Uses observed call percentages per connection from telemetry. Most accurate when available." style={{ cursor: "help", border: "1px solid rgba(128,128,128,0.35)", borderRadius: "50%", width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10, lineHeight: 1 }}>i</span>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 11, opacity: 0.75, lineHeight: 1.4 }}>
+                      {blastRadiusWeightMode === "requestProxy" && (
+                        <Text style={{ fontSize: 11, opacity: 0.75, display: "block" }}>
+                          Executive mode: We make a smart estimate. If Service A talks to 2 services, we assume the busier one matters more. Easy mental model: "Bigger traffic dependency = bigger blast impact." 
+                        </Text>
+                      )}
+                      {blastRadiusWeightMode === "equalSplit" && (
+                        <Text style={{ fontSize: 11, opacity: 0.75, display: "block" }}>
+                          Executive mode: We split dependency equally. If Service A calls 4 services, each gets 25% influence. Easy mental model: "Everyone gets an equal vote."
+                        </Text>
+                      )}
+                      {blastRadiusWeightMode === "edgeShare" && (
+                        <Text style={{ fontSize: 11, opacity: 0.75, display: "block" }}>
+                          Executive mode: Use real call percentages from telemetry per connection (best accuracy). If unavailable, we automatically fall back to Smart guess so simulation still works.
+                        </Text>
+                      )}
+                      {!blastEdgeShareAvailable && blastRadiusWeightMode === "edgeShare" && (
+                        <Text style={{ fontSize: 11, color: ORANGE, display: "block", marginTop: 4 }}>
+                          Edge-share data is not currently available in this dataset. Using Smart guess (traffic-weighted) right now.
+                        </Text>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
               {blastRadiusTarget && (
@@ -10715,11 +10944,20 @@ export const ServicesOverview = () => {
                       color={blastRadiusData.cascadeDepth > 2 ? RED : YELLOW}
                     />
                     <KpiCard
-                      label="Impacted Request Volume"
+                      label="Expected Failed Requests"
                       value={formatCount(blastRadiusData.impactedRequests)}
                       rawValue={blastRadiusData.impactedRequests}
                     />
+                    <KpiCard
+                      label="At-Risk Request Volume"
+                      value={formatCount(blastRadiusData.atRiskRequests)}
+                      rawValue={blastRadiusData.atRiskRequests}
+                    />
                   </Flex>
+                  <Text style={{ fontSize: 11, opacity: 0.7 }}>
+                    Weighting mode: {blastRadiusData.weightModeRequested === "requestProxy" ? "Smart guess (traffic-weighted)" : blastRadiusData.weightModeRequested === "equalSplit" ? "Simple split (equal share)" : "Real edge %"}
+                    {blastRadiusData.weightModeRequested !== blastRadiusData.weightModeEffective ? " -> currently using Smart guess (traffic-weighted) because edge % data is missing" : ""}
+                  </Text>
 
                   {/* Blast Radius Dependency Graph */}
                   <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 0 }}>
@@ -10732,42 +10970,13 @@ export const ServicesOverview = () => {
                       entityIdMap={depsEntityIdMap}
                       entityTypeMap={svcEntityTypeMap}
                       dbEntityMap={dbEntityMap}
+                      propagatedFailureByService={blastRadiusData.propagatedFailureByService}
+                      expectedFailedRequestsByService={blastRadiusData.expectedFailedRequestsByService}
+                      serviceDepthByService={blastRadiusData.serviceDepthByService}
                       tfFrom={tfFrom}
                       tfTo={tfTo}
                     />
                   </div>
-
-                  {/* Side-by-side tables */}
-                  <Flex gap={16} flexWrap="wrap">
-                    {blastRadiusData.directlyAffected.length > 0 && (
-                      <div className="svc-table-tile" style={{ flex: "1 1 400px" }}>
-                        <Heading level={6}>Direct Callers (1st Hop) — {blastRadiusData.directlyAffected.length} services</Heading>
-                        <DataTable data={blastRadiusData.directlyAffected.map(s => {
-                          const svc = svcDetailsData.find(d => d.Service === s);
-                          return { Service: s, "dt.entity.service": svc?.["dt.entity.service"] ?? depsEntityIdMap.get(s) ?? "", Impact: "Direct — would fail immediately" };
-                        })} columns={[
-                          { id: "Service", header: "Service", accessor: "Service", cell: smartscapeLinkCell },
-                          { id: "Impact", header: "Impact", accessor: "Impact" },
-                        ]}>
-                          <DataTable.Pagination defaultPageSize={25} />
-                        </DataTable>
-                      </div>
-                    )}
-                    {blastRadiusData.indirectlyAffected.length > 0 && (
-                      <div className="svc-table-tile" style={{ flex: "1 1 400px" }}>
-                        <Heading level={6}>Indirect Callers (2+ Hops) — {blastRadiusData.indirectlyAffected.length} services</Heading>
-                        <DataTable data={blastRadiusData.indirectlyAffected.map(s => {
-                          const svc = svcDetailsData.find(d => d.Service === s);
-                          return { Service: s, "dt.entity.service": svc?.["dt.entity.service"] ?? depsEntityIdMap.get(s) ?? "", Impact: "Indirect — cascading failure" };
-                        })} columns={[
-                          { id: "Service", header: "Service", accessor: "Service", cell: smartscapeLinkCell },
-                          { id: "Impact", header: "Impact", accessor: "Impact" },
-                        ]}>
-                          <DataTable.Pagination defaultPageSize={25} />
-                        </DataTable>
-                      </div>
-                    )}
-                  </Flex>
 
                   {/* Business Impact Simulator */}
                   {impactSimulation && (
@@ -10802,9 +11011,14 @@ export const ServicesOverview = () => {
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
                             <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(194,25,48,0.06)" }}>
-                              <Text style={{ fontSize: 11, opacity: 0.6 }}>Affected Requests</Text>
+                              <Text style={{ fontSize: 11, opacity: 0.6 }}>Expected Failed Requests</Text>
                               <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{formatCount(impactSimulation.affectedRequests)}</div>
-                              <Text style={{ fontSize: 10, opacity: 0.5 }}>{formatCount(Math.round(impactSimulation.totalAffectedRpm))} req/min across {blastRadiusData.totalAffected + 1} services</Text>
+                              <Text style={{ fontSize: 10, opacity: 0.5 }}>{formatCount(Math.round(impactSimulation.totalAffectedRpm))} failed req/min (expected)</Text>
+                            </div>
+                            <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(99,130,191,0.06)" }}>
+                              <Text style={{ fontSize: 11, opacity: 0.6 }}>At-Risk Throughput</Text>
+                              <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{formatCount(Math.round(impactSimulation.totalAtRiskRpm))}</div>
+                              <Text style={{ fontSize: 10, opacity: 0.5 }}>req/min across impacted path</Text>
                             </div>
                             <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: revenuePerRequest > 0 ? "rgba(194,25,48,0.06)" : undefined }}>
                               <Text style={{ fontSize: 11, opacity: 0.6 }}>Est. Revenue Loss</Text>
@@ -10836,6 +11050,63 @@ export const ServicesOverview = () => {
                       </div>
                     </>
                   )}
+
+                  {/* Side-by-side tables */}
+                  <Flex gap={16} flexWrap="wrap">
+                    {blastRadiusData.directlyAffected.length > 0 && (
+                      <div className="svc-table-tile" style={{ flex: "1 1 400px" }}>
+                        <Heading level={6}>Direct Callers (1st Hop) — {blastRadiusData.directlyAffected.length} services</Heading>
+                        <DataTable data={blastRadiusData.directlyAffected.map(s => {
+                          const svc = svcDetailsData.find(d => d.Service === s);
+                          const p = (blastRadiusData.propagatedFailureByService[s] ?? 0) * 100;
+                          const expFailed = blastRadiusData.expectedFailedRequestsByService[s] ?? 0;
+                          return {
+                            Service: s,
+                            "dt.entity.service": svc?.["dt.entity.service"] ?? depsEntityIdMap.get(s) ?? "",
+                            "Simulated Failure %": p,
+                            "Expected Failed Requests": expFailed,
+                          };
+                        })} columns={[
+                          { id: "Service", header: "Service", accessor: "Service", cell: smartscapeLinkCell },
+                          { id: "SimFail", header: "Simulated Failure %", accessor: "Simulated Failure %", columnType: "number" as const, cell: ({ value }: any) => {
+                            const v = Number(value ?? 0);
+                            return <span style={{ fontWeight: 700, color: v >= 80 ? RED : v >= 40 ? ORANGE : YELLOW }}>{v.toFixed(1)}%</span>;
+                          }},
+                          { id: "ExpFail", header: "Expected Failed Requests", accessor: "Expected Failed Requests", columnType: "number" as const, cell: ({ value }: any) => <span>{formatCount(Number(value ?? 0))}</span> },
+                        ]}>
+                          <DataTable.Pagination defaultPageSize={25} />
+                        </DataTable>
+                      </div>
+                    )}
+                    {blastRadiusData.indirectlyAffected.length > 0 && (
+                      <div className="svc-table-tile" style={{ flex: "1 1 400px" }}>
+                        <Heading level={6}>Indirect Callers (2+ Hops) — {blastRadiusData.indirectlyAffected.length} services</Heading>
+                        <DataTable data={blastRadiusData.indirectlyAffected.map(s => {
+                          const svc = svcDetailsData.find(d => d.Service === s);
+                          const p = (blastRadiusData.propagatedFailureByService[s] ?? 0) * 100;
+                          const expFailed = blastRadiusData.expectedFailedRequestsByService[s] ?? 0;
+                          const depth = blastRadiusData.serviceDepthByService[s] ?? 0;
+                          return {
+                            Service: s,
+                            "dt.entity.service": svc?.["dt.entity.service"] ?? depsEntityIdMap.get(s) ?? "",
+                            Hop: depth,
+                            "Simulated Failure %": p,
+                            "Expected Failed Requests": expFailed,
+                          };
+                        })} columns={[
+                          { id: "Service", header: "Service", accessor: "Service", cell: smartscapeLinkCell },
+                          { id: "Hop", header: "Hop", accessor: "Hop", columnType: "number" as const },
+                          { id: "SimFail", header: "Simulated Failure %", accessor: "Simulated Failure %", columnType: "number" as const, cell: ({ value }: any) => {
+                            const v = Number(value ?? 0);
+                            return <span style={{ fontWeight: 700, color: v >= 80 ? RED : v >= 40 ? ORANGE : YELLOW }}>{v.toFixed(1)}%</span>;
+                          }},
+                          { id: "ExpFail", header: "Expected Failed Requests", accessor: "Expected Failed Requests", columnType: "number" as const, cell: ({ value }: any) => <span>{formatCount(Number(value ?? 0))}</span> },
+                        ]}>
+                          <DataTable.Pagination defaultPageSize={25} />
+                        </DataTable>
+                      </div>
+                    )}
+                  </Flex>
 
                   {/* Recovery Sequence Optimizer */}
                   <>

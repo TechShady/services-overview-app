@@ -20,6 +20,9 @@ interface BlastRadiusGraphProps {
   entityIdMap: Map<string, string>;
   entityTypeMap?: Map<string, string>;
   dbEntityMap?: Map<string, string>;
+  propagatedFailureByService?: Record<string, number>;
+  expectedFailedRequestsByService?: Record<string, number>;
+  serviceDepthByService?: Record<string, number>;
   tfFrom?: string;
   tfTo?: string;
   fromMs?: number;
@@ -39,6 +42,9 @@ interface NodeData {
   latencyP90: number;
   status: string;
   hasMetrics: boolean;
+  simulatedFailure: number;
+  expectedFailedRequests: number;
+  depth: number;
 }
 
 function formatMs(val: number | undefined): string {
@@ -66,7 +72,7 @@ function getNodeFill(ring: string): string {
   return "rgba(255, 140, 0, 0.15)";
 }
 
-export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected, edges, services, entityIdMap, entityTypeMap, dbEntityMap, tfFrom = "now()-2h", tfTo = "now()", fromMs, toMs }: BlastRadiusGraphProps) {
+export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected, edges, services, entityIdMap, entityTypeMap, dbEntityMap, propagatedFailureByService, expectedFailedRequestsByService, serviceDepthByService, tfFrom = "now()-2h", tfTo = "now()", fromMs, toMs }: BlastRadiusGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 900, height: 500 });
   const [hovered, setHovered] = useState<string | null>(null);
@@ -191,6 +197,9 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
     const result: NodeData[] = [];
 
     const getSvcData = (name: string) => svcMap.get(name) ?? { entityId: "", requests: 0, failureRate: 0, latencyP50: 0, latencyP90: 0, status: "", hasMetrics: false };
+    const getSimulatedFailure = (name: string) => Math.max(0, Math.min(1, propagatedFailureByService?.[name] ?? (name === target ? 1 : 0)));
+    const getExpectedFailedRequests = (name: string) => Math.max(0, expectedFailedRequestsByService?.[name] ?? 0);
+    const getDepth = (name: string) => serviceDepthByService?.[name] ?? (name === target ? 0 : -1);
 
     // Target node (center)
     const tData = getSvcData(target);
@@ -198,6 +207,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
       name: target, x: cx, y: cy, radius: 28, ring: "target",
       entityId: tData.entityId, requests: tData.requests, failureRate: tData.failureRate,
       latencyP50: tData.latencyP50, latencyP90: tData.latencyP90, status: tData.status, hasMetrics: tData.hasMetrics,
+      simulatedFailure: getSimulatedFailure(target), expectedFailedRequests: getExpectedFailedRequests(target), depth: getDepth(target),
     });
 
     // Direct callers — inner ring
@@ -210,6 +220,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
         radius: 20, ring: "direct",
         entityId: d.entityId, requests: d.requests, failureRate: d.failureRate,
         latencyP50: d.latencyP50, latencyP90: d.latencyP90, status: d.status, hasMetrics: d.hasMetrics,
+        simulatedFailure: getSimulatedFailure(name), expectedFailedRequests: getExpectedFailedRequests(name), depth: getDepth(name),
       });
     });
 
@@ -223,11 +234,12 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
         radius: 16, ring: "indirect",
         entityId: d.entityId, requests: d.requests, failureRate: d.failureRate,
         latencyP50: d.latencyP50, latencyP90: d.latencyP90, status: d.status, hasMetrics: d.hasMetrics,
+        simulatedFailure: getSimulatedFailure(name), expectedFailedRequests: getExpectedFailedRequests(name), depth: getDepth(name),
       });
     });
 
     return result;
-  }, [target, directlyAffected, indirectlyAffected, dimensions, svcMap]);
+  }, [target, directlyAffected, indirectlyAffected, dimensions, svcMap, propagatedFailureByService, expectedFailedRequestsByService, serviceDepthByService]);
 
   // Apply drag offsets
   const nodes = useMemo(() => baseNodes.map(n => {
@@ -362,7 +374,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
   return (
     <div ref={containerRef} style={{ width: "100%", position: "relative", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)", overflow: "hidden" }}>
       {/* Legend + toolbar */}
-      <div style={{ position: "absolute", top: 8, right: 12, zIndex: 10, display: "flex", gap: 10, alignItems: "center", fontSize: 11 }}>
+      <div style={{ position: "absolute", top: 8, right: 12, zIndex: 10, display: "flex", gap: 10, alignItems: "center", fontSize: 11, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "75%" }}>
         {cascadeActive && (
           <span style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700, color: cascadeComplete ? ORANGE : RED, background: "rgba(194,25,48,0.12)", border: `1px solid ${cascadeComplete ? ORANGE : RED}`, borderRadius: 6, padding: "2px 8px", letterSpacing: 0.5 }}>
             {cascadeComplete ? `⚠ CASCADED — ${cascadeFailedSet.size} FAILING` : `⚡ T+${String(Math.floor(cascadeElapsed / 60)).padStart(2, "0")}:${String(cascadeElapsed % 60).padStart(2, "0")} — ${cascadeFailedSet.size} failing`}
@@ -371,6 +383,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
         <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: RED, marginRight: 4 }} />Target</span>
         <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: RED_LIGHT, marginRight: 4 }} />Direct</span>
         <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: ORANGE, marginRight: 4 }} />Indirect</span>
+        <span style={{ opacity: 0.6 }}>Node heat reflects simulated failure probability</span>
         {cascadeActive ? (
           <button onClick={stopCascade} style={{ background: "rgba(194,25,48,0.2)", border: "1px solid rgba(194,25,48,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: RED, cursor: "pointer", fontWeight: 600 }}>■ Stop</button>
         ) : (
@@ -481,8 +494,23 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
           const cascadeFailed = cascadeActive && cascadeFailedSet.has(n.name);
           const cascadeDegraded = cascadeActive && cascadeDegradedSet.has(n.name);
           const cascadeHealthy = cascadeActive && !cascadeFailed && !cascadeDegraded;
-          const nodeStrokeColor = cascadeFailed ? RED : cascadeDegraded ? ORANGE : getNodeColor(n.ring);
-          const nodeFillColor = cascadeFailed ? "rgba(194,25,48,0.45)" : cascadeDegraded ? "rgba(255,140,0,0.35)" : cascadeHealthy ? "rgba(99,130,191,0.1)" : getNodeFill(n.ring);
+          const simulatedFailure = n.simulatedFailure;
+          const simulatedColor = isTarget
+            ? RED
+            : simulatedFailure >= 0.8
+              ? RED
+              : simulatedFailure >= 0.4
+                ? ORANGE
+                : simulatedFailure >= 0.15
+                  ? YELLOW
+                  : getNodeColor(n.ring);
+          const simulatedFill = isTarget
+            ? RED
+            : simulatedFailure >= 0.01
+              ? `rgba(${simulatedFailure >= 0.8 ? "194,25,48" : simulatedFailure >= 0.4 ? "255,140,0" : "252,213,63"}, ${Math.min(0.5, 0.12 + simulatedFailure * 0.45)})`
+              : getNodeFill(n.ring);
+          const nodeStrokeColor = cascadeFailed ? RED : cascadeDegraded ? ORANGE : simulatedColor;
+          const nodeFillColor = cascadeFailed ? "rgba(194,25,48,0.45)" : cascadeDegraded ? "rgba(255,140,0,0.35)" : cascadeHealthy ? "rgba(99,130,191,0.1)" : simulatedFill;
           const nodeIcon = cascadeFailed ? "💀" : cascadeDegraded ? "🔥" : n.ring === "target" ? "💥" : "⚠️";
 
           // Stagger: direct nodes start at 80 ms, 60 ms apart.
@@ -559,6 +587,19 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
               >
                 {n.name.length > 20 ? n.name.slice(0, 18) + "…" : n.name}
               </text>
+              {!isTarget && n.simulatedFailure > 0 && (
+                <text
+                  x={n.x}
+                  y={n.y - n.radius - 6}
+                  textAnchor="middle"
+                  fill={simulatedFailure >= 0.8 ? RED : simulatedFailure >= 0.4 ? ORANGE : YELLOW}
+                  fontSize={10}
+                  fontWeight={700}
+                  style={{ pointerEvents: "none" }}
+                >
+                  {(simulatedFailure * 100).toFixed(0)}%
+                </text>
+              )}
               {/* Icon inside circle */}
               <text x={n.x} y={n.y + 4} textAnchor="middle"
                 fontSize={n.ring === "target" ? 18 : 14}
@@ -606,6 +647,20 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
             </div>
 
             {/* Metrics grid — identical to Dependencies */}
+            <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(99,130,191,0.1)", background: "rgba(69,137,255,0.06)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.5 }}>Simulated Failure</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: tooltip.node.simulatedFailure >= 0.8 ? RED : tooltip.node.simulatedFailure >= 0.4 ? ORANGE : tooltip.node.simulatedFailure >= 0.15 ? YELLOW : "inherit" }}>
+                    {(tooltip.node.simulatedFailure * 100).toFixed(1)}%
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.5 }}>Expected Failed Requests</div>
+                  <div style={{ fontSize: 18, fontWeight: 700 }}>{formatCount(tooltip.node.expectedFailedRequests)}</div>
+                </div>
+              </div>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
               {/* Requests */}
               <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(99,130,191,0.1)", borderRight: "1px solid rgba(99,130,191,0.1)" }}>

@@ -60,6 +60,22 @@ function formatCount(val: number | undefined): string {
   return val.toLocaleString();
 }
 
+function getFailureColor(probability: number, isTarget = false): string {
+  if (isTarget) return RED;
+  if (probability >= 0.8) return RED;
+  if (probability >= 0.4) return ORANGE;
+  if (probability >= 0.15) return YELLOW;
+  return BLUE;
+}
+
+function getFailureFill(probability: number, isTarget = false): string {
+  if (isTarget) return RED;
+  if (probability >= 0.8) return `rgba(194,25,48,${Math.min(0.5, 0.14 + probability * 0.45)})`;
+  if (probability >= 0.4) return `rgba(255,140,0,${Math.min(0.5, 0.14 + probability * 0.45)})`;
+  if (probability >= 0.15) return `rgba(252,213,63,${Math.min(0.5, 0.14 + probability * 0.45)})`;
+  return `rgba(69,137,255,${Math.min(0.3, 0.08 + probability * 0.35)})`;
+}
+
 function getNodeColor(ring: string): string {
   if (ring === "target") return RED;
   if (ring === "direct") return RED_LIGHT;
@@ -189,7 +205,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
     return m;
   }, [services, entityIdMap]);
 
-  // Base layout: target in center, direct callers in inner ring, indirect in outer ring
+  // Base layout: target in center, all affected services arranged by true hop depth rings
   const baseNodes = useMemo((): NodeData[] => {
     const { width, height } = dimensions;
     const cx = width / 2;
@@ -210,31 +226,44 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
       simulatedFailure: getSimulatedFailure(target), expectedFailedRequests: getExpectedFailedRequests(target), depth: getDepth(target),
     });
 
-    // Direct callers — inner ring
-    const innerRadius = Math.min(width, height) * 0.28;
-    directlyAffected.forEach((name, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(directlyAffected.length, 1) - Math.PI / 2;
-      const d = getSvcData(name);
-      result.push({
-        name, x: cx + innerRadius * Math.cos(angle), y: cy + innerRadius * Math.sin(angle),
-        radius: 20, ring: "direct",
-        entityId: d.entityId, requests: d.requests, failureRate: d.failureRate,
-        latencyP50: d.latencyP50, latencyP90: d.latencyP90, status: d.status, hasMetrics: d.hasMetrics,
-        simulatedFailure: getSimulatedFailure(name), expectedFailedRequests: getExpectedFailedRequests(name), depth: getDepth(name),
-      });
+    const allAffected = [...directlyAffected, ...indirectlyAffected];
+    const tierMap = new Map<number, string[]>();
+    allAffected.forEach((name) => {
+      const depth = getDepth(name);
+      const tier = depth > 0 ? depth : (directlyAffected.includes(name) ? 1 : 2);
+      if (!tierMap.has(tier)) tierMap.set(tier, []);
+      tierMap.get(tier)!.push(name);
     });
 
-    // Indirect callers — outer ring
-    const outerRadius = Math.min(width, height) * 0.44;
-    indirectlyAffected.forEach((name, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(indirectlyAffected.length, 1) - Math.PI / 4;
-      const d = getSvcData(name);
-      result.push({
-        name, x: cx + outerRadius * Math.cos(angle), y: cy + outerRadius * Math.sin(angle),
-        radius: 16, ring: "indirect",
-        entityId: d.entityId, requests: d.requests, failureRate: d.failureRate,
-        latencyP50: d.latencyP50, latencyP90: d.latencyP90, status: d.status, hasMetrics: d.hasMetrics,
-        simulatedFailure: getSimulatedFailure(name), expectedFailedRequests: getExpectedFailedRequests(name), depth: getDepth(name),
+    const tiers = [...tierMap.keys()].sort((a, b) => a - b);
+    const minTierRadius = Math.min(width, height) * 0.26;
+    const maxTierRadius = Math.min(width, height) * 0.45;
+    const tierStep = tiers.length > 1 ? (maxTierRadius - minTierRadius) / (tiers.length - 1) : 0;
+
+    tiers.forEach((tierDepth, tierIdx) => {
+      const names = tierMap.get(tierDepth) ?? [];
+      const tierRadius = minTierRadius + tierStep * tierIdx;
+      names.forEach((name, i) => {
+        const angle = (2 * Math.PI * i) / Math.max(names.length, 1) - Math.PI / 2 + tierIdx * 0.22;
+        const d = getSvcData(name);
+        const ring = tierDepth === 1 ? "direct" : "indirect";
+        result.push({
+          name,
+          x: cx + tierRadius * Math.cos(angle),
+          y: cy + tierRadius * Math.sin(angle),
+          radius: Math.max(14, 21 - Math.min(6, tierDepth - 1)),
+          ring,
+          entityId: d.entityId,
+          requests: d.requests,
+          failureRate: d.failureRate,
+          latencyP50: d.latencyP50,
+          latencyP90: d.latencyP90,
+          status: d.status,
+          hasMetrics: d.hasMetrics,
+          simulatedFailure: getSimulatedFailure(name),
+          expectedFailedRequests: getExpectedFailedRequests(name),
+          depth: tierDepth,
+        });
       });
     });
 
@@ -370,6 +399,10 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
   const cx = dimensions.width / 2;
   const cy = dimensions.height / 2;
   const isIdle = animPhase === "idle";
+  const maxVisibleDepth = useMemo(() => {
+    const depths = [...directlyAffected, ...indirectlyAffected].map((name) => serviceDepthByService?.[name] ?? (directlyAffected.includes(name) ? 1 : 2));
+    return depths.length ? Math.max(...depths) : 0;
+  }, [directlyAffected, indirectlyAffected, serviceDepthByService]);
 
   return (
     <div ref={containerRef} style={{ width: "100%", position: "relative", borderRadius: 8, border: "1px solid rgba(99,130,191,0.15)", overflow: "hidden" }}>
@@ -381,8 +414,9 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
           </span>
         )}
         <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: RED, marginRight: 4 }} />Target</span>
-        <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: RED_LIGHT, marginRight: 4 }} />Direct</span>
-        <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: ORANGE, marginRight: 4 }} />Indirect</span>
+        <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: RED_LIGHT, marginRight: 4 }} />Tier 1</span>
+        <span style={{ opacity: 0.6 }}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: ORANGE, marginRight: 4 }} />Tier 2+</span>
+        {maxVisibleDepth > 0 && <span style={{ opacity: 0.6 }}>Showing {maxVisibleDepth} tier{maxVisibleDepth === 1 ? "" : "s"}</span>}
         <span style={{ opacity: 0.6 }}>Node heat reflects simulated failure probability</span>
         {cascadeActive ? (
           <button onClick={stopCascade} style={{ background: "rgba(194,25,48,0.2)", border: "1px solid rgba(194,25,48,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: RED, cursor: "pointer", fontWeight: 600 }}>■ Stop</button>
@@ -495,32 +529,18 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
           const cascadeDegraded = cascadeActive && cascadeDegradedSet.has(n.name);
           const cascadeHealthy = cascadeActive && !cascadeFailed && !cascadeDegraded;
           const simulatedFailure = n.simulatedFailure;
-          const simulatedColor = isTarget
-            ? RED
-            : simulatedFailure >= 0.8
-              ? RED
-              : simulatedFailure >= 0.4
-                ? ORANGE
-                : simulatedFailure >= 0.15
-                  ? YELLOW
-                  : getNodeColor(n.ring);
-          const simulatedFill = isTarget
-            ? RED
-            : simulatedFailure >= 0.01
-              ? `rgba(${simulatedFailure >= 0.8 ? "194,25,48" : simulatedFailure >= 0.4 ? "255,140,0" : "252,213,63"}, ${Math.min(0.5, 0.12 + simulatedFailure * 0.45)})`
-              : getNodeFill(n.ring);
-          const nodeStrokeColor = cascadeFailed ? RED : cascadeDegraded ? ORANGE : simulatedColor;
+          const simulatedColor = getFailureColor(simulatedFailure, isTarget);
+          const simulatedFill = getFailureFill(simulatedFailure, isTarget);
+          const nodeStrokeColor = cascadeFailed ? simulatedColor : cascadeDegraded ? ORANGE : simulatedColor;
           const nodeFillColor = cascadeFailed ? "rgba(194,25,48,0.45)" : cascadeDegraded ? "rgba(255,140,0,0.35)" : cascadeHealthy ? "rgba(99,130,191,0.1)" : simulatedFill;
           const nodeIcon = cascadeFailed ? "💀" : cascadeDegraded ? "🔥" : n.ring === "target" ? "💥" : "⚠️";
 
           // Stagger: direct nodes start at 80 ms, 60 ms apart.
           //          indirect nodes start at 280 ms, 40 ms apart.
-          const ringIdx = n.ring === "direct"
-            ? directlyAffected.indexOf(n.name)
-            : indirectlyAffected.indexOf(n.name);
-          const delayMs = isTarget ? 0
-            : n.ring === "direct" ? 80 + ringIdx * 60
-            : 280 + ringIdx * 40;
+          const tierPeers = nodes.filter((x) => x.depth === n.depth);
+          const ringIdx = Math.max(0, tierPeers.findIndex((x) => x.name === n.name));
+          const tierDelayBase = Math.max(0, (n.depth - 1) * 120);
+          const delayMs = isTarget ? 0 : 80 + tierDelayBase + ringIdx * 35;
 
           // In idle: offset every non-target node back to center so they appear
           // to burst outward when the transition fires.
@@ -557,7 +577,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
               )}
               {/* Pulse ring for failed nodes in cascade */}
               {cascadeFailed && (
-                <circle cx={n.x} cy={n.y} r={n.radius + 8} fill="none" stroke={RED} strokeWidth={2} opacity={0.4} filter="url(#glow-target)">
+                <circle cx={n.x} cy={n.y} r={n.radius + 8} fill="none" stroke={simulatedColor} strokeWidth={2} opacity={0.4} filter="url(#glow-target)">
                   <animate attributeName="r" from={n.radius + 4} to={n.radius + 18} dur="1.2s" repeatCount="indefinite" />
                   <animate attributeName="opacity" from="0.5" to="0" dur="1.2s" repeatCount="indefinite" />
                 </circle>
@@ -592,7 +612,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
                   x={n.x}
                   y={n.y - n.radius - 6}
                   textAnchor="middle"
-                  fill={simulatedFailure >= 0.8 ? RED : simulatedFailure >= 0.4 ? ORANGE : YELLOW}
+                  fill={simulatedColor}
                   fontSize={10}
                   fontWeight={700}
                   style={{ pointerEvents: "none" }}
@@ -637,7 +657,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
                 cursor: pinned ? "grab" : "default", userSelect: "none",
               }}
             >
-              <span style={{ width: 10, height: 10, borderRadius: "50%", background: getNodeColor(tooltip.node.ring), display: "inline-block" }} />
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: getFailureColor(tooltip.node.simulatedFailure, tooltip.node.ring === "target"), display: "inline-block" }} />
               <span style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{tooltip.node.name}</span>
               {pinned && (
                 <span onClick={() => { setPinned(null); setTooltip(null); }}
@@ -651,7 +671,7 @@ export function BlastRadiusGraph({ target, directlyAffected, indirectlyAffected,
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
                 <div>
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.5 }}>Simulated Failure</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: tooltip.node.simulatedFailure >= 0.8 ? RED : tooltip.node.simulatedFailure >= 0.4 ? ORANGE : tooltip.node.simulatedFailure >= 0.15 ? YELLOW : "inherit" }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: getFailureColor(tooltip.node.simulatedFailure, tooltip.node.ring === "target") }}>
                     {(tooltip.node.simulatedFailure * 100).toFixed(1)}%
                   </div>
                 </div>

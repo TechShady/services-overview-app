@@ -7,9 +7,15 @@ The Services Overview App is a Dynatrace platform application that provides a co
 
 ### Prerequisites
 
-- Node.js ≥ 16.13
+- Node.js 22.x (recommended: latest 22 LTS)
 - A Dynatrace environment with RUM enabled
 - `dt-app` CLI (`npx dt-app`)
+
+Use `.nvmrc` to match the project runtime:
+
+```bash
+nvm use
+```
 
 ### Pre-Install
 

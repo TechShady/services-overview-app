@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "This Service Overview project was created by myself, an SE of Dynatrace. This is not an official Dynatrace application and it is not something you can open a support ticket on. You may create an issue on the github repository, however there is no guaruntee it will be addressed (this isn't my primary job, just a fun project). Feel free to fork the repository (https://github.com/TechShady/services-overview-app) for your own use as well.",
   "scripts": {
+    "predeploy": "node -e \"const v=process.versions.node.split('.')[0]; if(v!=='22'){console.error('\\n[predeploy] Node 22.x is required by dt-app. Current: '+process.version+'\\nUse nvm use 22 (or nvm use) and retry.\\n'); process.exit(1)}\"",
     "build": "dt-app build",
     "start": "dt-app dev",
     "create:function": "dt-app function create",
@@ -15,7 +16,8 @@
     "lint": "eslint ."
   },
   "engines": {
-    "node": ">=16.13.0"
+    "node": ">=22 <23",
+    "npm": ">=10"
   },
   "author": "",
   "license": "ISC",

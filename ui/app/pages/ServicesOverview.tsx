@@ -7718,42 +7718,6 @@ export const ServicesOverview = () => {
                 </div>
               )}
 
-              <SectionHeader title="Services Status & Problems" />
-              <div className="svc-overview-row">
-                <div className="svc-honeycomb-tile">
-                  <Heading level={6}>Services (Current Status)</Heading>
-                  {healthResult.isLoading ? (
-                    <LoadingState />
-                  ) : (
-                    <HoneycombChart
-                      data={honeycombData}
-                      colorScheme={honeycombColorRanges}
-                      showLabels
-                      height="100%"
-                    >
-                      <HoneycombChart.Legend hidden />
-                    </HoneycombChart>
-                  )}
-                </div>
-                <div className="svc-table-tile">
-                  <Heading level={6}>Problems</Heading>
-                  {problemsResult.isLoading ? (
-                    <LoadingState />
-                  ) : (
-                    <DataTable
-                      data={problemsData}
-                      columns={problemsColumns}
-                      sortable
-                      resizable
-                      columnSizing={problemsColSizing}
-                      onColumnSizingChange={setProblemsColSizing}
-                    >
-                      <DataTable.Pagination defaultPageSize={10} />
-                    </DataTable>
-                  )}
-                </div>
-              </div>
-
               {/* KPI Marquee — all 8 metrics, scrolling */}
               {(() => {
                 const allCards = ALL_KPI_OPTIONS.map(opt => {
@@ -7820,6 +7784,42 @@ export const ServicesOverview = () => {
                   </div>
                 );
               })()}
+
+              <SectionHeader title="Services Status & Problems" />
+              <div className="svc-overview-row">
+                <div className="svc-honeycomb-tile">
+                  <Heading level={6}>Services (Current Status)</Heading>
+                  {healthResult.isLoading ? (
+                    <LoadingState />
+                  ) : (
+                    <HoneycombChart
+                      data={honeycombData}
+                      colorScheme={honeycombColorRanges}
+                      showLabels
+                      height="100%"
+                    >
+                      <HoneycombChart.Legend hidden />
+                    </HoneycombChart>
+                  )}
+                </div>
+                <div className="svc-table-tile">
+                  <Heading level={6}>Problems</Heading>
+                  {problemsResult.isLoading ? (
+                    <LoadingState />
+                  ) : (
+                    <DataTable
+                      data={problemsData}
+                      columns={problemsColumns}
+                      sortable
+                      resizable
+                      columnSizing={problemsColSizing}
+                      onColumnSizingChange={setProblemsColSizing}
+                    >
+                      <DataTable.Pagination defaultPageSize={10} />
+                    </DataTable>
+                  )}
+                </div>
+              </div>
             </Flex>
           </Tab>);
               case "Summary Details": return (

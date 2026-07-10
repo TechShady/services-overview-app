@@ -1,6 +1,6 @@
 {
   "$schema": "./.dt-app/app.config.schema.json",
-  "environmentUrl": "https://guu84124.apps.dynatrace.com",
+  "environmentUrl": "https://abc123.apps.dynatrace.com",
   "app": {
     "name": "Services Overview",
     "version": "0.38.59",

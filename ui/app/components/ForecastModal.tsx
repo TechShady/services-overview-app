@@ -542,7 +542,7 @@ function formatDate(ts: number, short = false): string {
 }
 
 export function ForecastModal({ label, sparkline, color = "#4589FF", fromMs, toMs, onClose }: ForecastModalProps) {
-  const [method, setMethod] = useState<ForecastMethod>("holt-winters");
+  const [method, setMethod] = useState<ForecastMethod>("prophet");
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   const historicalData = useMemo(() => sparkline.filter((v) => v != null && isFinite(v)), [sparkline]);

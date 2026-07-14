@@ -4178,6 +4178,29 @@ export const ServicesOverview = () => {
     return total;
   }, [inferredDeployRegressionsByService]);
 
+  const inferredDeployRegressionPrevCount = useMemo(() => {
+    const records = (changeImpactPrevResult.data?.records ?? []) as any[];
+    if (!records.length) return 0;
+    let total = 0;
+    records.forEach((r) => {
+      const req = (r["requests"] as number[] | undefined) ?? [];
+      const fail = (r["failures"] as number[] | undefined) ?? [];
+      const lat = (r["latency_p90"] as number[] | undefined) ?? [];
+      if (req.length < 4 || fail.length < 4 || lat.length < 4) return;
+      const mid = Math.floor(req.length / 2);
+      const reqBefore = req.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0);
+      const reqAfter = req.slice(mid).reduce((a, b) => a + (b ?? 0), 0);
+      const failBefore = fail.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0);
+      const failAfter = fail.slice(mid).reduce((a, b) => a + (b ?? 0), 0);
+      const latBefore = lat.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0) / Math.max(1, mid);
+      const latAfter = lat.slice(mid).reduce((a, b) => a + (b ?? 0), 0) / Math.max(1, lat.length - mid);
+      const errBefore = reqBefore > 0 ? (failBefore / reqBefore) * 100 : 0;
+      const errAfter = reqAfter > 0 ? (failAfter / reqAfter) * 100 : 0;
+      if (latAfter > latBefore * 1.2 || errAfter > errBefore + 0.5) total += 1;
+    });
+    return total;
+  }, [changeImpactPrevResult.data]);
+
   const earlyWarningSignals = useMemo(() => {
     const signals: Array<{ severity: "warning" | "critical"; text: string }> = [];
     if (overviewKpisPrev) {
@@ -4207,49 +4230,121 @@ export const ServicesOverview = () => {
     };
   }, [overviewKpis, businessValuePerRequest]);
 
+  const businessImpactPrev = useMemo(() => {
+    if (!overviewKpisPrev) return null;
+    const atRiskFraction = Math.min(0.95, (overviewKpisPrev.errorRate / 100) + ((overviewKpisPrev.activeProblems ?? 0) * 0.05));
+    const atRiskRequests = Math.round((overviewKpisPrev.totalRequests ?? 0) * atRiskFraction);
+    const estimatedRevenueAtRisk = atRiskRequests * businessValuePerRequest;
+    return {
+      atRiskFraction,
+      atRiskRequests,
+      estimatedRevenueAtRisk,
+    };
+  }, [overviewKpisPrev, businessValuePerRequest]);
+
   const incidentCommander = useMemo(() => {
+    const modeProfile = incidentCommandMode === "stabilize"
+      ? { impactFactor: 1, confidenceBoost: 0, actions: [
+        "Stabilize top error-budget burner by reducing traffic or disabling risky features.",
+        "Isolate the most probable dependency edge and apply circuit-breaker or timeout tightening.",
+        "Validate latest deployment for rollback criteria and execute if regression threshold exceeded.",
+      ] }
+      : incidentCommandMode === "mitigate"
+        ? { impactFactor: 0.8, confidenceBoost: 4, actions: [
+          "Mitigate user impact with progressive traffic steering to healthier zones.",
+          "Apply temporary safeguards: stricter rate limits, shorter timeouts, and fallback responses.",
+          "Contain blast radius by pausing non-critical deploys and noisy background jobs.",
+        ] }
+        : { impactFactor: 0.55, confidenceBoost: 8, actions: [
+          "Start phased recovery of highest-value service paths first, then expand gradually.",
+          "Remove temporary mitigations in reverse order while watching error and latency guardrails.",
+          "Run post-incident validation and confirm SLO burn returns to baseline before full reopen.",
+        ] };
+
     const strongestCorrelated = anomalyCorrelations[0]?.correlatedServices?.[0]
       ? {
           service1: anomalyCorrelations[0].anomalyService,
+          service1Id: anomalyCorrelations[0].anomalyServiceId,
           service2: anomalyCorrelations[0].correlatedServices[0].name,
+          service2Id: anomalyCorrelations[0].correlatedServices[0].entityId,
           correlation: (anomalyCorrelations[0].correlatedServices[0].strength ?? 0) / 100,
         }
       : undefined;
     const likelyRootCause = problemsData.find((p) => p.Status === "ACTIVE")?.RootCause || strongestCorrelated?.service1 || "Undetermined";
-    const impactedServices = Math.max(overviewKpis.affectedServices, problemsData.reduce((acc, p) => acc + ((p.Affected as string[] | undefined)?.length ?? 0), 0));
-    const nextActions = [
-      "Stabilize top error-budget burner by reducing traffic or disabling risky features.",
-      "Isolate the most probable dependency edge and apply circuit-breaker or timeout tightening.",
-      "Validate latest deployment for rollback criteria and execute if regression threshold exceeded.",
-    ];
+    const impactedServicesBase = Math.max(overviewKpis.affectedServices, problemsData.reduce((acc, p) => acc + ((p.Affected as string[] | undefined)?.length ?? 0), 0));
+    const impactedServices = Math.max(1, Math.round(impactedServicesBase * modeProfile.impactFactor));
+    const rootCauseConfidence = Math.min(99, Math.max(35, (problemsData.some((p) => p.Status === "ACTIVE") ? 88 : 62) + Math.round((strongestCorrelated?.correlation ?? 0) * 12) + modeProfile.confidenceBoost));
+    const correlatedStrength = Math.round((strongestCorrelated?.correlation ?? 0) * 100);
+    const rootCauseId = svcDetailsData.find((s) => s.Service === likelyRootCause)?.["dt.entity.service"] as string | undefined;
+    const rootCauseUrl = rootCauseId
+      ? `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(rootCauseId)}&${tfParams(tfFrom, tfTo)}`
+      : `${envUrl}/ui/apps/dynatrace.davis.problems/?${tfParams(tfFrom, tfTo)}`;
+    const correlatedUrl = strongestCorrelated?.service2Id
+      ? `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(strongestCorrelated.service2Id)}&${tfParams(tfFrom, tfTo)}`
+      : `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?${tfParams(tfFrom, tfTo)}`;
     return {
       likelyRootCause,
+      rootCauseUrl,
+      rootCauseConfidence,
       impactedServices,
       strongestCorrelated,
-      nextActions,
+      correlatedStrength,
+      correlatedUrl,
+      nextActions: modeProfile.actions,
       mode: incidentCommandMode,
     };
-  }, [problemsData, anomalyCorrelations, overviewKpis, incidentCommandMode]);
+  }, [problemsData, anomalyCorrelations, overviewKpis, incidentCommandMode, svcDetailsData, envUrl, tfFrom, tfTo]);
+
+  const incidentCommanderPrev = useMemo(() => {
+    if (!overviewKpisPrev) return null;
+    const modeFactor = incidentCommandMode === "stabilize" ? 1 : incidentCommandMode === "mitigate" ? 0.8 : 0.55;
+    const impactedServices = Math.max(1, Math.round((overviewKpisPrev.affectedServices ?? 0) * modeFactor));
+    const rootCauseConfidence = Math.max(35, Math.min(99, 62 + ((overviewKpisPrev.activeProblems ?? 0) > 0 ? 12 : 0)));
+    return { impactedServices, rootCauseConfidence };
+  }, [overviewKpisPrev, incidentCommandMode]);
 
   const failurePatternsData = useMemo(() => {
-    const patternMap = new Map<string, { pattern: string; count: number; confidence: number; playbook: string }>();
-    const addPattern = (pattern: string, confidence: number, playbook: string) => {
-      const prev = patternMap.get(pattern) ?? { pattern, count: 0, confidence, playbook };
+    const patternMap = new Map<string, { pattern: string; count: number; confidence: number; playbook: string; drillLabel: string; drillUrl: string }>();
+    const addPattern = (pattern: string, confidence: number, playbook: string, drillLabel: string, drillUrl: string) => {
+      const prev = patternMap.get(pattern) ?? { pattern, count: 0, confidence, playbook, drillLabel, drillUrl };
       prev.count += 1;
       prev.confidence = Math.max(prev.confidence, confidence);
       patternMap.set(pattern, prev);
     };
     anomalyData.filter((a) => a.Anomaly === "YES").forEach((a: any) => {
       if ((a["Latency Change %"] ?? 0) > 50 && (a["Error Rate Change %"] ?? 0) > 100) {
-        addPattern("Latency + Error Spike Cascade", 0.82, "Check downstream saturation, then apply load shedding.");
+        const url = `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=span.status+%3D+Error&${tfParams(tfFrom, tfTo)}`;
+        addPattern("Latency + Error Spike Cascade", 0.82, "Check downstream saturation, then apply load shedding.", "Open Distributed Traces (Gen3)", url);
       } else if ((a["Requests Δ %"] ?? 0) > 40 && (a["Error Rate Change %"] ?? 0) > 30) {
-        addPattern("Traffic Surge Instability", 0.74, "Enable autoscale fast-path and verify rate limits.");
+        const url = `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?${tfParams(tfFrom, tfTo)}`;
+        addPattern("Traffic Surge Instability", 0.74, "Enable autoscale fast-path and verify rate limits.", "Open Distributed Traces (Gen3)", url);
       }
     });
-    if (inferredDeployRegressionCount > 0) addPattern("Post-Deployment Regression", 0.78, "Evaluate canary rollback and compare changed endpoints.");
-    if (problemsData.filter((p) => p.Status === "ACTIVE").length > 2) addPattern("Multi-Service Incident Cluster", 0.7, "Run incident command flow and prioritize shared dependencies.");
+    if (inferredDeployRegressionCount > 0) {
+      const url = `${envUrl}/ui/apps/dynatrace.davis.problems/?${tfParams(tfFrom, tfTo)}`;
+      addPattern("Post-Deployment Regression", 0.78, "Evaluate canary rollback and compare changed endpoints.", "Open Davis Problems (Gen3)", url);
+    }
+    if (problemsData.filter((p) => p.Status === "ACTIVE").length > 2) {
+      const url = `${envUrl}/ui/apps/dynatrace.davis.problems/?${tfParams(tfFrom, tfTo)}`;
+      addPattern("Multi-Service Incident Cluster", 0.7, "Run incident command flow and prioritize shared dependencies.", "Open Davis Problems (Gen3)", url);
+    }
     return Array.from(patternMap.values()).sort((a, b) => b.count - a.count || b.confidence - a.confidence);
-  }, [anomalyData, inferredDeployRegressionCount, problemsData]);
+  }, [anomalyData, inferredDeployRegressionCount, problemsData, envUrl, tfFrom, tfTo]);
+
+  const failurePatternsPrevSummary = useMemo(() => {
+    if (!overviewKpisPrev) return null;
+    let patternFamilies = 0;
+    if ((overviewKpisPrev.avgP90 ?? 0) > 0 && (overviewKpisPrev.errorRate ?? 0) > 1.2) patternFamilies += 1;
+    if ((overviewKpisPrev.totalRequests ?? 0) > 0 && (overviewKpisPrev.errorRate ?? 0) > 0.8) patternFamilies += 1;
+    if (inferredDeployRegressionPrevCount > 0) patternFamilies += 1;
+    if ((overviewKpisPrev.activeProblems ?? 0) > 2) patternFamilies += 1;
+    const anomalousServices = svcDetailsPrevData.filter((s) => Number(s.FailureRate ?? 0) > 1.5 || Number(s.Latency_p90 ?? 0) > 500000).length;
+    return {
+      patternFamilies,
+      activeProblems: overviewKpisPrev.activeProblems ?? 0,
+      anomalousServices,
+    };
+  }, [overviewKpisPrev, inferredDeployRegressionPrevCount, svcDetailsPrevData]);
 
   const teamReliabilityData = useMemo(() => {
     const rows = new Map<string, { team: string; services: number; avgFailureRate: number; atRisk: number; deployRegressions: number; score: number }>();
@@ -14290,16 +14385,44 @@ export const ServicesOverview = () => {
                 ))}
               </Flex>
               <Flex gap={16} flexWrap="wrap">
-                <KpiCard label="Likely Root Cause" value={incidentCommander.likelyRootCause} color={RED} />
-                <KpiCard label="Impacted Services" value={incidentCommander.impactedServices} rawValue={incidentCommander.impactedServices} color={ORANGE} />
-                <KpiCard label="Revenue at Risk" value={`$${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}`} rawValue={businessImpact.estimatedRevenueAtRisk} color={RED} />
-                <KpiCard label="Top Correlated Link" value={incidentCommander.strongestCorrelated ? `${incidentCommander.strongestCorrelated.service1} → ${incidentCommander.strongestCorrelated.service2}` : "Not enough data"} color={BLUE} />
+                <KpiCard
+                  label="Likely Root Cause"
+                  value={<a href={incidentCommander.rootCauseUrl} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{incidentCommander.likelyRootCause}</a>}
+                  rawValue={incidentCommander.rootCauseConfidence}
+                  prevRawValue={incidentCommanderPrev?.rootCauseConfidence ?? null}
+                  color={RED}
+                  sparkline={fleetSparklines.errorRate}
+                />
+                <KpiCard
+                  label="Impacted Services"
+                  value={incidentCommander.impactedServices}
+                  rawValue={incidentCommander.impactedServices}
+                  prevRawValue={incidentCommanderPrev?.impactedServices ?? null}
+                  color={ORANGE}
+                  sparkline={affectedServicesSparkline}
+                />
+                <KpiCard
+                  label="Revenue at Risk"
+                  value={`$${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}`}
+                  rawValue={businessImpact.estimatedRevenueAtRisk}
+                  prevRawValue={businessImpactPrev?.estimatedRevenueAtRisk ?? null}
+                  color={RED}
+                  sparkline={activeProblemsSparkline.map((v, i) => Math.max(0, v * businessValuePerRequest * Math.max(1, (overviewKpis.totalRequests / Math.max(1, activeProblemsSparkline[i] || 1)))))}
+                />
+                <KpiCard
+                  label="Top Correlated Link"
+                  value={incidentCommander.strongestCorrelated ? <a href={incidentCommander.correlatedUrl} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{`${incidentCommander.strongestCorrelated.service1} → ${incidentCommander.strongestCorrelated.service2}`}</a> : "Not enough data"}
+                  rawValue={incidentCommander.correlatedStrength}
+                  prevRawValue={null}
+                  color={BLUE}
+                  sparkline={fleetSparklines.avgP90}
+                />
               </Flex>
               <div className="svc-table-tile" style={{ padding: 12 }}>
                 <Strong style={{ fontSize: 12 }}>Next 3 Actions</Strong>
-                <Text style={{ fontSize: 12, display: "block", marginTop: 8 }}>1. {incidentCommander.nextActions[0]}</Text>
-                <Text style={{ fontSize: 12, display: "block" }}>2. {incidentCommander.nextActions[1]}</Text>
-                <Text style={{ fontSize: 12, display: "block" }}>3. {incidentCommander.nextActions[2]}</Text>
+                <Text style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.45, display: "block", marginTop: 8 }}>1. {incidentCommander.nextActions[0]}</Text>
+                <Text style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.45, display: "block", marginTop: 4 }}>2. {incidentCommander.nextActions[1]}</Text>
+                <Text style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.45, display: "block", marginTop: 4 }}>3. {incidentCommander.nextActions[2]}</Text>
               </div>
               {explainMode && (
                 <ExplainabilityPanel
@@ -14320,9 +14443,33 @@ export const ServicesOverview = () => {
               {aiPanel}
               <SectionHeader title="Fleet Anomaly Fingerprinting" />
               <Flex gap={16} flexWrap="wrap">
-                <KpiCard label="Pattern Families" value={failurePatternsData.length} rawValue={failurePatternsData.length} color={BLUE} />
-                <KpiCard label="Active Problems" value={overviewKpis.activeProblems} rawValue={overviewKpis.activeProblems} color={overviewKpis.activeProblems > 0 ? RED : GREEN} />
-                <KpiCard label="Anomalous Services" value={anomalyData.filter(a => a.Anomaly === "YES").length} rawValue={anomalyData.filter(a => a.Anomaly === "YES").length} color={RED} />
+                <KpiCard
+                  label="Pattern Families"
+                  value={failurePatternsData.length}
+                  rawValue={failurePatternsData.length}
+                  prevRawValue={failurePatternsPrevSummary?.patternFamilies ?? null}
+                  color={BLUE}
+                  sparkline={totalEventsSparkline}
+                  higherIsBetter={false}
+                />
+                <KpiCard
+                  label="Active Problems"
+                  value={overviewKpis.activeProblems}
+                  rawValue={overviewKpis.activeProblems}
+                  prevRawValue={failurePatternsPrevSummary?.activeProblems ?? null}
+                  color={overviewKpis.activeProblems > 0 ? RED : GREEN}
+                  sparkline={activeProblemsSparkline}
+                  higherIsBetter={false}
+                />
+                <KpiCard
+                  label="Anomalous Services"
+                  value={anomalyData.filter(a => a.Anomaly === "YES").length}
+                  rawValue={anomalyData.filter(a => a.Anomaly === "YES").length}
+                  prevRawValue={failurePatternsPrevSummary?.anomalousServices ?? null}
+                  color={RED}
+                  sparkline={fleetSparklines.errorRate}
+                  higherIsBetter={false}
+                />
               </Flex>
               <div className="svc-table-tile">
                 <DataTable
@@ -14331,7 +14478,27 @@ export const ServicesOverview = () => {
                     { id: "pattern", header: "Fingerprint", accessor: "pattern" },
                     { id: "count", header: "Occurrences", accessor: "count", columnType: "number" as const, cell: ({ value }: any) => <Strong>{value}</Strong> },
                     { id: "confidence", header: "Confidence", accessor: "confidence", columnType: "number" as const, cell: ({ value }: any) => <span style={{ color: value > 0.8 ? RED : value > 0.65 ? ORANGE : BLUE, fontWeight: 700 }}>{(Number(value) * 100).toFixed(0)}%</span> },
-                    { id: "playbook", header: "Recommended Playbook", accessor: "playbook" },
+                    {
+                      id: "playbook",
+                      header: "Recommended Playbook",
+                      accessor: "playbook",
+                      cell: ({ value }: any) => (
+                        <div style={{ whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
+                          {String(value ?? "")}
+                        </div>
+                      ),
+                    },
+                    {
+                      id: "drill",
+                      header: "Next Step",
+                      accessor: "drillLabel",
+                      cell: ({ rowData }: any) => {
+                        const label = String(rowData.drillLabel ?? "Open Gen3") || "Open Gen3";
+                        const url = String(rowData.drillUrl ?? "");
+                        if (!url) return <Text style={{ fontSize: 11, opacity: 0.65 }}>No drill-down</Text>;
+                        return <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{label}</a>;
+                      },
+                    },
                   ]}
                   sortable
                 />

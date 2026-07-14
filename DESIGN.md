@@ -103,12 +103,23 @@ The **Services Overview App** is a Dynatrace platform application that provides 
 - Added Business Impact Overlay with configurable `$ / request` input used for at-risk revenue estimates.
 - Upgraded Correlation Engine with probable causal-chain output (dependency-backed confidence view).
 - Extended What-If with a Capacity Twin Simulator (replicas, cache hit-rate, DB latency).
+- Added Cloud Waste top-level tab for AWS/Azure dangling-resource detection and executive monthly waste summaries.
+
+### July 2026 FinOps Addition: Cloud Waste
+
+- New top-level tab: Cloud Waste.
+- Uses existing right-sizing signals from hosts, K8s workloads, and databases to estimate monthly waste in USD.
+- Flags likely dangling resources based on sustained near-zero utilization heuristics.
+- Produces provider split (AWS vs Azure) and Top Waste Drivers table for rapid prioritization.
+- AI Assist now includes Cloud Waste executive commentary, risk callouts, and recommended remediation sequence.
+- Help guide includes Cloud Waste methodology, interpretation guidance, and caveats that this is a prioritization heuristic (not invoice reconciliation).
 
 ### Tab Visibility & Ordering
 
 - All top-level tabs, including newly added tabs, are managed by the existing Tab Order & Visibility manager in Settings.
 - Visibility and ordering remain persisted per user via user app state keys.
 - New tabs without sub-tabs are still fully hide/show and drag-reorder capable at the top-level.
+- Cloud Waste follows the same settings-driven visibility and ordering behavior as all other top-level tabs.
 
 ### Architecture
 

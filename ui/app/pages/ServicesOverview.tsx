@@ -165,6 +165,7 @@ const TAB_KEYS = [
   "Incidents & Changes",
   "Detection & Analysis",
   "Capacity & Sizing",
+  "Cloud Waste",
   "Incident Command",
   "Failure Patterns",
   "Team Reliability",
@@ -6532,6 +6533,110 @@ export const ServicesOverview = () => {
     return { under, near, over, optimal };
   }, [k8sCpuAllPrevResult.data, k8sMemAllPrevResult.data, hostCpuPrevResult.data, hostMemPrevResult.data]);
 
+  // ─── Cloud Waste (AWS/Azure dangling + overprovisioned estimate) ───
+  const cloudWasteData = useMemo(() => {
+    type WasteRow = {
+      provider: "AWS" | "Azure" | "Unknown";
+      resourceType: string;
+      resource: string;
+      signal: string;
+      monthlyWaste: number;
+      dangling: boolean;
+      confidence: "high" | "medium" | "low";
+    };
+
+    const detectProvider = (name: string): "AWS" | "Azure" | "Unknown" => {
+      const n = String(name || "").toLowerCase();
+      if (/(aws|ec2|rds|eks|elb|lambda|arn:|amazon)/.test(n)) return "AWS";
+      if (/(azure|aks|vmss|microsoft|sqlmi|appsvc|az-)/.test(n)) return "Azure";
+      return "Unknown";
+    };
+
+    const rows: WasteRow[] = [];
+    const hostBase = Math.max(40, rightSizingCostPerCPU * 4 + rightSizingCostPerGB * 16);
+    const k8sBase = Math.max(20, rightSizingCostPerCPU * 1.5 + rightSizingCostPerGB * 4);
+    const dbBase = 350;
+
+    hostRightSizingData.forEach((h: any) => {
+      const name = String(h.Host ?? "");
+      const provider = detectProvider(name);
+      const avgCpu = Number(h["Avg CPU %"] ?? 0);
+      const avgMem = Number(h["Avg Mem %"] ?? 0);
+      const cpuV = String(h["CPU Verdict"] ?? "Optimal");
+      const memV = String(h["Mem Verdict"] ?? "Optimal");
+      const dangling = avgCpu < 1 && avgMem < 5;
+      let factor = 0;
+      if (dangling) factor = 0.85;
+      else if (cpuV === "Over-provisioned" || memV === "Over-provisioned") factor = 0.35;
+      else if (cpuV === "Near Limit" || memV === "Near Limit") factor = 0.05;
+      if (factor <= 0) return;
+      rows.push({
+        provider,
+        resourceType: "VM/Host",
+        resource: name,
+        signal: dangling ? "Idle host (possible dangling compute)" : `${cpuV}/${memV}`,
+        monthlyWaste: Math.round(hostBase * factor),
+        dangling,
+        confidence: dangling ? "high" : provider === "Unknown" ? "low" : "medium",
+      });
+    });
+
+    rightSizingData.forEach((w: any) => {
+      const name = String(w.Workload ?? "");
+      const provider = detectProvider(name);
+      const avgCpu = Number(w["Avg CPU %"] ?? 0);
+      const avgMem = Number(w["Avg Mem %"] ?? 0);
+      const cpuV = String(w["CPU Verdict"] ?? "Optimal");
+      const memV = String(w["Mem Verdict"] ?? "Optimal");
+      const dangling = avgCpu < 1 && avgMem < 5;
+      let factor = 0;
+      if (dangling) factor = 0.8;
+      else if (cpuV === "Over-provisioned" || memV === "Over-provisioned") factor = 0.3;
+      if (factor <= 0) return;
+      rows.push({
+        provider,
+        resourceType: "K8s Workload",
+        resource: name,
+        signal: dangling ? "Idle workload allocation (possible dangling)" : `${cpuV}/${memV}`,
+        monthlyWaste: Math.round(k8sBase * factor),
+        dangling,
+        confidence: dangling ? "high" : provider === "Unknown" ? "low" : "medium",
+      });
+    });
+
+    dbRightSizingData.forEach((d: any) => {
+      const name = String(d.Database ?? "");
+      const provider = detectProvider(name);
+      const req = Number(d.Requests ?? 0);
+      const verdict = String(d.Verdict ?? "Healthy");
+      const dangling = req < 1 && verdict === "Underutilized";
+      let factor = 0;
+      if (dangling) factor = 0.9;
+      else if (verdict === "Underutilized") factor = 0.45;
+      if (factor <= 0) return;
+      rows.push({
+        provider,
+        resourceType: "Database",
+        resource: name,
+        signal: dangling ? "Near-zero DB activity (possible dangling DB)" : verdict,
+        monthlyWaste: Math.round(dbBase * factor),
+        dangling,
+        confidence: dangling ? "high" : provider === "Unknown" ? "low" : "medium",
+      });
+    });
+
+    const cloudRows = rows.filter((r) => r.provider === "AWS" || r.provider === "Azure");
+    const finalRows = cloudRows.length ? cloudRows : rows;
+    const sorted = finalRows.sort((a, b) => b.monthlyWaste - a.monthlyWaste);
+    const total = sorted.reduce((s, r) => s + r.monthlyWaste, 0);
+    const awsTotal = sorted.filter((r) => r.provider === "AWS").reduce((s, r) => s + r.monthlyWaste, 0);
+    const azureTotal = sorted.filter((r) => r.provider === "Azure").reduce((s, r) => s + r.monthlyWaste, 0);
+    const danglingCount = sorted.filter((r) => r.dangling).length;
+    const topDrivers = sorted.slice(0, 10);
+
+    return { rows: sorted, total, awsTotal, azureTotal, danglingCount, topDrivers, hasProviderScopedData: cloudRows.length > 0 };
+  }, [hostRightSizingData, rightSizingData, dbRightSizingData, rightSizingCostPerCPU, rightSizingCostPerGB]);
+
   // ─── Communication Anti-Patterns ───
   const antiPatternData = useMemo(() => {
     if (!dependenciesData.length) return { patterns: [] as { type: string; severity: string; services: string[]; detail: string }[], totalEdges: 0 };
@@ -6880,6 +6985,20 @@ export const ServicesOverview = () => {
           case 2: return analyzeWhatIf(svcDetailsData, reqDetailsData);
           default: return analyzeRightSizingHosts(hostRightSizingData);
         }
+      case "Cloud Waste":
+        return {
+          summary: `Estimated monthly cloud waste is $${formatCount(Math.round(cloudWasteData.total))}. ${cloudWasteData.danglingCount} likely dangling resource(s) detected across AWS/Azure candidates.`,
+          insights: [
+            { severity: cloudWasteData.total > 5000 ? "critical" : cloudWasteData.total > 1500 ? "warning" : "good", icon: cloudWasteData.total > 5000 ? "🔴" : cloudWasteData.total > 1500 ? "⚠️" : "✅", text: `Total estimated monthly waste: $${formatCount(Math.round(cloudWasteData.total))}.` },
+            { severity: cloudWasteData.awsTotal >= cloudWasteData.azureTotal ? "warning" : "info", icon: "☁️", text: `AWS: $${formatCount(Math.round(cloudWasteData.awsTotal))} vs Azure: $${formatCount(Math.round(cloudWasteData.azureTotal))} estimated monthly waste.` },
+            { severity: cloudWasteData.danglingCount > 0 ? "critical" : "good", icon: cloudWasteData.danglingCount > 0 ? "🧵" : "✅", text: `${cloudWasteData.danglingCount} resource(s) flagged as likely dangling/idle allocations.` },
+          ],
+          recommendations: [
+            { impact: "high", text: "Decommission or downsize top dangling resources first; they provide immediate savings with low user risk." },
+            { impact: "medium", text: "Apply autoscaling floors and right-size CPU/memory requests for over-provisioned workloads." },
+            { impact: "medium", text: "Establish monthly FinOps review using this tab as an executive scorecard and track realized savings." },
+          ],
+        };
       case "Incident Command":
         return {
           summary: `Incident Commander mode ${incidentCommander.mode}. Likely root cause: ${incidentCommander.likelyRootCause}. Impacted services: ${incidentCommander.impactedServices}.`,
@@ -6912,7 +7031,7 @@ export const ServicesOverview = () => {
         };
       default: return null;
     }
-  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines, incidentCommander, businessImpact.estimatedRevenueAtRisk, failurePatternsData, teamReliabilityData]);
+  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines, incidentCommander, businessImpact.estimatedRevenueAtRisk, failurePatternsData, teamReliabilityData, cloudWasteData]);
 
   const aiPanel = aiOpen && aiPanelData ? <AIInsightsPanel data={aiPanelData} onClose={() => setAiOpen(false)} /> : null;
 
@@ -7527,7 +7646,7 @@ export const ServicesOverview = () => {
             <li><strong>Recommendations</strong> — Actionable next steps prioritized by impact (High / Medium / Low). Each recommendation tells you what to investigate and why, based on the specific data patterns detected.</li>
           </ul>
           <p>
-            AI Assist is available across all top-level tabs and sub-tabs, including Incident Command, Failure Patterns, and Team Reliability. The analysis is computed locally from the data already loaded in the app — no external AI service calls are made.
+            AI Assist is available across all top-level tabs and sub-tabs, including Incident Command, Failure Patterns, Team Reliability, and Cloud Waste. The analysis is computed locally from the data already loaded in the app — no external AI service calls are made.
             Content updates automatically when you change timeframes, filters, or tabs. Close the panel by clicking <strong>✕</strong> in the panel header or toggling the button off.
             The summary text appears with a streaming animation for readability.
           </p>
@@ -7960,6 +8079,7 @@ export const ServicesOverview = () => {
             <li>Generate a <strong>Reliability Report</strong> weekly for stakeholder reviews and leadership updates.</li>
             <li>Review <strong>Correlation Engine</strong> during multi-service incidents to find hidden shared bottlenecks.</li>
             <li>Use <strong>Right-Sizing</strong> to identify over-provisioned resources (cost savings) and under-provisioned ones (reliability risk). Drill into K8s Clusters → Nodes → Namespaces → Pods → Containers for progressively more granular analysis. All entities link directly to their Gen3 Dynatrace page.</li>
+            <li>Use <strong>Cloud Waste</strong> to identify likely dangling AWS/Azure resources and get an executive monthly waste estimate by provider.</li>
             <li>Review <strong>Anti-Patterns</strong> quarterly to identify architectural smells before they cause incidents.</li>
             <li>Monitor <strong>On-Call Health</strong> to prevent burnout — noise ratio &gt;30% needs immediate alerting tuning.</li>
             <li>Use <strong>Traffic Patterns</strong> to schedule maintenance windows during trough hours and pre-scale before peak hours.</li>
@@ -7967,6 +8087,19 @@ export const ServicesOverview = () => {
             <li>Enable <strong>Metric-Stream</strong> at 30s during active incidents for near real-time data, or 5m for NOC wall screens.</li>
             <li>Column widths are remembered within each tab session — resize to your preference.</li>
           </ul>
+
+          <h4>Cloud Waste (AWS/Azure)</h4>
+          <p>
+            The Cloud Waste tab estimates monthly cost waste using right-sizing verdicts and idle resource heuristics across hosts, K8s workloads, and databases.
+            It highlights likely dangling resources (near-zero sustained utilization) and aggregates estimated waste into an executive summary:
+          </p>
+          <ul>
+            <li><strong>Estimated Monthly Waste</strong> — Fleet-wide cost opportunity in USD.</li>
+            <li><strong>AWS / Azure Split</strong> — Provider-level breakdown to prioritize FinOps action.</li>
+            <li><strong>Dangling Candidates</strong> — Count of probable idle resources for immediate cleanup.</li>
+            <li><strong>Top 10 Waste Drivers</strong> — Largest opportunities ranked by estimated monthly waste.</li>
+          </ul>
+          <p>Note: This is a conservative estimation model for prioritization, not a billing-invoice replacement.</p>
         </div>
       </Modal>
 
@@ -14079,6 +14212,64 @@ export const ServicesOverview = () => {
             />
                 </Tab>
               </Tabs>
+            </Flex>
+          </Tab>);
+
+              case "Cloud Waste": return (
+          <Tab key={tabId} title="Cloud Waste">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              {aiPanel}
+              <SectionHeader title="Dangling Resource Detection & Executive Cost Summary" />
+              <Flex gap={16} flexWrap="wrap">
+                <KpiCard label="Estimated Monthly Waste" value={`$${formatCount(Math.round(cloudWasteData.total))}`} rawValue={cloudWasteData.total} color={cloudWasteData.total > 5000 ? RED : cloudWasteData.total > 1500 ? ORANGE : BLUE} sparkline={fleetSparklines.errorRate} />
+                <KpiCard label="AWS Waste" value={`$${formatCount(Math.round(cloudWasteData.awsTotal))}`} rawValue={cloudWasteData.awsTotal} color={ORANGE} sparkline={fleetSparklines.avgP90} />
+                <KpiCard label="Azure Waste" value={`$${formatCount(Math.round(cloudWasteData.azureTotal))}`} rawValue={cloudWasteData.azureTotal} color={BLUE} sparkline={fleetSparklines.avgLatency} />
+                <KpiCard label="Dangling Candidates" value={cloudWasteData.danglingCount} rawValue={cloudWasteData.danglingCount} color={cloudWasteData.danglingCount > 0 ? RED : GREEN} sparkline={activeProblemsSparkline} />
+              </Flex>
+
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                <Strong style={{ fontSize: 12 }}>Executive Summary</Strong>
+                <Text style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+                  Estimated monthly waste opportunity is <Strong>${formatCount(Math.round(cloudWasteData.total))}</Strong>, with AWS at <Strong>${formatCount(Math.round(cloudWasteData.awsTotal))}</Strong> and Azure at <Strong>${formatCount(Math.round(cloudWasteData.azureTotal))}</Strong>.
+                </Text>
+                <Text style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+                  {cloudWasteData.danglingCount} resource(s) are flagged as likely dangling based on sustained near-zero utilization.
+                  {cloudWasteData.hasProviderScopedData ? " " : " Provider-specific metadata was limited, so unknown providers are included in estimates."}
+                </Text>
+                <Text style={{ fontSize: 11, opacity: 0.65, display: "block", marginTop: 8 }}>
+                  Heuristic model only: use this as a prioritization shortlist before decommissioning production resources.
+                </Text>
+              </div>
+
+              <div className="svc-table-tile">
+                <Strong style={{ fontSize: 12, display: "block", padding: "12px 12px 0" }}>Top Waste Drivers</Strong>
+                <DataTable
+                  data={cloudWasteData.topDrivers.map((r, i) => ({ ...r, id: i }))}
+                  columns={[
+                    { id: "provider", header: "Cloud", accessor: "provider" },
+                    { id: "resourceType", header: "Type", accessor: "resourceType" },
+                    { id: "resource", header: "Resource", accessor: "resource" },
+                    { id: "signal", header: "Signal", accessor: "signal" },
+                    { id: "dangling", header: "Dangling", accessor: "dangling", cell: ({ value }: any) => <span style={{ color: value ? RED : GREEN, fontWeight: 700 }}>{value ? "Yes" : "No"}</span> },
+                    { id: "confidence", header: "Confidence", accessor: "confidence", cell: ({ value }: any) => <span style={{ color: value === "high" ? RED : value === "medium" ? ORANGE : "rgba(128,128,128,0.9)", fontWeight: 700, textTransform: "uppercase", fontSize: 11 }}>{String(value)}</span> },
+                    { id: "monthlyWaste", header: "Est. Monthly Waste", accessor: "monthlyWaste", columnType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: Number(value) > 300 ? RED : Number(value) > 120 ? ORANGE : BLUE }}>${formatCount(Math.round(Number(value) || 0))}</Strong> },
+                  ]}
+                  sortable
+                >
+                  <DataTable.Pagination defaultPageSize={10} />
+                </DataTable>
+              </div>
+
+              {explainMode && (
+                <ExplainabilityPanel
+                  title="Cloud waste explainability"
+                  bullets={[
+                    "Dangling status is triggered by sustained near-zero CPU and memory utilization.",
+                    "Monthly waste estimates are computed from right-sizing verdict severity and configurable cost assumptions.",
+                    "Provider assignment is inferred from naming patterns when explicit cloud tags are unavailable.",
+                  ]}
+                />
+              )}
             </Flex>
           </Tab>);
 

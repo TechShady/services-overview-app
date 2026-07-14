@@ -20,6 +20,7 @@ import { SettingIcon, HelpIcon, MaximizeIcon, MinimizeIcon, CompareIcon, XmarkIc
 import { useDql, useUserAppState, useSetUserAppState } from "@dynatrace-sdk/react-hooks";
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 import { documentsClient } from "@dynatrace-sdk/client-document";
+import appConfig from "../../../app.config.json";
 import { ServiceTopology } from "../components/ServiceTopology";
 import { BlastRadiusGraph } from "../components/BlastRadiusGraph";
 import { HostBlastRadiusGraph } from "../components/HostBlastRadiusGraph";
@@ -170,6 +171,8 @@ const TAB_KEYS = [
   "Failure Patterns",
   "Team Reliability",
 ] as const;
+
+const APP_VERSION = appConfig.app.version;
 type TabKey = typeof TAB_KEYS[number];
 const DEFAULT_TAB_VISIBILITY: Record<TabKey, boolean> =
   Object.fromEntries(TAB_KEYS.map(k => [k, true])) as Record<TabKey, boolean>;
@@ -7109,7 +7112,7 @@ export const ServicesOverview = () => {
                 <SettingIcon />
               </Button.Prefix>
             </Button>
-            <Text style={{ fontSize: 11, opacity: 0.4, fontFamily: "monospace" }}>v0.38.61</Text>
+            <Text style={{ fontSize: 11, opacity: 0.4, fontFamily: "monospace" }}>v{APP_VERSION}</Text>
             {activeTabKey && COMPARE_TABS.includes(activeTabKey) && (
               <Button variant={compareMode ? "emphasized" : "default"} onClick={() => setCompareMode(!compareMode)}>
                 {compareMode ? "Compare: ON" : "Compare"}
@@ -7277,7 +7280,7 @@ export const ServicesOverview = () => {
         <div className="svc-help-content">
           <h3>What's New</h3>
           <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid rgba(69,137,255,0.6)" }}>
-            <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>July 14, 2026 — v0.38.62</p>
+            <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>July 14, 2026 — v{APP_VERSION}</p>
             <p><strong>Decision Intelligence Expansion</strong></p>
             <ul style={{ margin: "4px 0", paddingLeft: 20 }}>
               <li><strong>3 New Top-Level Tabs</strong>: Incident Command, Failure Patterns, and Team Reliability.</li>

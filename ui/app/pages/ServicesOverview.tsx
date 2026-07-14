@@ -500,6 +500,30 @@ function formatDuration(us: number): string {
   return us.toFixed(0) + " µs";
 }
 
+type LatencyRiskProfile = "avg" | "p50" | "p90";
+
+function getLatencyThresholds(profile: LatencyRiskProfile): { yellowMs: number; redMs: number } {
+  if (profile === "p50") return { yellowMs: 75, redMs: 250 };
+  if (profile === "p90") return { yellowMs: 100, redMs: 500 };
+  return { yellowMs: 100, redMs: 500 };
+}
+
+function latencyRiskColor(latencyUs: number, profile: LatencyRiskProfile = "avg"): string {
+  const latencyMs = latencyUs / 1000;
+  const { yellowMs, redMs } = getLatencyThresholds(profile);
+  if (latencyMs >= redMs) return RED;
+  if (latencyMs >= yellowMs) return YELLOW;
+  return GREEN;
+}
+
+function latencyRiskBg(latencyUs: number, profile: LatencyRiskProfile = "avg"): string {
+  const latencyMs = latencyUs / 1000;
+  const { yellowMs, redMs } = getLatencyThresholds(profile);
+  if (latencyMs >= redMs) return "rgba(194,25,48,0.08)";
+  if (latencyMs >= yellowMs) return "rgba(252,213,63,0.08)";
+  return "rgba(13,156,41,0.08)";
+}
+
 function formatCount(val: number): string {
   if (val >= 1_000_000) return (val / 1_000_000).toFixed(1) + "M";
   if (val >= 1_000) return (val / 1_000).toFixed(1) + "k";
@@ -710,19 +734,19 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
             <Text style={{ fontSize: 12, opacity: 0.7 }}>Projected Requests</Text>
             <Strong style={{ fontSize: 22, color: "#4589ff" }}>{formatCount(totalRequests * multiplier)}</Strong>
           </Flex>
-          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+          <Flex flexDirection="column" style={metricBoxStyle(latencyRiskBg(projectedLatency, "avg"))}>
             <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. Avg Latency (+{trafficPercent}%)</Text>
-            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedLatency)}</Strong>
+            <Strong style={{ fontSize: 22, color: latencyRiskColor(projectedLatency, "avg") }}>{formatDuration(projectedLatency)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 30)}% contention est.</Text>
           </Flex>
-          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+          <Flex flexDirection="column" style={metricBoxStyle(latencyRiskBg(projectedP50, "p50"))}>
             <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P50 Latency (+{trafficPercent}%)</Text>
-            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP50)}</Strong>
+            <Strong style={{ fontSize: 22, color: latencyRiskColor(projectedP50, "p50") }}>{formatDuration(projectedP50)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 25)}% median est.</Text>
           </Flex>
-          <Flex flexDirection="column" style={metricBoxStyle(multiplier >= 5 ? "rgba(194,25,48,0.08)" : "rgba(252,213,63,0.08)")}>
+          <Flex flexDirection="column" style={metricBoxStyle(latencyRiskBg(projectedP90, "p90"))}>
             <Text style={{ fontSize: 12, opacity: 0.7 }}>Est. P90 Latency (+{trafficPercent}%)</Text>
-            <Strong style={{ fontSize: 22, color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(projectedP90)}</Strong>
+            <Strong style={{ fontSize: 22, color: latencyRiskColor(projectedP90, "p90") }}>{formatDuration(projectedP90)}</Strong>
             <Text style={{ fontSize: 10, opacity: 0.5 }}>+{Math.round(Math.log2(multiplier) * 50)}% tail latency est.</Text>
           </Flex>
           <Flex flexDirection="column" style={metricBoxStyle("rgba(194,25,48,0.08)")}>
@@ -755,9 +779,9 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
               { id: "Requests", header: "Current Reqs", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
               { id: "Proj_Requests", header: `Proj. Reqs (+${trafficPercent}%)`, accessor: "Proj_Requests", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: "#4589ff" }}>{formatCount(value)}</Strong> },
               { id: "Latency_Avg", header: "Curr Avg Latency", accessor: "Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_Latency_Avg", header: `Proj. Avg (+${trafficPercent}%)`, accessor: "Proj_Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_Latency_Avg", header: `Proj. Avg (+${trafficPercent}%)`, accessor: "Proj_Latency_Avg", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: latencyRiskColor(Number(value) || 0, "avg") }}>{formatDuration(value)}</Strong> },
               { id: "Latency_p90", header: "Curr P90", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: latencyRiskColor(Number(value) || 0, "p90") }}>{formatDuration(value)}</Strong> },
               { id: "FailureRate", header: "Failure %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
             ]}
           >
@@ -786,7 +810,7 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
               { id: "Request", header: "Endpoint", accessor: "Request" },
               { id: "Requests", header: "Calls", accessor: "Requests", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatCount(value)}</Text> },
               { id: "Latency_p90", header: "P90 Latency", accessor: "Latency_p90", sortType: "number" as const, cell: ({ value }: any) => <Text>{formatDuration(value)}</Text> },
-              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: multiplier >= 5 ? RED : YELLOW }}>{formatDuration(value)}</Strong> },
+              { id: "Proj_P90", header: `Proj. P90 (+${trafficPercent}%)`, accessor: "Proj_P90", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: latencyRiskColor(Number(value) || 0, "p90") }}>{formatDuration(value)}</Strong> },
               { id: "FailureRate", header: "Error %", accessor: "FailureRate", sortType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: value >= 5 ? RED : value >= 1 ? YELLOW : undefined }}>{(value ?? 0).toFixed(2)}%</Strong> },
               { id: "Impact", header: "Impact Score", accessor: "Impact", sortType: "number" as const, cell: ({ value }: any) => <Strong>{formatCount(value)}</Strong> },
             ]}

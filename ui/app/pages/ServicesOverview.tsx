@@ -4244,18 +4244,18 @@ export const ServicesOverview = () => {
 
   const incidentCommander = useMemo(() => {
     const modeProfile = incidentCommandMode === "stabilize"
-      ? { impactFactor: 1, confidenceBoost: 0, actions: [
+      ? { impactFactor: 1, revenueFactor: 1, confidenceBoost: 10, actions: [
         "Stabilize top error-budget burner by reducing traffic or disabling risky features.",
         "Isolate the most probable dependency edge and apply circuit-breaker or timeout tightening.",
         "Validate latest deployment for rollback criteria and execute if regression threshold exceeded.",
       ] }
       : incidentCommandMode === "mitigate"
-        ? { impactFactor: 0.8, confidenceBoost: 4, actions: [
+        ? { impactFactor: 0.65, revenueFactor: 0.7, confidenceBoost: 2, actions: [
           "Mitigate user impact with progressive traffic steering to healthier zones.",
           "Apply temporary safeguards: stricter rate limits, shorter timeouts, and fallback responses.",
           "Contain blast radius by pausing non-critical deploys and noisy background jobs.",
         ] }
-        : { impactFactor: 0.55, confidenceBoost: 8, actions: [
+        : { impactFactor: 0.35, revenueFactor: 0.4, confidenceBoost: -6, actions: [
           "Start phased recovery of highest-value service paths first, then expand gradually.",
           "Remove temporary mitigations in reverse order while watching error and latency guardrails.",
           "Run post-incident validation and confirm SLO burn returns to baseline before full reopen.",
@@ -4275,6 +4275,7 @@ export const ServicesOverview = () => {
     const impactedServices = Math.max(1, Math.round(impactedServicesBase * modeProfile.impactFactor));
     const rootCauseConfidence = Math.min(99, Math.max(35, (problemsData.some((p) => p.Status === "ACTIVE") ? 88 : 62) + Math.round((strongestCorrelated?.correlation ?? 0) * 12) + modeProfile.confidenceBoost));
     const correlatedStrength = Math.round((strongestCorrelated?.correlation ?? 0) * 100);
+    const revenueAtRisk = businessImpact.estimatedRevenueAtRisk * modeProfile.revenueFactor;
     const rootCauseId = svcDetailsData.find((s) => s.Service === likelyRootCause)?.["dt.entity.service"] as string | undefined;
     const rootCauseUrl = rootCauseId
       ? `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(rootCauseId)}&${tfParams(tfFrom, tfTo)}`
@@ -4289,19 +4290,22 @@ export const ServicesOverview = () => {
       impactedServices,
       strongestCorrelated,
       correlatedStrength,
+      revenueAtRisk,
       correlatedUrl,
       nextActions: modeProfile.actions,
       mode: incidentCommandMode,
     };
-  }, [problemsData, anomalyCorrelations, overviewKpis, incidentCommandMode, svcDetailsData, envUrl, tfFrom, tfTo]);
+  }, [problemsData, anomalyCorrelations, overviewKpis, incidentCommandMode, svcDetailsData, envUrl, tfFrom, tfTo, businessImpact.estimatedRevenueAtRisk]);
 
   const incidentCommanderPrev = useMemo(() => {
     if (!overviewKpisPrev) return null;
-    const modeFactor = incidentCommandMode === "stabilize" ? 1 : incidentCommandMode === "mitigate" ? 0.8 : 0.55;
+    const modeFactor = incidentCommandMode === "stabilize" ? 1 : incidentCommandMode === "mitigate" ? 0.65 : 0.35;
+    const revenueFactor = incidentCommandMode === "stabilize" ? 1 : incidentCommandMode === "mitigate" ? 0.7 : 0.4;
     const impactedServices = Math.max(1, Math.round((overviewKpisPrev.affectedServices ?? 0) * modeFactor));
     const rootCauseConfidence = Math.max(35, Math.min(99, 62 + ((overviewKpisPrev.activeProblems ?? 0) > 0 ? 12 : 0)));
-    return { impactedServices, rootCauseConfidence };
-  }, [overviewKpisPrev, incidentCommandMode]);
+    const revenueAtRisk = (businessImpactPrev?.estimatedRevenueAtRisk ?? 0) * revenueFactor;
+    return { impactedServices, rootCauseConfidence, revenueAtRisk };
+  }, [overviewKpisPrev, incidentCommandMode, businessImpactPrev?.estimatedRevenueAtRisk]);
 
   const failurePatternsData = useMemo(() => {
     const patternMap = new Map<string, { pattern: string; count: number; confidence: number; playbook: string; drillLabel: string; drillUrl: string }>();
@@ -7103,7 +7107,7 @@ export const ServicesOverview = () => {
           insights: [
             { severity: "critical", icon: "🔴", text: `Root-cause focus: ${incidentCommander.likelyRootCause}` },
             { severity: "warning", icon: "⚠️", text: `${incidentCommander.impactedServices} services estimated in scope.` },
-            { severity: "info", icon: "📊", text: `Estimated revenue at risk: $${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}.` },
+            { severity: "info", icon: "📊", text: `Estimated revenue at risk: $${formatCount(Math.round(incidentCommander.revenueAtRisk))}.` },
           ],
           recommendations: [
             { impact: "high", text: incidentCommander.nextActions[0] },
@@ -7129,7 +7133,7 @@ export const ServicesOverview = () => {
         };
       default: return null;
     }
-  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines, incidentCommander, businessImpact.estimatedRevenueAtRisk, failurePatternsData, teamReliabilityData, cloudWasteData]);
+  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines, incidentCommander, failurePatternsData, teamReliabilityData, cloudWasteData]);
 
   const aiPanel = aiOpen && aiPanelData ? <AIInsightsPanel data={aiPanelData} onClose={() => setAiOpen(false)} /> : null;
 
@@ -14403,9 +14407,9 @@ export const ServicesOverview = () => {
                 />
                 <KpiCard
                   label="Revenue at Risk"
-                  value={`$${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}`}
-                  rawValue={businessImpact.estimatedRevenueAtRisk}
-                  prevRawValue={businessImpactPrev?.estimatedRevenueAtRisk ?? null}
+                  value={`$${formatCount(Math.round(incidentCommander.revenueAtRisk))}`}
+                  rawValue={incidentCommander.revenueAtRisk}
+                  prevRawValue={incidentCommanderPrev?.revenueAtRisk ?? null}
                   color={RED}
                   sparkline={activeProblemsSparkline.map((v, i) => Math.max(0, v * businessValuePerRequest * Math.max(1, (overviewKpis.totalRequests / Math.max(1, activeProblemsSparkline[i] || 1)))))}
                 />

@@ -165,6 +165,9 @@ const TAB_KEYS = [
   "Incidents & Changes",
   "Detection & Analysis",
   "Capacity & Sizing",
+  "Incident Command",
+  "Failure Patterns",
+  "Team Reliability",
 ] as const;
 type TabKey = typeof TAB_KEYS[number];
 const DEFAULT_TAB_VISIBILITY: Record<TabKey, boolean> =
@@ -261,6 +264,19 @@ function LoadingState() {
   return (
     <div className="svc-loading">
       <ProgressCircle />
+    </div>
+  );
+}
+
+function ExplainabilityPanel({ title, bullets }: { title: string; bullets: string[] }) {
+  return (
+    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12, borderLeft: "3px solid rgba(69,137,255,0.8)" }}>
+      <Strong style={{ fontSize: 12 }}>{title}</Strong>
+      <div style={{ marginTop: 6 }}>
+        {bullets.map((b, i) => (
+          <Text key={i} style={{ fontSize: 12, opacity: 0.85, display: "block", marginBottom: 3 }}>• {b}</Text>
+        ))}
+      </div>
     </div>
   );
 }
@@ -607,6 +623,9 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
   const [latencyDelta, setLatencyDelta] = useState(50); // ms added to P99
   const [combinedTraffic, setCombinedTraffic] = useState(100); // % traffic increase
   const [combinedLatency, setCombinedLatency] = useState(50); // ms upstream latency add
+  const [twinReplicas, setTwinReplicas] = useState(3);
+  const [twinCacheHitRate, setTwinCacheHitRate] = useState(80);
+  const [twinDbLatencyMs, setTwinDbLatencyMs] = useState(20);
 
   const avgP99 = useMemo(() => {
     if (!svcDetailsData.length) return 0;
@@ -634,6 +653,16 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
   const combinedProjectedLatency = (avgLatency + combinedLatency * 1000) * (1 + Math.log2(combinedMultiplier) * 0.3);
   const combinedProjectedP90 = (avgP90 + combinedLatency * 1000) * (1 + Math.log2(combinedMultiplier) * 0.5);
   const combinedProjectedErrRate = errRate * (1 + Math.log2(combinedMultiplier) * 0.15) + (combinedLatency / 1000) * 0.5;
+
+  const capacityTwinProjection = useMemo(() => {
+    const replicaRelief = Math.max(0.4, 1 - (Math.max(1, twinReplicas) - 1) * 0.12);
+    const cacheRelief = Math.max(0.55, 1 - Math.max(0, twinCacheHitRate - 60) * 0.004);
+    const dbPenalty = 1 + Math.max(0, twinDbLatencyMs - 10) * 0.01;
+    const projectedP90 = avgP90 * replicaRelief * cacheRelief * dbPenalty;
+    const projectedErr = Math.max(0, errRate * dbPenalty * (1 / Math.max(0.7, replicaRelief)));
+    const capacityHeadroom = Math.max(0, Math.min(100, Math.round((1 - projectedErr / 5) * 100)));
+    return { projectedP90, projectedErr, capacityHeadroom };
+  }, [avgP90, errRate, twinReplicas, twinCacheHitRate, twinDbLatencyMs]);
 
   // Resource headroom timeline
   const resourceHeadroom = useMemo(() => {
@@ -891,6 +920,39 @@ function WhatIfTab({ svcDetailsData, reqDetailsData, svcLoading, reqLoading, env
           <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 140px" }}>
             <Text style={{ fontSize: 11, opacity: 0.6 }}>Projected Error Rate</Text>
             <Heading level={4} style={{ margin: "4px 0 0", color: combinedProjectedErrRate > 5 ? RED : ORANGE }}>{combinedProjectedErrRate.toFixed(2)}%</Heading>
+          </div>
+        </Flex>
+      </div>
+
+      <SectionHeader title="Capacity Twin Simulator" />
+      <div className="svc-table-tile" style={{ padding: 20 }}>
+        <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 8, display: "block" }}>Simulate structural capacity choices: replica count, cache hit-rate, and DB latency pressure.</Text>
+        <Flex gap={16} flexWrap="wrap" alignItems="flex-end" style={{ marginBottom: 16 }}>
+          <Flex flexDirection="column" gap={4} style={{ flex: "1 1 200px" }}>
+            <Strong style={{ fontSize: 12 }}>Replicas: {twinReplicas}</Strong>
+            <input type="range" min={1} max={12} step={1} value={twinReplicas} onChange={e => setTwinReplicas(Number(e.target.value))} style={{ accentColor: BLUE }} />
+          </Flex>
+          <Flex flexDirection="column" gap={4} style={{ flex: "1 1 200px" }}>
+            <Strong style={{ fontSize: 12 }}>Cache Hit Rate: {twinCacheHitRate}%</Strong>
+            <input type="range" min={40} max={99} step={1} value={twinCacheHitRate} onChange={e => setTwinCacheHitRate(Number(e.target.value))} style={{ accentColor: GREEN }} />
+          </Flex>
+          <Flex flexDirection="column" gap={4} style={{ flex: "1 1 200px" }}>
+            <Strong style={{ fontSize: 12 }}>DB Latency Add: +{twinDbLatencyMs}ms</Strong>
+            <input type="range" min={0} max={200} step={5} value={twinDbLatencyMs} onChange={e => setTwinDbLatencyMs(Number(e.target.value))} style={{ accentColor: RED }} />
+          </Flex>
+        </Flex>
+        <Flex gap={16} flexWrap="wrap">
+          <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 180px" }}>
+            <Text style={{ fontSize: 11, opacity: 0.6 }}>Projected P90</Text>
+            <Heading level={4} style={{ margin: "4px 0 0", color: latencyRiskColor(capacityTwinProjection.projectedP90, "p90") }}>{formatDuration(capacityTwinProjection.projectedP90)}</Heading>
+          </div>
+          <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 180px" }}>
+            <Text style={{ fontSize: 11, opacity: 0.6 }}>Projected Error Rate</Text>
+            <Heading level={4} style={{ margin: "4px 0 0", color: capacityTwinProjection.projectedErr > 5 ? RED : capacityTwinProjection.projectedErr > 1 ? YELLOW : GREEN }}>{capacityTwinProjection.projectedErr.toFixed(2)}%</Heading>
+          </div>
+          <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 180px" }}>
+            <Text style={{ fontSize: 11, opacity: 0.6 }}>Estimated Capacity Headroom</Text>
+            <Heading level={4} style={{ margin: "4px 0 0", color: capacityTwinProjection.capacityHeadroom < 30 ? RED : capacityTwinProjection.capacityHeadroom < 60 ? YELLOW : GREEN }}>{capacityTwinProjection.capacityHeadroom}%</Heading>
           </div>
         </Flex>
       </div>
@@ -2511,6 +2573,9 @@ export const ServicesOverview = () => {
 
   // Enhancement state
   const [compareMode, setCompareMode] = useState(false);
+  const [explainMode, setExplainMode] = useState(false);
+  const [businessValuePerRequest, setBusinessValuePerRequest] = useState<number>(0.01);
+  const [incidentCommandMode, setIncidentCommandMode] = useState<"stabilize" | "mitigate" | "recovery">("stabilize");
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const activeTabKey = visibleTabs[activeTabIndex] as TabKey | undefined;
   const [sloTarget, setSloTarget] = useState<number>(DEFAULT_SLO_TARGET);
@@ -4076,6 +4141,130 @@ export const ServicesOverview = () => {
     if (highBurn.length > 0) risks.push({ severity: "warning", text: `${highBurn.length} service${highBurn.length > 1 ? "s" : ""} burning SLO budget at 2x+ rate: ${highBurn.slice(0, 2).map(s => s.Service).join(", ")}${highBurn.length > 2 ? "..." : ""}` });
     return risks.slice(0, 3);
   }, [svcDetailsData, problemsData, anomalyData, sloTarget]);
+
+  const inferredDeployRegressionsByService = useMemo(() => {
+    const map = new Map<string, number>();
+    const records = (changeImpactResult.data?.records ?? []) as any[];
+    records.forEach((r) => {
+      const svc = String(r["service.name"] ?? r["entity.name"] ?? r["dt.entity.service"] ?? "");
+      if (!svc) return;
+      const req = (r["requests"] as number[] | undefined) ?? [];
+      const fail = (r["failures"] as number[] | undefined) ?? [];
+      const lat = (r["latency_p90"] as number[] | undefined) ?? [];
+      if (req.length < 4 || fail.length < 4 || lat.length < 4) return;
+      const mid = Math.floor(req.length / 2);
+      const reqBefore = req.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0);
+      const reqAfter = req.slice(mid).reduce((a, b) => a + (b ?? 0), 0);
+      const failBefore = fail.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0);
+      const failAfter = fail.slice(mid).reduce((a, b) => a + (b ?? 0), 0);
+      const latBefore = lat.slice(0, mid).reduce((a, b) => a + (b ?? 0), 0) / Math.max(1, mid);
+      const latAfter = lat.slice(mid).reduce((a, b) => a + (b ?? 0), 0) / Math.max(1, lat.length - mid);
+      const errBefore = reqBefore > 0 ? (failBefore / reqBefore) * 100 : 0;
+      const errAfter = reqAfter > 0 ? (failAfter / reqAfter) * 100 : 0;
+      if (latAfter > latBefore * 1.2 || errAfter > errBefore + 0.5) {
+        map.set(svc, (map.get(svc) ?? 0) + 1);
+      }
+    });
+    return map;
+  }, [changeImpactResult.data]);
+
+  const inferredDeployRegressionCount = useMemo(() => {
+    let total = 0;
+    inferredDeployRegressionsByService.forEach((v) => { total += v; });
+    return total;
+  }, [inferredDeployRegressionsByService]);
+
+  const earlyWarningSignals = useMemo(() => {
+    const signals: Array<{ severity: "warning" | "critical"; text: string }> = [];
+    if (overviewKpisPrev) {
+      const p90Growth = overviewKpisPrev.avgP90 > 0 ? ((overviewKpis.avgP90 - overviewKpisPrev.avgP90) / overviewKpisPrev.avgP90) * 100 : 0;
+      const errGrowth = overviewKpisPrev.errorRate > 0 ? ((overviewKpis.errorRate - overviewKpisPrev.errorRate) / overviewKpisPrev.errorRate) * 100 : 0;
+      const problemsDelta = (overviewKpis.activeProblems ?? 0) - (overviewKpisPrev.activeProblems ?? 0);
+      if (p90Growth > 20) signals.push({ severity: p90Growth > 40 ? "critical" : "warning", text: `P90 drift +${p90Growth.toFixed(0)}% vs previous period.` });
+      if (errGrowth > 30 || overviewKpis.errorRate > 1.5) signals.push({ severity: errGrowth > 60 ? "critical" : "warning", text: `Error-rate drift ${errGrowth > 0 ? "+" : ""}${errGrowth.toFixed(0)}% with current ${overviewKpis.errorRate.toFixed(2)}%.` });
+      if (problemsDelta > 0) signals.push({ severity: problemsDelta >= 3 ? "critical" : "warning", text: `Active Davis problems increased by ${problemsDelta}.` });
+    }
+    if (inferredDeployRegressionCount > 0) {
+      signals.push({ severity: "warning", text: "Recent deployment regressions detected; elevated near-term incident probability." });
+    }
+    return signals.slice(0, 4);
+  }, [overviewKpis, overviewKpisPrev, inferredDeployRegressionCount]);
+
+  const businessImpact = useMemo(() => {
+    const atRiskFraction = Math.min(0.95, (overviewKpis.errorRate / 100) + (overviewKpis.activeProblems * 0.05));
+    const atRiskRequests = Math.round(overviewKpis.totalRequests * atRiskFraction);
+    const estimatedRevenueAtRisk = atRiskRequests * businessValuePerRequest;
+    const affectedUsersEstimate = Math.round(atRiskRequests * 0.65);
+    return {
+      atRiskFraction,
+      atRiskRequests,
+      estimatedRevenueAtRisk,
+      affectedUsersEstimate,
+    };
+  }, [overviewKpis, businessValuePerRequest]);
+
+  const incidentCommander = useMemo(() => {
+    const strongestCorrelated = anomalyCorrelations[0]?.correlatedServices?.[0]
+      ? {
+          service1: anomalyCorrelations[0].anomalyService,
+          service2: anomalyCorrelations[0].correlatedServices[0].name,
+          correlation: (anomalyCorrelations[0].correlatedServices[0].strength ?? 0) / 100,
+        }
+      : undefined;
+    const likelyRootCause = problemsData.find((p) => p.Status === "ACTIVE")?.RootCause || strongestCorrelated?.service1 || "Undetermined";
+    const impactedServices = Math.max(overviewKpis.affectedServices, problemsData.reduce((acc, p) => acc + ((p.Affected as string[] | undefined)?.length ?? 0), 0));
+    const nextActions = [
+      "Stabilize top error-budget burner by reducing traffic or disabling risky features.",
+      "Isolate the most probable dependency edge and apply circuit-breaker or timeout tightening.",
+      "Validate latest deployment for rollback criteria and execute if regression threshold exceeded.",
+    ];
+    return {
+      likelyRootCause,
+      impactedServices,
+      strongestCorrelated,
+      nextActions,
+      mode: incidentCommandMode,
+    };
+  }, [problemsData, anomalyCorrelations, overviewKpis, incidentCommandMode]);
+
+  const failurePatternsData = useMemo(() => {
+    const patternMap = new Map<string, { pattern: string; count: number; confidence: number; playbook: string }>();
+    const addPattern = (pattern: string, confidence: number, playbook: string) => {
+      const prev = patternMap.get(pattern) ?? { pattern, count: 0, confidence, playbook };
+      prev.count += 1;
+      prev.confidence = Math.max(prev.confidence, confidence);
+      patternMap.set(pattern, prev);
+    };
+    anomalyData.filter((a) => a.Anomaly === "YES").forEach((a: any) => {
+      if ((a["Latency Change %"] ?? 0) > 50 && (a["Error Rate Change %"] ?? 0) > 100) {
+        addPattern("Latency + Error Spike Cascade", 0.82, "Check downstream saturation, then apply load shedding.");
+      } else if ((a["Requests Δ %"] ?? 0) > 40 && (a["Error Rate Change %"] ?? 0) > 30) {
+        addPattern("Traffic Surge Instability", 0.74, "Enable autoscale fast-path and verify rate limits.");
+      }
+    });
+    if (inferredDeployRegressionCount > 0) addPattern("Post-Deployment Regression", 0.78, "Evaluate canary rollback and compare changed endpoints.");
+    if (problemsData.filter((p) => p.Status === "ACTIVE").length > 2) addPattern("Multi-Service Incident Cluster", 0.7, "Run incident command flow and prioritize shared dependencies.");
+    return Array.from(patternMap.values()).sort((a, b) => b.count - a.count || b.confidence - a.confidence);
+  }, [anomalyData, inferredDeployRegressionCount, problemsData]);
+
+  const teamReliabilityData = useMemo(() => {
+    const rows = new Map<string, { team: string; services: number; avgFailureRate: number; atRisk: number; deployRegressions: number; score: number }>();
+    const regressionByService = inferredDeployRegressionsByService;
+    svcDetailsData.forEach((s) => {
+      const team = ownershipMap.get(s["dt.entity.service"]) || "Unassigned";
+      const curr = rows.get(team) ?? { team, services: 0, avgFailureRate: 0, atRisk: 0, deployRegressions: 0, score: 100 };
+      curr.services += 1;
+      curr.avgFailureRate += Number(s.FailureRate ?? 0);
+      if (Number(s.FailureRate ?? 0) >= 1 || Number(s.Latency_p90 ?? 0) / 1000 >= 500) curr.atRisk += 1;
+      curr.deployRegressions += regressionByService.get(s.Service) ?? 0;
+      rows.set(team, curr);
+    });
+    return Array.from(rows.values()).map((r) => {
+      const avgFailureRate = r.services > 0 ? r.avgFailureRate / r.services : 0;
+      const score = Math.max(0, Math.round(100 - avgFailureRate * 8 - r.atRisk * 4 - r.deployRegressions * 3));
+      return { ...r, avgFailureRate, score };
+    }).sort((a, b) => b.score - a.score);
+  }, [svcDetailsData, inferredDeployRegressionsByService, ownershipMap]);
 
   // ─── Service Details: Last 5 deployments per service with metric delta ───
   const perServiceDeployments = useMemo(() => {
@@ -6691,9 +6880,39 @@ export const ServicesOverview = () => {
           case 2: return analyzeWhatIf(svcDetailsData, reqDetailsData);
           default: return analyzeRightSizingHosts(hostRightSizingData);
         }
+      case "Incident Command":
+        return {
+          summary: `Incident Commander mode ${incidentCommander.mode}. Likely root cause: ${incidentCommander.likelyRootCause}. Impacted services: ${incidentCommander.impactedServices}.`,
+          insights: [
+            { severity: "critical", icon: "🔴", text: `Root-cause focus: ${incidentCommander.likelyRootCause}` },
+            { severity: "warning", icon: "⚠️", text: `${incidentCommander.impactedServices} services estimated in scope.` },
+            { severity: "info", icon: "📊", text: `Estimated revenue at risk: $${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}.` },
+          ],
+          recommendations: [
+            { impact: "high", text: incidentCommander.nextActions[0] },
+            { impact: "high", text: incidentCommander.nextActions[1] },
+            { impact: "medium", text: incidentCommander.nextActions[2] },
+          ],
+        };
+      case "Failure Patterns":
+        return {
+          summary: `Detected ${failurePatternsData.length} active failure fingerprint pattern(s) in the selected timeframe.`,
+          insights: failurePatternsData.slice(0, 3).map((p) => ({ severity: p.confidence >= 0.8 ? "critical" as const : "warning" as const, icon: p.confidence >= 0.8 ? "🔴" : "⚠️", text: `${p.pattern} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.count} occurrence(s)).` })),
+          recommendations: failurePatternsData.slice(0, 3).map((p) => ({ impact: p.confidence >= 0.8 ? "high" as const : "medium" as const, text: p.playbook })),
+        };
+      case "Team Reliability":
+        return {
+          summary: `Team leaderboard includes ${teamReliabilityData.length} team(s). Highest reliability score: ${teamReliabilityData[0]?.score ?? 0}/100.`,
+          insights: teamReliabilityData.slice(0, 3).map((t) => ({ severity: t.score >= 80 ? "good" as const : t.score >= 60 ? "warning" as const : "critical" as const, icon: t.score >= 80 ? "✅" : t.score >= 60 ? "⚠️" : "🔴", text: `${t.team}: score ${t.score}/100, ${t.atRisk} at-risk service(s), ${t.deployRegressions} deploy regression(s).` })),
+          recommendations: [
+            { impact: "high", text: "Prioritize coaching and remediation for teams with scores below 60." },
+            { impact: "medium", text: "Reduce regressions by enforcing deployment risk-gate checks." },
+            { impact: "low", text: "Use top-scoring teams as reliability playbook exemplars." },
+          ],
+        };
       default: return null;
     }
-  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines]);
+  }, [aiOpen, activeTabKey, summarySubTab, metricsSubTab, reliabilitySubTab, qualitySubTab, performanceSubTab, depsImpactSubTab, incidentsSubTab, detectionSubTab, capacitySubTab, rightSizingSubTab, honeycombData, problemsData, svcDetailsData, reqDetailsData, reqTotalTs, deploymentsData, procCpuTs, procMemPctTs, procGcTs, k8sCpuTs, k8sMemTs, sloData, sloTarget, mttrData, mttrBenchmark, mttrForecast, repeatOffenders, budgetForecastData, scorecardData, dependenciesData, heatmapGridData, timelineData, timelineGrouped, timelineNotes, changeImpactData, deployReadinessData, onCallHealthData, anomalyData, anomalyCorrelations, anomalySuppressions, correlationData, antiPatternData, baselines, baselineViolationStreaks, alertRules, alertViolations, alertNoiseRatioComputed, alertMaintenanceMode, apdexData, apdexT, apdexGeoData, apdexCohortData, apdexSloStatus, rightSizingData, hostRightSizingData, dbRightSizingData, trafficPatternData, blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, k8sClustersData, k8sNodesData, k8sNamespacesData, k8sServicesData, k8sPodsData, k8sContainersData, maturityData, fleetSparklines, incidentCommander, businessImpact.estimatedRevenueAtRisk, failurePatternsData, teamReliabilityData]);
 
   const aiPanel = aiOpen && aiPanelData ? <AIInsightsPanel data={aiPanelData} onClose={() => setAiOpen(false)} /> : null;
 
@@ -6747,6 +6966,20 @@ export const ServicesOverview = () => {
             </Flex>
 
             <AIInsightsButton active={aiOpen} onClick={() => setAiOpen(v => !v)} />
+            <Button variant={explainMode ? "emphasized" : "default"} onClick={() => setExplainMode(v => !v)}>
+              {explainMode ? "Explain: ON" : "Explain"}
+            </Button>
+            <Flex alignItems="center" gap={4}>
+              <Text style={{ fontSize: 11, opacity: 0.6 }}>$ / req</Text>
+              <input
+                type="number"
+                min={0}
+                step={0.001}
+                value={businessValuePerRequest}
+                onChange={(e) => setBusinessValuePerRequest(Math.max(0, Number(e.target.value)))}
+                style={{ width: 70, padding: "3px 6px", borderRadius: 4, border: "1px solid rgba(128,128,128,0.35)", background: "transparent", color: "inherit", fontSize: 11 }}
+              />
+            </Flex>
             <Button variant="default" onClick={() => setHelpOpen(true)}>
               <Button.Prefix>
                 <HelpIcon />
@@ -6757,7 +6990,7 @@ export const ServicesOverview = () => {
                 <SettingIcon />
               </Button.Prefix>
             </Button>
-            <Text style={{ fontSize: 11, opacity: 0.4, fontFamily: "monospace" }}>v0.38.52</Text>
+            <Text style={{ fontSize: 11, opacity: 0.4, fontFamily: "monospace" }}>v0.38.61</Text>
             {activeTabKey && COMPARE_TABS.includes(activeTabKey) && (
               <Button variant={compareMode ? "emphasized" : "default"} onClick={() => setCompareMode(!compareMode)}>
                 {compareMode ? "Compare: ON" : "Compare"}
@@ -6924,6 +7157,19 @@ export const ServicesOverview = () => {
       <Modal title="Services Overview — Help Guide" show={helpOpen} onDismiss={() => setHelpOpen(false)} size="large">
         <div className="svc-help-content">
           <h3>What's New</h3>
+          <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid rgba(69,137,255,0.6)" }}>
+            <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>July 14, 2026 — v0.38.62</p>
+            <p><strong>Decision Intelligence Expansion</strong></p>
+            <ul style={{ margin: "4px 0", paddingLeft: 20 }}>
+              <li><strong>3 New Top-Level Tabs</strong>: Incident Command, Failure Patterns, and Team Reliability.</li>
+              <li><strong>Explain Mode</strong>: Global explainability overlay for risk and decision formulas.</li>
+              <li><strong>Business Impact Overlay</strong>: At-risk requests, estimated users impacted, and revenue-at-risk driven by configurable $/request.</li>
+              <li><strong>Causal Chain View</strong>: Correlation Engine now highlights probable dependency-backed causal chains with confidence.</li>
+              <li><strong>SLO Budget Commander</strong>: Adds safe change window and traffic headroom guidance based on burn-rate posture.</li>
+              <li><strong>Capacity Twin Simulator</strong>: New What-If controls for replicas, cache hit-rate, and DB latency to model projected P90/error/headroom.</li>
+              <li><strong>Settings Visibility</strong>: All newly added top-level tabs are toggleable and reorderable in Settings.</li>
+            </ul>
+          </div>
           <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid rgba(69,137,255,0.6)" }}>
             <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>July 9, 2026 — v0.38.54</p>
             <p><strong>Flame Graph — Performance Sub-Tab</strong></p>
@@ -7219,6 +7465,15 @@ export const ServicesOverview = () => {
             <li><strong>What-If</strong> — Scenario modeling for traffic spikes, service removal, and latency target changes.</li>
           </ul>
 
+          <h3>Tab: Incident Command</h3>
+          <p>Autonomous incident co-pilot for live response. Includes mode selector (stabilize/mitigate/recovery), likely root-cause focus, impacted-services estimate, business impact, and prioritized next actions.</p>
+
+          <h3>Tab: Failure Patterns</h3>
+          <p>Fleet anomaly fingerprinting. Clusters recurring incident signatures (for example, post-deployment regression or traffic surge instability) with confidence scoring and recommended playbooks.</p>
+
+          <h3>Tab: Team Reliability</h3>
+          <p>Team-level reliability leaderboard that aggregates service health by owner and scores teams on failure rate, at-risk services, and deployment regressions.</p>
+
           <h3>Tab: Quality</h3>
           <p>Contains two sub-tabs: <strong>Scorecards</strong> and <strong>Service Maturity</strong>.</p>
           <ul>
@@ -7272,7 +7527,7 @@ export const ServicesOverview = () => {
             <li><strong>Recommendations</strong> — Actionable next steps prioritized by impact (High / Medium / Low). Each recommendation tells you what to investigate and why, based on the specific data patterns detected.</li>
           </ul>
           <p>
-            AI Assist is available on all 28 tabs. The analysis is computed locally from the data already loaded in the app — no external AI service calls are made.
+            AI Assist is available across all top-level tabs and sub-tabs, including Incident Command, Failure Patterns, and Team Reliability. The analysis is computed locally from the data already loaded in the app — no external AI service calls are made.
             Content updates automatically when you change timeframes, filters, or tabs. Close the panel by clicking <strong>✕</strong> in the panel header or toggling the button off.
             The summary text appears with a streaming animation for readability.
           </p>
@@ -7740,6 +7995,39 @@ export const ServicesOverview = () => {
                     </div>
                   ))}
                 </div>
+              )}
+
+              {earlyWarningSignals.length > 0 && (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12, borderLeft: `3px solid ${ORANGE}` }}>
+                  <Strong style={{ fontSize: 12 }}>Early-Warning Regression Detector</Strong>
+                  <div style={{ marginTop: 6 }}>
+                    {earlyWarningSignals.map((s, i) => (
+                      <Text key={i} style={{ fontSize: 12, display: "block", color: s.severity === "critical" ? RED : ORANGE }}>
+                        {s.severity === "critical" ? "🔴" : "⚠️"} {s.text}
+                      </Text>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                <SectionHeader title="Business Impact Overlay" />
+                <Flex gap={16} flexWrap="wrap">
+                  <KpiCard label="At-Risk Requests" value={formatCount(businessImpact.atRiskRequests)} rawValue={businessImpact.atRiskRequests} color={RED} />
+                  <KpiCard label="Revenue at Risk" value={`$${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}`} rawValue={businessImpact.estimatedRevenueAtRisk} color={RED} />
+                  <KpiCard label="Estimated Affected Users" value={formatCount(businessImpact.affectedUsersEstimate)} rawValue={businessImpact.affectedUsersEstimate} color={ORANGE} />
+                </Flex>
+              </div>
+
+              {explainMode && (
+                <ExplainabilityPanel
+                  title="Why these signals are highlighted"
+                  bullets={[
+                    "Early warnings compare current vs previous period for P90, error rate, and problem count drift.",
+                    "Business impact estimates at-risk requests from active error fraction + active-problem weighting.",
+                    "Risk cards prioritize SLO exhaustion, active Davis incidents, and confirmed anomaly outliers.",
+                  ]}
+                />
               )}
 
               {/* KPI Marquee — all 8 metrics, scrolling */}
@@ -8537,6 +8825,35 @@ export const ServicesOverview = () => {
                 <KpiCard label="Healthy" value={sloData.filter((s) => s.Status === "OK").length} rawValue={sloData.filter((s) => s.Status === "OK").length} color={GREEN} higherIsBetter prevRawValue={prevSloStatusCounts?.slo.healthy ?? null} sparkline={sloHealthySparkline} />
               </Flex>
 
+              {(() => {
+                const avgBurn = multiWindowBurnRate.length > 0
+                  ? (multiWindowBurnRate.reduce((s, r) => s + Number(r["24h Burn"] ?? 0), 0) / multiWindowBurnRate.length)
+                  : 0;
+                const safeChangeWindow = avgBurn < 0.7 ? "Now to +4h" : avgBurn < 1.2 ? "Low-risk only" : "Freeze non-critical changes";
+                const maxSpikePct = Math.max(0, Math.round((1 - Math.min(2, avgBurn) / 2) * 100));
+                return (
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
+                    <SectionHeader title="SLO Budget Commander" />
+                    <Flex gap={16} flexWrap="wrap">
+                      <KpiCard label="Fleet 24h Burn" value={`${avgBurn.toFixed(2)}x`} rawValue={avgBurn} color={avgBurn > 1 ? RED : avgBurn > 0.7 ? YELLOW : GREEN} />
+                      <KpiCard label="Safe Change Window" value={safeChangeWindow} color={avgBurn > 1 ? RED : YELLOW} />
+                      <KpiCard label="Max Suggested Traffic Spike" value={`+${maxSpikePct}%`} rawValue={maxSpikePct} color={maxSpikePct < 20 ? RED : maxSpikePct < 50 ? YELLOW : GREEN} higherIsBetter />
+                    </Flex>
+                  </div>
+                );
+              })()}
+
+              {explainMode && (
+                <ExplainabilityPanel
+                  title="Commander math"
+                  bullets={[
+                    "Fleet 24h burn is averaged from per-service 24h burn rates.",
+                    "Safe change window tightens automatically as burn approaches 1.0x.",
+                    "Suggested traffic spike headroom decreases as burn risk increases.",
+                  ]}
+                />
+              )}
+
               {/* Multi-Window Burn Rate Display */}
               {multiWindowBurnRate.length > 0 && (
                 <>
@@ -9139,6 +9456,36 @@ export const ServicesOverview = () => {
                 <Tab title="Correlation Engine">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Cross-Service Metric Correlations" />
+              <div className="svc-table-tile" style={{ padding: 12 }}>
+                <Strong style={{ fontSize: 12 }}>Probable Causality Chain</Strong>
+                <Text style={{ fontSize: 11, opacity: 0.7, display: "block", marginTop: 4 }}>
+                  Chains combine strong correlation with known dependency edges. Highest-confidence links are shown first.
+                </Text>
+                <div style={{ marginTop: 8 }}>
+                  {correlationData.filter(c => c.hasDependency).sort((a, b) => Number(b.correlation ?? 0) - Number(a.correlation ?? 0)).slice(0, 5).map((c, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, fontSize: 12 }}>
+                      <span style={{ fontWeight: 700 }}>{c.service1}</span>
+                      <span style={{ opacity: 0.6 }}>→</span>
+                      <span style={{ fontWeight: 700 }}>{c.service2}</span>
+                      <span style={{ display: "inline-block", padding: "1px 8px", borderRadius: 12, background: "rgba(69,137,255,0.12)", color: BLUE, fontWeight: 700 }}>
+                        confidence {(Number(c.correlation ?? 0) * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                  ))}
+                  {correlationData.filter(c => c.hasDependency).length === 0 && <Text style={{ fontSize: 12, opacity: 0.5 }}>No dependency-backed chains detected in this timeframe.</Text>}
+                </div>
+              </div>
+
+              {explainMode && (
+                <ExplainabilityPanel
+                  title="How causality confidence is computed"
+                  bullets={[
+                    "Base score starts from Pearson correlation strength.",
+                    "Known service dependency edges increase confidence.",
+                    "Time-lag consistency improves cascade confidence.",
+                  ]}
+                />
+              )}
               <Flex gap={16} flexWrap="wrap">
                 <KpiCard label="Total Correlations" value={correlationData.length} rawValue={correlationData.length} prevRawValue={correlationPrevCounts?.total ?? null} sparkline={fleetSparklines.errorRate} />
                 <KpiCard
@@ -12539,6 +12886,36 @@ export const ServicesOverview = () => {
                       sparkline={changeImpactSparklines.regressions}
                     />
                   </Flex>
+
+                  {(() => {
+                    const regressions = changeImpactData.filter((d) => String(d.Verdict ?? "").includes("Regression")).length;
+                    const ratio = changeImpactData.length > 0 ? regressions / changeImpactData.length : 0;
+                    const gate = ratio >= 0.3 ? "NO-GO" : ratio >= 0.15 ? "CAUTION" : "GO";
+                    const gateColor = gate === "NO-GO" ? RED : gate === "CAUTION" ? YELLOW : GREEN;
+                    const estimatedChangeRiskCost = Math.round((businessImpact.estimatedRevenueAtRisk || 0) * Math.max(0.1, ratio));
+                    return (
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12, borderLeft: `3px solid ${gateColor}` }}>
+                        <SectionHeader title="Change Risk Gate" />
+                        <Flex gap={16} alignItems="center" flexWrap="wrap">
+                          <Heading level={3} style={{ margin: 0, color: gateColor }}>{gate}</Heading>
+                          <Text style={{ fontSize: 12 }}>Regression ratio: <Strong>{(ratio * 100).toFixed(0)}%</Strong></Text>
+                          <Text style={{ fontSize: 12 }}>Estimated business risk from current change set: <Strong>${formatCount(estimatedChangeRiskCost)}</Strong></Text>
+                        </Flex>
+                      </div>
+                    );
+                  })()}
+
+                  {explainMode && (
+                    <ExplainabilityPanel
+                      title="Change gate logic"
+                      bullets={[
+                        "GO if regressions are below 15% of deploys in the selected period.",
+                        "CAUTION at 15-29%, NO-GO at 30%+ regression ratio.",
+                        "Business-risk estimate scales current at-risk revenue by regression density.",
+                      ]}
+                    />
+                  )}
+
                   {/* Per-deploy comparison cards */}
                   {changeImpactCards.length > 0 && (
                     <>
@@ -13702,6 +14079,96 @@ export const ServicesOverview = () => {
             />
                 </Tab>
               </Tabs>
+            </Flex>
+          </Tab>);
+
+              case "Incident Command": return (
+          <Tab key={tabId} title="Incident Command">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              {aiPanel}
+              <SectionHeader title="Autonomous Incident Commander" />
+              <Flex gap={8} alignItems="center" flexWrap="wrap">
+                <Strong style={{ fontSize: 12 }}>Mode:</Strong>
+                {(["stabilize", "mitigate", "recovery"] as const).map((m) => (
+                  <div key={m} onClick={() => setIncidentCommandMode(m)} style={{ padding: "4px 12px", borderRadius: 4, cursor: "pointer", fontWeight: incidentCommandMode === m ? 700 : 400, background: incidentCommandMode === m ? "rgba(107,79,252,0.2)" : "transparent", border: incidentCommandMode === m ? "1px solid rgba(107,79,252,0.5)" : "1px solid transparent", fontSize: 12 }}>
+                    {m}
+                  </div>
+                ))}
+              </Flex>
+              <Flex gap={16} flexWrap="wrap">
+                <KpiCard label="Likely Root Cause" value={incidentCommander.likelyRootCause} color={RED} />
+                <KpiCard label="Impacted Services" value={incidentCommander.impactedServices} rawValue={incidentCommander.impactedServices} color={ORANGE} />
+                <KpiCard label="Revenue at Risk" value={`$${formatCount(Math.round(businessImpact.estimatedRevenueAtRisk))}`} rawValue={businessImpact.estimatedRevenueAtRisk} color={RED} />
+                <KpiCard label="Top Correlated Link" value={incidentCommander.strongestCorrelated ? `${incidentCommander.strongestCorrelated.service1} → ${incidentCommander.strongestCorrelated.service2}` : "Not enough data"} color={BLUE} />
+              </Flex>
+              <div className="svc-table-tile" style={{ padding: 12 }}>
+                <Strong style={{ fontSize: 12 }}>Next 3 Actions</Strong>
+                <Text style={{ fontSize: 12, display: "block", marginTop: 8 }}>1. {incidentCommander.nextActions[0]}</Text>
+                <Text style={{ fontSize: 12, display: "block" }}>2. {incidentCommander.nextActions[1]}</Text>
+                <Text style={{ fontSize: 12, display: "block" }}>3. {incidentCommander.nextActions[2]}</Text>
+              </div>
+              {explainMode && (
+                <ExplainabilityPanel
+                  title="Incident command reasoning"
+                  bullets={[
+                    "Root cause prioritizes active Davis root-cause signal, then strongest dependency-backed correlation.",
+                    "Action list sequences stabilize, isolate, and rollback decisioning.",
+                    "Business impact uses current at-risk request estimate and configured value-per-request.",
+                  ]}
+                />
+              )}
+            </Flex>
+          </Tab>);
+
+              case "Failure Patterns": return (
+          <Tab key={tabId} title="Failure Patterns">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              {aiPanel}
+              <SectionHeader title="Fleet Anomaly Fingerprinting" />
+              <Flex gap={16} flexWrap="wrap">
+                <KpiCard label="Pattern Families" value={failurePatternsData.length} rawValue={failurePatternsData.length} color={BLUE} />
+                <KpiCard label="Active Problems" value={overviewKpis.activeProblems} rawValue={overviewKpis.activeProblems} color={overviewKpis.activeProblems > 0 ? RED : GREEN} />
+                <KpiCard label="Anomalous Services" value={anomalyData.filter(a => a.Anomaly === "YES").length} rawValue={anomalyData.filter(a => a.Anomaly === "YES").length} color={RED} />
+              </Flex>
+              <div className="svc-table-tile">
+                <DataTable
+                  data={failurePatternsData}
+                  columns={[
+                    { id: "pattern", header: "Fingerprint", accessor: "pattern" },
+                    { id: "count", header: "Occurrences", accessor: "count", columnType: "number" as const, cell: ({ value }: any) => <Strong>{value}</Strong> },
+                    { id: "confidence", header: "Confidence", accessor: "confidence", columnType: "number" as const, cell: ({ value }: any) => <span style={{ color: value > 0.8 ? RED : value > 0.65 ? ORANGE : BLUE, fontWeight: 700 }}>{(Number(value) * 100).toFixed(0)}%</span> },
+                    { id: "playbook", header: "Recommended Playbook", accessor: "playbook" },
+                  ]}
+                  sortable
+                />
+              </div>
+            </Flex>
+          </Tab>);
+
+              case "Team Reliability": return (
+          <Tab key={tabId} title="Team Reliability">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              {aiPanel}
+              <SectionHeader title="Reliability Scorecard per Team" />
+              <Flex gap={16} flexWrap="wrap">
+                <KpiCard label="Teams" value={teamReliabilityData.length} rawValue={teamReliabilityData.length} color={BLUE} />
+                <KpiCard label="Top Score" value={teamReliabilityData[0] ? `${teamReliabilityData[0].score}/100` : "—"} color={GREEN} />
+                <KpiCard label="Unassigned Services" value={teamReliabilityData.find(t => t.team === "Unassigned")?.services ?? 0} rawValue={teamReliabilityData.find(t => t.team === "Unassigned")?.services ?? 0} color={YELLOW} />
+              </Flex>
+              <div className="svc-table-tile">
+                <DataTable
+                  data={teamReliabilityData}
+                  columns={[
+                    { id: "team", header: "Team", accessor: "team" },
+                    { id: "services", header: "Services", accessor: "services", columnType: "number" as const },
+                    { id: "avgFailureRate", header: "Avg Failure %", accessor: "avgFailureRate", columnType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: Number(value) > 2 ? RED : Number(value) > 1 ? YELLOW : GREEN }}>{Number(value).toFixed(2)}%</Strong> },
+                    { id: "atRisk", header: "At-Risk Services", accessor: "atRisk", columnType: "number" as const },
+                    { id: "deployRegressions", header: "Deploy Regressions", accessor: "deployRegressions", columnType: "number" as const },
+                    { id: "score", header: "Reliability Score", accessor: "score", columnType: "number" as const, cell: ({ value }: any) => <span style={{ display: "inline-block", minWidth: 86, textAlign: "center", padding: "2px 8px", borderRadius: 4, background: Number(value) >= 80 ? GREEN : Number(value) >= 60 ? YELLOW : RED, color: Number(value) >= 60 ? "#000" : "#fff", fontWeight: 700 }}>{value}/100</span> },
+                  ]}
+                  sortable
+                />
+              </div>
             </Flex>
           </Tab>);
 

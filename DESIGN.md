@@ -93,6 +93,23 @@ The following packages appear in `package.json` but are not imported anywhere in
 
 The **Services Overview App** is a Dynatrace platform application that provides a comprehensive, multi-tab SRE command center for monitoring, analyzing, and managing service reliability across an entire fleet. It aggregates RED metrics (Rate, Errors, Duration), Kubernetes workload health, dependency topology, SLO error budgets, anomaly detection, blast radius simulation, and capacity planning into a single unified interface.
 
+### July 2026 Decision-Intelligence Additions
+
+- Added three top-level tabs:
+  - Incident Command: incident co-pilot with likely root-cause, impact scope, and action sequencing.
+  - Failure Patterns: fleet anomaly fingerprinting with confidence and playbooks.
+  - Team Reliability: owner-based reliability leaderboard and scorecards.
+- Added Explain Mode in the global header for plain-language reasoning on thresholds, risk scores, and decision outputs.
+- Added Business Impact Overlay with configurable `$ / request` input used for at-risk revenue estimates.
+- Upgraded Correlation Engine with probable causal-chain output (dependency-backed confidence view).
+- Extended What-If with a Capacity Twin Simulator (replicas, cache hit-rate, DB latency).
+
+### Tab Visibility & Ordering
+
+- All top-level tabs, including newly added tabs, are managed by the existing Tab Order & Visibility manager in Settings.
+- Visibility and ordering remain persisted per user via user app state keys.
+- New tabs without sub-tabs are still fully hide/show and drag-reorder capable at the top-level.
+
 ### Architecture
 
 ```

@@ -194,7 +194,7 @@ const SUB_TAB_KEYS = {
   "Capacity & Sizing": ["Right-Sizing", "Traffic Patterns", "What-If"],
 } as const;
 type SubTabParent = keyof typeof SUB_TAB_KEYS;
-const SUB_TAB_STATE_KEY = "svc-subtab-visibility";
+const SUB_TAB_STATE_KEY = "svc-subtab-visibility-v2";
 const SUB_TAB_ORDER_STATE_KEY = "svc-subtab-order";
 
 // Sub-sub-tab definitions (third level — e.g. modes within Blast Radius)

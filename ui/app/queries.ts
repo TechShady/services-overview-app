@@ -1038,12 +1038,11 @@ export function k8sWorkloadServiceMapQuery(): string {
 // Avoids timeseries row-count cap; uses smartscape topology (confirmed edge types)
 // ---------------------------------------------------------------------------
 export function k8sClusterWorkloadMapQuery(): string {
-  return `smartscapeNodes K8S_CLUSTER
-| fields clusterName = name
-| traverse edgeTypes: {contains}, targetTypes: {K8S_NAMESPACE}, fieldsKeep: {clusterName}
-| traverse edgeTypes: {contains}, targetTypes: {K8S_DEPLOYMENT, K8S_DAEMONSET, K8S_STATEFULSET}, fieldsKeep: {clusterName}
-| fields clusterName, workloadName = k8s.workload.name, workloadId = id
+  return `smartscapeNodes K8S_DEPLOYMENT
+| fields workloadId = id, workloadName = k8s.workload.name, clusterName = k8s.cluster.name
 | filter isNotNull(workloadName) AND isNotNull(clusterName)
+| append [smartscapeNodes K8S_DAEMONSET | fields workloadId = id, workloadName = k8s.workload.name, clusterName = k8s.cluster.name | filter isNotNull(workloadName) AND isNotNull(clusterName)]
+| append [smartscapeNodes K8S_STATEFULSET | fields workloadId = id, workloadName = k8s.workload.name, clusterName = k8s.cluster.name | filter isNotNull(workloadName) AND isNotNull(clusterName)]
 | dedup workloadName, clusterName
 | limit 10000`;
 }

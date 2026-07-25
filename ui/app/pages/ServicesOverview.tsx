@@ -5513,15 +5513,19 @@ export const ServicesOverview = () => {
   }, [k8sClusterWorkloadMapResult.data, k8sClusterMapResult.data, k8sWorkloadServiceMap]);
 
   // Clusters sorted by workload+service count (for dropdown)
+  // Primary source: k8sClusterEntityMapQuery (all clusters), enriched with workload/service counts where available
   const blastRadiusSortedClusters = useMemo(() => {
-    return [...k8sClusterServiceMap.clusterToWorkloads.entries()]
-      .map(([name, wlMap]) => {
-        let totalServices = 0;
-        wlMap.forEach(svcs => totalServices += svcs.size);
-        return { name, workloadCount: wlMap.size, serviceCount: totalServices };
-      })
-      .sort((a, b) => b.serviceCount - a.serviceCount || b.workloadCount - a.workloadCount);
-  }, [k8sClusterServiceMap]);
+    const result: { name: string; workloadCount: number; serviceCount: number }[] = [];
+    (k8sClusterMapResult.data?.records ?? []).forEach((r: any) => {
+      const name = String(r.name ?? "");
+      if (!name) return;
+      const wlMap = k8sClusterServiceMap.clusterToWorkloads.get(name);
+      let totalServices = 0;
+      if (wlMap) wlMap.forEach(svcs => totalServices += svcs.size);
+      result.push({ name, workloadCount: wlMap?.size ?? 0, serviceCount: totalServices });
+    });
+    return result.sort((a, b) => b.serviceCount - a.serviceCount || b.workloadCount - a.workloadCount || a.name.localeCompare(b.name));
+  }, [k8sClusterServiceMap, k8sClusterMapResult.data]);
 
   // K8s Cluster blast radius computation
   const k8sClusterBlastRadiusData = useMemo(() => {

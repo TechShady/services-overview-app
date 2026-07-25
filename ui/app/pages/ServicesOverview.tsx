@@ -2303,6 +2303,13 @@ export const ServicesOverview = () => {
   const [depsImpactSubTab, setDepsImpactSubTab] = useState(0);
   const [flameGraphService, setFlameGraphService] = useState<string>("");
 
+  // Lazy-loading: track which tabs/sub-tabs have ever been activated.
+  // Queries are gated on these sets so they fire once on first visit and
+  // then keep their data alive (no NOOP swap on navigate-away).
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set(["Overview"]));
+  const [visitedSummarySubTabs, setVisitedSummarySubTabs] = useState<Set<number>>(() => new Set([0]));
+  const [visitedPerformanceSubTabs, setVisitedPerformanceSubTabs] = useState<Set<number>>(() => new Set([0]));
+
   // Settings state
   const [topN, setTopN] = useState<number>(DEFAULT_TOP_N);
   const [chartTopN, setChartTopN] = useState<number>(DEFAULT_CHART_TOP_N);
@@ -2324,10 +2331,15 @@ export const ServicesOverview = () => {
   const [draggedTabIdx, setDraggedTabIdx] = useState<number | null>(null);
 
   // Sub-tab visibility & ordering
+  const SPAN_SUB_TABS: Record<string, string[]> = {
+    "Summary Details": ["Request Details"],
+    "Performance": ["Apdex", "Flame Graph"],
+  };
+
   const defaultSubTabVisibility: Record<string, Record<string, boolean>> = useMemo(() => {
     const m: Record<string, Record<string, boolean>> = {};
     for (const [parent, subs] of Object.entries(SUB_TAB_KEYS)) {
-      m[parent] = Object.fromEntries(subs.map(s => [s, true]));
+      m[parent] = Object.fromEntries(subs.map(s => [s, !(SPAN_SUB_TABS[parent]?.includes(s))]));
     }
     return m;
   }, []);
@@ -2464,12 +2476,31 @@ export const ServicesOverview = () => {
     }
   }, [savedSubTabOrder.data]);
 
+  const [spanConfirmPending, setSpanConfirmPending] = useState<{ parent: string; sub: string } | null>(null);
+
   const toggleSubTab = (parent: string, sub: string) => {
+    const currentlyVisible = subTabVisibility[parent]?.[sub] ?? true;
+    const isSpanSubTab = SPAN_SUB_TABS[parent]?.includes(sub);
+    if (!currentlyVisible && isSpanSubTab) {
+      setSpanConfirmPending({ parent, sub });
+      return;
+    }
     setSubTabVisibility(prev => {
-      const next = { ...prev, [parent]: { ...prev[parent], [sub]: !(prev[parent]?.[sub] ?? true) } };
+      const next = { ...prev, [parent]: { ...prev[parent], [sub]: !currentlyVisible } };
       saveAppState({ key: SUB_TAB_STATE_KEY, body: { value: JSON.stringify(next) } });
       return next;
     });
+  };
+
+  const confirmEnableSpanSubTab = () => {
+    if (!spanConfirmPending) return;
+    const { parent, sub } = spanConfirmPending;
+    setSubTabVisibility(prev => {
+      const next = { ...prev, [parent]: { ...prev[parent], [sub]: true } };
+      saveAppState({ key: SUB_TAB_STATE_KEY, body: { value: JSON.stringify(next) } });
+      return next;
+    });
+    setSpanConfirmPending(null);
   };
 
   const handleSubTabDragOver = (parent: string, idx: number) => {
@@ -2582,6 +2613,19 @@ export const ServicesOverview = () => {
   const [incidentCommandMode, setIncidentCommandMode] = useState<"stabilize" | "mitigate" | "recovery">("stabilize");
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const activeTabKey = visibleTabs[activeTabIndex] as TabKey | undefined;
+
+  // Track which tabs/sub-tabs have ever been activated so queries can lazy-load.
+  React.useEffect(() => {
+    if (activeTabKey) setVisitedTabs(prev => prev.has(activeTabKey) ? prev : new Set([...prev, activeTabKey]));
+  }, [activeTabKey]);
+  React.useEffect(() => {
+    if (activeTabKey === "Summary Details")
+      setVisitedSummarySubTabs(prev => prev.has(summarySubTab) ? prev : new Set([...prev, summarySubTab]));
+  }, [activeTabKey, summarySubTab]);
+  React.useEffect(() => {
+    if (activeTabKey === "Performance")
+      setVisitedPerformanceSubTabs(prev => prev.has(performanceSubTab) ? prev : new Set([...prev, performanceSubTab]));
+  }, [activeTabKey, performanceSubTab]);
   const [sloTarget, setSloTarget] = useState<number>(DEFAULT_SLO_TARGET);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [newRuleMetric, setNewRuleMetric] = useState<string>("FailureRate");
@@ -2643,7 +2687,7 @@ export const ServicesOverview = () => {
   // --- Queries ---
 
   // Overview: Services Health
-  const healthResult = useDql({ query: servicesHealthQuery(problemsLookbackHours) }, refetchOpts);
+  const healthResult = useDql({ query: visitedTabs.has("Overview") ? servicesHealthQuery(problemsLookbackHours) : NOOP_QUERY }, refetchOpts);
   const honeycombData: HoneycombTileNumericData[] = useMemo(() => {
     if (!healthResult.data?.records) return [];
     return healthResult.data.records.map((r) => ({
@@ -2653,7 +2697,7 @@ export const ServicesOverview = () => {
   }, [healthResult.data]);
 
   // Overview: Problems
-  const problemsResult = useDql({ query: problemsQuery() }, refetchOpts);
+  const problemsResult = useDql({ query: visitedTabs.has("Overview") ? problemsQuery() : NOOP_QUERY }, refetchOpts);
   const problemsData = useMemo(() => {
     if (!problemsResult.data?.records) return [];
     return problemsResult.data.records.map((r) => ({
@@ -2724,9 +2768,10 @@ export const ServicesOverview = () => {
     return { totalRequests, totalFailures, avgLatency, avgP90, errorRate, activeProblems, affectedServices, sloBreaches };
   }, [svcDetailsPrevData, problemsPrevSummaryResult.data, sloTarget]);
 
-  // Request Details
+  // Request Details — lazy: Summary Details > Request Details sub-tab (index 1)
+  const summaryRequestDetailsEver = visitedTabs.has("Summary Details") && visitedSummarySubTabs.has(1);
   const reqDetailsResult = useDql({
-    query: requestDetailsQuery(topN, tf),
+    query: summaryRequestDetailsEver ? requestDetailsQuery(topN, tf) : NOOP_QUERY,
   }, refetchOpts);
   const reqDetailsData = useMemo(() => {
     if (!reqDetailsResult.data?.records) return [];
@@ -2746,65 +2791,73 @@ export const ServicesOverview = () => {
     }));
   }, [reqDetailsResult.data]);
 
-  // Service metric charts
-  const reqTotalResult = useDql({ query: requestsTotalQuery(chartTopN, tf) }, refetchOpts);
-  const latP50Result = useDql({ query: latencyP50Query(chartTopN, tf) }, refetchOpts);
-  const latP90Result = useDql({ query: latencyP90Query(chartTopN, tf) }, refetchOpts);
-  const failedReqResult = useDql({ query: failedRequestsQuery(chartTopN, tf) }, refetchOpts);
-  const failRateResult = useDql({ query: failureRateQuery(chartTopN, tf) }, refetchOpts);
-  const http5xxResult = useDql({ query: http5xxQuery(chartTopN, tf) }, refetchOpts);
-  const http4xxResult = useDql({ query: http4xxQuery(chartTopN, tf) }, refetchOpts);
-  const statusCodeResult = useDql({ query: requestsByStatusCodeQuery(chartTopN, tf) }, refetchOpts);
+  // Service metric charts — lazy: Metrics tab
+  const metricsTabEver = visitedTabs.has("Metrics");
+  const reqTotalResult = useDql({ query: metricsTabEver ? requestsTotalQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const latP50Result = useDql({ query: metricsTabEver ? latencyP50Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const latP90Result = useDql({ query: metricsTabEver ? latencyP90Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const failedReqResult = useDql({ query: metricsTabEver ? failedRequestsQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const failRateResult = useDql({ query: metricsTabEver ? failureRateQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const http5xxResult = useDql({ query: metricsTabEver ? http5xxQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const http4xxResult = useDql({ query: metricsTabEver ? http4xxQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const statusCodeResult = useDql({ query: metricsTabEver ? requestsByStatusCodeQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
 
-  // Process metric charts
-  const procCpuResult = useDql({ query: processCpuQuery(chartTopN, tf) }, refetchOpts);
-  const procMemPctResult = useDql({ query: processMemoryPercentQuery(chartTopN, tf) }, refetchOpts);
-  const procMemUsedResult = useDql({ query: processMemoryUsedQuery(chartTopN, tf) }, refetchOpts);
-  const procGcResult = useDql({ query: processGcTimeQuery(chartTopN, tf) }, refetchOpts);
+  // Process metric charts — lazy: Metrics tab
+  const procCpuResult = useDql({ query: metricsTabEver ? processCpuQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const procMemPctResult = useDql({ query: metricsTabEver ? processMemoryPercentQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const procMemUsedResult = useDql({ query: metricsTabEver ? processMemoryUsedQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const procGcResult = useDql({ query: metricsTabEver ? processGcTimeQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
 
-  // K8s charts (limited for chart display)
-  const k8sCpuResult = useDql({ query: k8sCpuQuery(chartTopN, tf) }, refetchOpts);
-  const k8sMemResult = useDql({ query: k8sMemoryQuery(chartTopN, tf) }, refetchOpts);
+  // K8s charts (limited for chart display) — lazy: Metrics tab
+  const k8sCpuResult = useDql({ query: metricsTabEver ? k8sCpuQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const k8sMemResult = useDql({ query: metricsTabEver ? k8sMemoryQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
 
-  // K8s right-sizing (need all workloads)
-  const k8sCpuAllResult = useDql({ query: k8sCpuQuery(1000, tf) }, refetchOpts);
-  const k8sMemAllResult = useDql({ query: k8sMemoryQuery(1000, tf) }, refetchOpts);
-  const k8sCpuAllPrevResult = useDql({ query: k8sCpuQuery(1000, prevTf) }, refetchOpts);
-  const k8sMemAllPrevResult = useDql({ query: k8sMemoryQuery(1000, prevTf) }, refetchOpts);
+  // K8s right-sizing — lazy: Capacity & Sizing tab
+  const capacityTabEver = visitedTabs.has("Capacity & Sizing");
+  const k8sCpuAllResult = useDql({ query: capacityTabEver ? k8sCpuQuery(1000, tf) : NOOP_QUERY }, refetchOpts);
+  const k8sMemAllResult = useDql({ query: capacityTabEver ? k8sMemoryQuery(1000, tf) : NOOP_QUERY }, refetchOpts);
+  const k8sCpuAllPrevResult = useDql({ query: capacityTabEver ? k8sCpuQuery(1000, prevTf) : NOOP_QUERY }, refetchOpts);
+  const k8sMemAllPrevResult = useDql({ query: capacityTabEver ? k8sMemoryQuery(1000, prevTf) : NOOP_QUERY }, refetchOpts);
 
-  // Host right-sizing (need all hosts, not just chartTopN)
-  const hostCpuResult = useDql({ query: hostCpuQuery(1000, tf) }, refetchOpts);
-  const hostMemResult = useDql({ query: hostMemoryQuery(1000, tf) }, refetchOpts);
-  const hostCpuPrevResult = useDql({ query: hostCpuQuery(1000, prevTf) }, refetchOpts);
-  const hostMemPrevResult = useDql({ query: hostMemoryQuery(1000, prevTf) }, refetchOpts);
+  // Host right-sizing — lazy: Capacity & Sizing tab
+  const hostCpuResult = useDql({ query: capacityTabEver ? hostCpuQuery(1000, tf) : NOOP_QUERY }, refetchOpts);
+  const hostMemResult = useDql({ query: capacityTabEver ? hostMemoryQuery(1000, tf) : NOOP_QUERY }, refetchOpts);
+  const hostCpuPrevResult = useDql({ query: capacityTabEver ? hostCpuQuery(1000, prevTf) : NOOP_QUERY }, refetchOpts);
+  const hostMemPrevResult = useDql({ query: capacityTabEver ? hostMemoryQuery(1000, prevTf) : NOOP_QUERY }, refetchOpts);
 
-  // Database right-sizing (need all databases)
-  const databaseResult = useDql({ query: databaseDetailsQuery(1000, tf) }, refetchOpts);
+  // Database right-sizing — lazy: Capacity & Sizing tab
+  const databaseResult = useDql({ query: capacityTabEver ? databaseDetailsQuery(1000, tf) : NOOP_QUERY }, refetchOpts);
 
-  // Enhancement queries
-  const deploymentsResult = useDql({ query: deploymentEventsQuery(tf) }, refetchOpts);
-  const deploymentsPrevResult = useDql({ query: deploymentEventsQuery(prevTf) }, refetchOpts);
-  const changeImpactResult = useDql({ query: changeImpactMetricsQuery(tf) }, refetchOpts);
-  const changeImpactPrevResult = useDql({ query: changeImpactMetricsQuery(prevTf) }, refetchOpts);
-  const dependenciesResult = useDql({ query: serviceDependenciesQuery() }, refetchOpts);
-  const hostServiceMapResult = useDql({ query: hostServiceMapQuery() }, refetchOpts);
-  const k8sWorkloadServiceMapResult = useDql({ query: k8sWorkloadServiceMapQuery() }, refetchOpts);
-  const k8sClusterWorkloadMapResult = useDql({ query: k8sClusterWorkloadMapQuery() }, refetchOpts);
-  const k8sNodeWorkloadMapResult = useDql({ query: k8sNodeWorkloadMapQuery() }, refetchOpts);
-  const k8sNamespaceWorkloadMapResult = useDql({ query: k8sNamespaceWorkloadMapQuery() }, refetchOpts);
-  const k8sPodWorkloadMapResult = useDql({ query: k8sPodWorkloadMapQuery() }, refetchOpts);
-  const k8sContainerPodWorkloadMapResult = useDql({ query: k8sContainerPodWorkloadMapQuery() }, refetchOpts);
+  // Enhancement queries — lazy per tab
+  const incidentsTabEver = visitedTabs.has("Incidents & Changes");
+  const depsTabEver = visitedTabs.has("Dependencies & Impact");
+  const reliabilityTabEver = visitedTabs.has("Reliability");
+  const detectionTabEver = visitedTabs.has("Detection & Analysis");
+  const performanceTabEver = visitedTabs.has("Performance");
+  const perfApdexEver = performanceTabEver && visitedPerformanceSubTabs.has(1);
+
+  const deploymentsResult = useDql({ query: incidentsTabEver ? deploymentEventsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const deploymentsPrevResult = useDql({ query: incidentsTabEver ? deploymentEventsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
+  const changeImpactResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const changeImpactPrevResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
+  const dependenciesResult = useDql({ query: depsTabEver ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
+  const hostServiceMapResult = useDql({ query: depsTabEver ? hostServiceMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sWorkloadServiceMapResult = useDql({ query: depsTabEver ? k8sWorkloadServiceMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sClusterWorkloadMapResult = useDql({ query: depsTabEver ? k8sClusterWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sNodeWorkloadMapResult = useDql({ query: depsTabEver ? k8sNodeWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sNamespaceWorkloadMapResult = useDql({ query: depsTabEver ? k8sNamespaceWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sPodWorkloadMapResult = useDql({ query: depsTabEver ? k8sPodWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sContainerPodWorkloadMapResult = useDql({ query: depsTabEver ? k8sContainerPodWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
   const svcEntityTypesResult = useDql({ query: serviceEntityTypesQuery() }, refetchOpts);
-  const closedProblemsResult = useDql({ query: closedProblemsQuery(tf) }, refetchOpts);
-  const closedProblemsPrevResult = useDql({ query: closedProblemsQuery(prevTf) }, refetchOpts);
-  const anomalyCurrentResult = useDql({ query: anomalyCurrentQuery(tf) }, refetchOpts);
-  const anomalyBaselineResult = useDql({ query: anomalyBaselineQuery(prevTf) }, refetchOpts);
-  const apdexResult = useDql({ query: apdexQuery(tf, apdexT) }, refetchOpts);
+  const closedProblemsResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const closedProblemsPrevResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
+  const anomalyCurrentResult = useDql({ query: detectionTabEver ? anomalyCurrentQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const anomalyBaselineResult = useDql({ query: detectionTabEver ? anomalyBaselineQuery(prevTf) : NOOP_QUERY }, refetchOpts);
+  const apdexResult = useDql({ query: perfApdexEver ? apdexQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
 
-  // Flame Graph — lazy-loaded only when the tab is active and a service is selected
-  const flameGraphActive = activeTabKey === "Performance" && performanceSubTab === 2;
+  // Flame Graph — fires once sub-tab 2 has been visited and a service is selected
   const flameGraphResult = useDql({
-    query: flameGraphActive && flameGraphService ? flameGraphQuery(flameGraphService, tf) : NOOP_QUERY,
+    query: visitedPerformanceSubTabs.has(2) && flameGraphService ? flameGraphQuery(flameGraphService, tf) : NOOP_QUERY,
   }, refetchOpts);
   const flameGraphData = useMemo(() => {
     if (!flameGraphResult.data?.records) return [];
@@ -2826,45 +2879,41 @@ export const ServicesOverview = () => {
 
   // Service Metrics — Percentile comparison mode (P75, P99 timeseries)
   const [percentileMode, setPercentileMode] = useState(false);
-  const svcMetricsActive = activeTabKey === "Metrics";
-  const latP75Result = useDql({ query: svcMetricsActive && percentileMode ? latencyP75Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const latP99TsResult = useDql({ query: svcMetricsActive && percentileMode ? latencyP99TimeseriesQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const latP75Result = useDql({ query: metricsTabEver && percentileMode ? latencyP75Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const latP99TsResult = useDql({ query: metricsTabEver && percentileMode ? latencyP99TimeseriesQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
   const [forecastMode, setForecastMode] = useState(false);
   const [forecastMetric, setForecastMetric] = useState<string>("requests");
 
   // Process restart events
-  const procMetricsActive = activeTabKey === "Metrics";
-  const procRestartResult = useDql({ query: procMetricsActive ? processRestartEventsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const procRestartResult = useDql({ query: metricsTabEver ? processRestartEventsQuery(tf) : NOOP_QUERY }, refetchOpts);
 
   // K8s enhancements
-  const k8sActive = activeTabKey === "Metrics";
-  const k8sHpaResult = useDql({ query: k8sActive ? k8sHpaEventsQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sPodEvictionResult = useDql({ query: k8sActive ? k8sPodEvictionQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sNodePressureResult = useDql({ query: k8sActive ? k8sNodePressureQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sNamespaceRollupResult = useDql({ query: k8sActive ? k8sNamespaceRollupQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sHpaResult = useDql({ query: metricsTabEver ? k8sHpaEventsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sPodEvictionResult = useDql({ query: metricsTabEver ? k8sPodEvictionQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sNodePressureResult = useDql({ query: metricsTabEver ? k8sNodePressureQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sNamespaceRollupResult = useDql({ query: metricsTabEver ? k8sNamespaceRollupQuery(tf) : NOOP_QUERY }, refetchOpts);
 
   // Right-Sizing K8s sub-tab queries
-  const rightSizingActive = activeTabKey === "Capacity & Sizing";
-  const k8sClustersResult = useDql({ query: rightSizingActive ? k8sClustersQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sNodesResult = useDql({ query: rightSizingActive ? k8sNodesQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sNamespacesResult = useDql({ query: rightSizingActive ? k8sNamespacesQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sServicesResult = useDql({ query: rightSizingActive ? k8sServicesQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sPodsResult = useDql({ query: rightSizingActive ? k8sPodsQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sContainersResult = useDql({ query: rightSizingActive ? k8sContainersQuery(tf) : NOOP_QUERY }, refetchOpts);
-  const k8sWorkloadMapResult = useDql({ query: (rightSizingActive || activeTabKey === "Dependencies & Impact") ? k8sWorkloadEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sClusterMapResult = useDql({ query: (rightSizingActive || activeTabKey === "Dependencies & Impact") ? k8sClusterEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sNodeMapResult = useDql({ query: (rightSizingActive || activeTabKey === "Dependencies & Impact") ? k8sNodeEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sNamespaceMapResult = useDql({ query: (rightSizingActive || activeTabKey === "Dependencies & Impact") ? k8sNamespaceEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sServiceMapResult = useDql({ query: rightSizingActive ? k8sServiceEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sPodMapResult = useDql({ query: (rightSizingActive || activeTabKey === "Dependencies & Impact") ? k8sPodEntityMapQuery() : NOOP_QUERY }, refetchOpts);
-  const k8sContainerMapResult = useDql({ query: rightSizingActive ? k8sContainerEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sClustersResult = useDql({ query: capacityTabEver ? k8sClustersQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sNodesResult = useDql({ query: capacityTabEver ? k8sNodesQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sNamespacesResult = useDql({ query: capacityTabEver ? k8sNamespacesQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sServicesResult = useDql({ query: capacityTabEver ? k8sServicesQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sPodsResult = useDql({ query: capacityTabEver ? k8sPodsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sContainersResult = useDql({ query: capacityTabEver ? k8sContainersQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const k8sMapEver = capacityTabEver || depsTabEver;
+  const k8sWorkloadMapResult = useDql({ query: k8sMapEver ? k8sWorkloadEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sClusterMapResult = useDql({ query: k8sMapEver ? k8sClusterEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sNodeMapResult = useDql({ query: k8sMapEver ? k8sNodeEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sNamespaceMapResult = useDql({ query: k8sMapEver ? k8sNamespaceEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sServiceMapResult = useDql({ query: capacityTabEver ? k8sServiceEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sPodMapResult = useDql({ query: k8sMapEver ? k8sPodEntityMapQuery() : NOOP_QUERY }, refetchOpts);
+  const k8sContainerMapResult = useDql({ query: capacityTabEver ? k8sContainerEntityMapQuery() : NOOP_QUERY }, refetchOpts);
 
   // Multi-window burn rate (1h, 6h, 24h, 72h) for SLO tab
-  const sloActive = activeTabKey === "Reliability";
-  const burnRate1hResult = useDql({ query: sloActive ? burnRateWindowQuery(1) : NOOP_QUERY }, refetchOpts);
-  const burnRate6hResult = useDql({ query: sloActive ? burnRateWindowQuery(6) : NOOP_QUERY }, refetchOpts);
-  const burnRate24hResult = useDql({ query: sloActive ? burnRateWindowQuery(24) : NOOP_QUERY }, refetchOpts);
-  const burnRate72hResult = useDql({ query: sloActive ? burnRateWindowQuery(72) : NOOP_QUERY }, refetchOpts);
+  const burnRate1hResult = useDql({ query: reliabilityTabEver ? burnRateWindowQuery(1) : NOOP_QUERY }, refetchOpts);
+  const burnRate6hResult = useDql({ query: reliabilityTabEver ? burnRateWindowQuery(6) : NOOP_QUERY }, refetchOpts);
+  const burnRate24hResult = useDql({ query: reliabilityTabEver ? burnRateWindowQuery(24) : NOOP_QUERY }, refetchOpts);
+  const burnRate72hResult = useDql({ query: reliabilityTabEver ? burnRateWindowQuery(72) : NOOP_QUERY }, refetchOpts);
 
   // Dependencies tab state
   const [hideHealthyDeps, setHideHealthyDeps] = useState(false);
@@ -2892,14 +2941,15 @@ export const ServicesOverview = () => {
     }
   }, [savedCustomDims.data]);
 
-  // ─── Batch 4: Endpoint Heatmap enhancements ───
+  // ─── Batch 4: Endpoint Heatmap enhancements — lazy: Performance > Endpoint Heatmap (sub-tab 0) ───
   const [heatmapMetric, setHeatmapMetric] = useState<"errorRate" | "P50" | "P90" | "P99">("errorRate");
-  const endpointHourlyResult = useDql({ query: endpointHourlyHeatmapQuery(tf) }, refetchOpts);
-  const endpointPrevWeekResult = useDql({ query: endpointPrevWeekHeatmapQuery() }, refetchOpts);
+  const perfHeatmapEver = performanceTabEver && visitedPerformanceSubTabs.has(0);
+  const endpointHourlyResult = useDql({ query: perfHeatmapEver ? endpointHourlyHeatmapQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const endpointPrevWeekResult = useDql({ query: perfHeatmapEver ? endpointPrevWeekHeatmapQuery() : NOOP_QUERY }, refetchOpts);
 
-  // ─── Batch 4: MTTR enhancements ───
-  const mttrAllSvcsResult = useDql({ query: mttrAllServicesQuery() }, refetchOpts);
-  const mttrRepeatResult = useDql({ query: mttrRepeatOffendersQuery() }, refetchOpts);
+  // ─── Batch 4: MTTR enhancements — lazy: Reliability tab ───
+  const mttrAllSvcsResult = useDql({ query: reliabilityTabEver ? mttrAllServicesQuery() : NOOP_QUERY }, refetchOpts);
+  const mttrRepeatResult = useDql({ query: reliabilityTabEver ? mttrRepeatOffendersQuery() : NOOP_QUERY }, refetchOpts);
 
   // ─── Batch 4: Anomaly Detection enhancements ───
   const ANOMALY_SUPPRESS_KEY = "svc-anomaly-suppressions";
@@ -2922,12 +2972,12 @@ export const ServicesOverview = () => {
   }, [savedTimelineNotes.data]);
   const [timelineGroupByRoot, setTimelineGroupByRoot] = useState(false);
 
-  // ─── Batch 5: Change Impact — detailed metrics for cards ───
-  const changeImpactDetailedResult = useDql({ query: changeImpactDetailedQuery(tf) }, refetchOpts);
+  // ─── Batch 5: Change Impact — detailed metrics for cards — lazy: Incidents & Changes tab ───
+  const changeImpactDetailedResult = useDql({ query: incidentsTabEver ? changeImpactDetailedQuery(tf) : NOOP_QUERY }, refetchOpts);
 
-  // ─── Batch 5: Apdex — geo + cohort segmentation ───
-  const apdexGeoResult = useDql({ query: apdexGeoQuery(tf, apdexT) }, refetchOpts);
-  const apdexCohortResult = useDql({ query: apdexCohortQuery(tf, apdexT) }, refetchOpts);
+  // ─── Batch 5: Apdex — geo + cohort segmentation — lazy: Performance > Apdex (sub-tab 1) ───
+  const apdexGeoResult = useDql({ query: perfApdexEver ? apdexGeoQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
+  const apdexCohortResult = useDql({ query: perfApdexEver ? apdexCohortQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
 
   // ─── Batch 6: Baselines — export, per-environment, violation streaks ───
   const [baselineEnvironment, setBaselineEnvironment] = useState<string>("prod");
@@ -2984,7 +3034,7 @@ export const ServicesOverview = () => {
     to: "now()",
     toType: "expression",
   }), [reliabilityTrendPeriod]);
-  const reliabilityTrendResult = useDql({ query: reliabilityTrendQuery(reliabilityTrendTf) }, refetchOpts);
+  const reliabilityTrendResult = useDql({ query: reliabilityTabEver ? reliabilityTrendQuery(reliabilityTrendTf) : NOOP_QUERY }, refetchOpts);
   const reliabilityTrendData = useMemo(() => {
     if (!reliabilityTrendResult.data?.records) return [];
     return reliabilityTrendResult.data.records.map((r: any) => ({
@@ -3028,8 +3078,8 @@ export const ServicesOverview = () => {
     return m;
   }, [ownershipResult.data]);
 
-  // Request P99 baseline (previous period for anomaly flagging)
-  const reqBaselineResult = useDql({ query: requestBaselineQuery(topN, prevTf) }, refetchOpts);
+  // Request P99 baseline — lazy: Summary Details > Request Details (sub-tab 1)
+  const reqBaselineResult = useDql({ query: summaryRequestDetailsEver ? requestBaselineQuery(topN, prevTf) : NOOP_QUERY }, refetchOpts);
   const reqBaselineMap = useMemo(() => {
     const m = new Map<string, number>();
     reqBaselineResult.data?.records?.forEach((r: any) => {
@@ -3041,8 +3091,8 @@ export const ServicesOverview = () => {
     return m;
   }, [reqBaselineResult.data]);
 
-  // Request error category breakdown
-  const reqErrorBreakdownResult = useDql({ query: requestErrorBreakdownQuery(topN, tf) }, refetchOpts);
+  // Request error category breakdown — lazy: Summary Details > Request Details (sub-tab 1)
+  const reqErrorBreakdownResult = useDql({ query: summaryRequestDetailsEver ? requestErrorBreakdownQuery(topN, tf) : NOOP_QUERY }, refetchOpts);
   const reqErrorBreakdownMap = useMemo(() => {
     const m = new Map<string, { "4xx": number; "5xx": number; timeout: number; other: number }>();
     reqErrorBreakdownResult.data?.records?.forEach((r: any) => {
@@ -3061,12 +3111,12 @@ export const ServicesOverview = () => {
     return m;
   }, [reqErrorBreakdownResult.data]);
 
-  // Comparison mode — previous period (no-op when disabled)
-  const metricsCompare = compareMode && activeTabKey === "Metrics";
-  const apdexCompare = compareMode && activeTabKey === "Performance";
-  const scorecardCompare = compareMode && activeTabKey === "Quality";
+  // Comparison mode — previous period (no-op when disabled or tab not yet visited)
+  const metricsCompare = compareMode && metricsTabEver;
+  const apdexCompare = compareMode && perfApdexEver;
+  const scorecardCompare = compareMode && visitedTabs.has("Quality");
   const reqTotalPrev = useDql({ query: metricsCompare ? requestsTotalPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const reqTotalPrevAlways = useDql({ query: requestsTotalPrevQuery(chartTopN, prevTf) }, refetchOpts);
+  const reqTotalPrevAlways = useDql({ query: metricsTabEver ? requestsTotalPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const latP50Prev = useDql({ query: metricsCompare ? latencyP50PrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const latP90Prev = useDql({ query: metricsCompare ? latencyP90PrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const failedReqPrev = useDql({ query: metricsCompare ? failedRequestsPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
@@ -3080,7 +3130,7 @@ export const ServicesOverview = () => {
   const procGcPrev = useDql({ query: metricsCompare ? processGcTimePrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const k8sCpuPrev = useDql({ query: metricsCompare ? k8sCpuPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const k8sMemPrev = useDql({ query: metricsCompare ? k8sMemoryPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const apdexPrevResult = useDql({ query: apdexPrevQuery(prevTf, apdexT) }, refetchOpts);
+  const apdexPrevResult = useDql({ query: apdexCompare ? apdexPrevQuery(prevTf, apdexT) : NOOP_QUERY }, refetchOpts);
   const scorecardPrevResult = useDql({ query: scorecardCompare ? scorecardPrevQuery(topN, prevTf) : NOOP_QUERY }, refetchOpts);
 
   // Convert timeseries data for charts using Strato's built-in converter
@@ -7371,6 +7421,27 @@ export const ServicesOverview = () => {
               Reset All Tab Order
             </button>
           </div>
+        </Flex>
+      </Modal>
+
+      {/* ---- Span Sub-Tab Confirmation Dialog ---- */}
+      <Modal
+        title="This sub-tab queries spans"
+        show={!!spanConfirmPending}
+        onDismiss={() => setSpanConfirmPending(null)}
+        size="small"
+        footer={
+          <Flex justifyContent="flex-end" gap={8}>
+            <Button variant="default" onClick={() => setSpanConfirmPending(null)}>Cancel</Button>
+            <Button variant="emphasized" onClick={confirmEnableSpanSubTab}>Enable</Button>
+          </Flex>
+        }
+      >
+        <Flex flexDirection="column" gap={12} padding={16}>
+          <Text>
+            <strong>{spanConfirmPending?.sub}</strong> uses <code>fetch spans</code> queries, which scan distributed trace data and can be expensive depending on your trace volume and time range.
+          </Text>
+          <Text>Enable this sub-tab anyway?</Text>
         </Flex>
       </Modal>
 

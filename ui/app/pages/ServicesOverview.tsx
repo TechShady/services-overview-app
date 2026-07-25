@@ -124,6 +124,8 @@ import {
   reliabilityTrendQuery,
   problemsPrevSummaryQuery,
   flameGraphQuery,
+  cloudRegionClusterQuery,
+  cloudRegionHostQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -199,7 +201,7 @@ const SUB_TAB_ORDER_STATE_KEY = "svc-subtab-order";
 
 // Sub-sub-tab definitions (third level — e.g. modes within Blast Radius)
 const SUB_SUB_TAB_KEYS: Record<string, readonly string[]> = {
-  "Blast Radius": ["Services", "Hosts", "Workloads", "Clusters", "Namespaces", "Nodes", "Pods", "Containers"],
+  "Blast Radius": ["Services", "Hosts", "Workloads", "Clusters", "Namespaces", "Nodes", "Pods", "Containers", "Cloud Region"],
   "Right-Sizing": ["Hosts", "Databases", "K8s Workloads", "K8s Clusters", "K8s Nodes", "K8s Namespaces", "K8s Services", "K8s Pods", "K8s Containers"],
 } as const;
 const SUB_SUB_TAB_STATE_KEY = "svc-subsubtab-visibility";
@@ -209,7 +211,7 @@ const SUB_SUB_TAB_ORDER_STATE_KEY = "svc-subsubtab-order";
 const BLAST_RADIUS_MODE_MAP: Record<string, string> = {
   "Services": "services", "Hosts": "hosts", "Workloads": "k8s",
   "Clusters": "clusters", "Namespaces": "namespaces", "Nodes": "nodes",
-  "Pods": "pods", "Containers": "containers",
+  "Pods": "pods", "Containers": "containers", "Cloud Region": "cloud-region",
 };
 
 // Map Right-Sizing sub-sub-tab display name to rightSizingSubTab key
@@ -1606,9 +1608,38 @@ function analyzeWhatIf(svcDetailsData: any[], reqDetailsData: any[]): AIInsights
   return { summary, insights, recommendations: recs };
 }
 
-function analyzeBlastRadius(data: any, mode: "services" | "hosts" | "k8s" | "clusters" | "nodes" | "namespaces" | "pods" | "containers", hostData: any, k8sData?: any, clusterData?: any, nodeData?: any, namespaceData?: any, podData?: any, containerData?: any): AIInsightsData {
+function analyzeBlastRadius(data: any, mode: "services" | "hosts" | "k8s" | "clusters" | "nodes" | "namespaces" | "pods" | "containers" | "cloud-region", hostData: any, k8sData?: any, clusterData?: any, nodeData?: any, namespaceData?: any, podData?: any, containerData?: any, cloudRegionData?: any): AIInsightsData {
   const insights: InsightItem[] = [];
   const recs: RecommendationItem[] = [];
+
+  // ─── Cloud Region Mode ───
+  if (mode === "cloud-region") {
+    if (!cloudRegionData?.region) {
+      return {
+        summary: "Cloud Region Blast Radius mode: Select a cloud region to simulate a full regional outage — every cluster and host in that region goes down simultaneously. The simulator then runs unbounded BFS through your service dependency graph to find all services cascade-impacted outside the region. Requires cloud provider integration (AWS, Azure, or GCP) to populate region metadata on Kubernetes clusters and hosts.",
+        insights: [
+          { severity: "info", icon: "🌍", text: "Select a cloud region to begin regional outage simulation." },
+          { severity: "info", icon: "☸️", text: "All clusters and hosts in the region are treated as failed simultaneously." },
+          { severity: "info", icon: "🌊", text: "Full multi-tier BFS propagates impact to all upstream callers, not just direct neighbors." },
+          { severity: "info", icon: "⚠️", text: "No cloud region data? Ensure your AWS/Azure/GCP integration is configured in Dynatrace Settings → Cloud and virtualization." },
+        ],
+        recommendations: [{ impact: "high" as const, text: "Configure your cloud provider in Dynatrace Settings → Cloud and virtualization to populate region metadata on clusters and hosts." }],
+      };
+    }
+    const directCount = cloudRegionData.directServices?.length ?? 0;
+    const cascadeCount = cloudRegionData.affectedExternalServices?.length ?? 0;
+    const clusterCount = cloudRegionData.clusters?.length ?? 0;
+    const hostCount = cloudRegionData.hosts?.length ?? 0;
+    const totalImpact = directCount + cascadeCount;
+    const severity: InsightSeverity = totalImpact > 50 ? "critical" : totalImpact > 20 ? "warning" : totalImpact > 0 ? "info" : "good";
+    if (directCount > 0) insights.push({ severity, icon: "🌍", text: `Regional outage of ${cloudRegionData.region} would directly take down ${directCount} service${directCount !== 1 ? "s" : ""} across ${clusterCount} cluster${clusterCount !== 1 ? "s" : ""} and ${hostCount} host${hostCount !== 1 ? "s" : ""}.` });
+    if (cascadeCount > 0) insights.push({ severity: "critical", icon: "🌊", text: `${cascadeCount} additional service${cascadeCount !== 1 ? "s" : ""} would be cascade-impacted by upstream call failures — full multi-tier BFS propagation.` });
+    if (cascadeCount === 0 && directCount > 0) insights.push({ severity: "good", icon: "✅", text: "No external services call into this region's services — blast radius is contained within the region." });
+    if (directCount === 0) insights.push({ severity: "info", icon: "ℹ️", text: "No services mapped to entities in this region. Ensure K8s workload-to-service monitoring is active." });
+    recs.push({ impact: "high" as const, text: `Multi-region redundancy: Services in ${cloudRegionData.region} should have active-active or active-passive counterparts in at least one other region.` });
+    if (cascadeCount > 0) recs.push({ impact: "high" as const, text: `Add circuit breakers to the ${cascadeCount} cascade-impacted services so they degrade gracefully when this region is unavailable.` });
+    return { summary: `Cloud Region Blast Radius: ${cloudRegionData.region} outage → ${directCount} services directly down, ${cascadeCount} cascade-impacted (${totalImpact} total).`, insights, recommendations: recs };
+  }
 
   // ─── K8s Containers Mode ───
   if (mode === "containers") {
@@ -1835,7 +1866,7 @@ function analyzeBlastRadius(data: any, mode: "services" | "hosts" | "k8s" | "clu
   // ─── Service Mode (existing logic) ───
   if (!data.target) {
     return {
-      summary: "The Blast Radius tab is your command center for failure impact analysis across services and infrastructure layers: ⚙️ Services, 🖥️ Hosts, ☸️ K8s Workloads, 🌐 K8s Clusters, 📦 K8s Namespaces, 🖥️ K8s Nodes, 🫛 K8s Pods, and 📦 K8s Containers. In Services mode, impact is now probabilistic across all tiers (not just direct neighbors): each hop compounds failure probability (for example 50% then 50% becomes 25%). You can choose weighting mode (Smart guess, Equal split, or Real edge %) based on telemetry fidelity. Start by selecting a target from the dropdown above.",
+      summary: "The Blast Radius tab is your command center for failure impact analysis across services and infrastructure layers: ⚙️ Services, 🖥️ Hosts, ☸️ K8s Workloads, 🌐 K8s Clusters, 📦 K8s Namespaces, 🖥️ K8s Nodes, 🫛 K8s Pods, 📦 K8s Containers, and 🌍 Cloud Region. All modes (Hosts, Workloads, Clusters, and Cloud Region) now use full unbounded BFS — impact propagates across all tiers, not just direct neighbors. Cloud Region mode simulates a full regional outage across all clusters and hosts in a cloud region. In Services mode, impact is probabilistic across all tiers. Start by selecting a target from the dropdown above.",
       insights: [
         { severity: "info", icon: "📊", text: "Select a service to begin blast radius simulation." },
         { severity: "info", icon: "🧠", text: "Choose a weighting mode: Smart guess (traffic-weighted), Equal split, or Real edge % (most accurate when available)." },
@@ -2848,6 +2879,8 @@ export const ServicesOverview = () => {
   const k8sNamespaceWorkloadMapResult = useDql({ query: depsTabEver ? k8sNamespaceWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sPodWorkloadMapResult = useDql({ query: depsTabEver ? k8sPodWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sContainerPodWorkloadMapResult = useDql({ query: depsTabEver ? k8sContainerPodWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionClusterResult = useDql({ query: depsTabEver ? cloudRegionClusterQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionHostResult = useDql({ query: depsTabEver ? cloudRegionHostQuery() : NOOP_QUERY }, refetchOpts);
   const svcEntityTypesResult = useDql({ query: serviceEntityTypesQuery() }, refetchOpts);
   const closedProblemsResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const closedProblemsPrevResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
@@ -5179,10 +5212,11 @@ export const ServicesOverview = () => {
 
   // ─── Blast Radius Simulator ───
   const [blastRadiusTarget, setBlastRadiusTarget] = useState<string>("");
-  const [blastRadiusMode, setBlastRadiusMode] = useState<"services" | "hosts" | "k8s" | "clusters" | "nodes" | "namespaces" | "pods" | "containers">("services");
+  const [blastRadiusMode, setBlastRadiusMode] = useState<"services" | "hosts" | "k8s" | "clusters" | "nodes" | "namespaces" | "pods" | "containers" | "cloud-region">("services");
   const [blastRadiusHostTarget, setBlastRadiusHostTarget] = useState<string>("");
   const [blastRadiusK8sTarget, setBlastRadiusK8sTarget] = useState<string>("");
   const [blastRadiusClusterTarget, setBlastRadiusClusterTarget] = useState<string>("");
+  const [blastRadiusRegionTarget, setBlastRadiusRegionTarget] = useState<string>("");
   const [blastRadiusNodeTarget, setBlastRadiusNodeTarget] = useState<string>("");
   const [blastRadiusNamespaceTarget, setBlastRadiusNamespaceTarget] = useState<string>("");
   const [blastRadiusPodTarget, setBlastRadiusPodTarget] = useState<string>("");
@@ -5265,19 +5299,26 @@ export const ServicesOverview = () => {
       callerMap.get(d.Callee)!.add(d.Caller);
     });
 
-    // Find all services that call services on the target host (direct callers from OTHER hosts)
-    const affectedServices = new Set<string>();
+    // Full unbounded BFS — follow callers transitively across all tiers
+    const visited = new Set<string>(servicesOnHostSet);
+    let frontier = new Set<string>(servicesOnHost);
     const serviceEdges: { from: string; to: string }[] = [];
-    servicesOnHost.forEach(deadSvc => {
-      const callers = callerMap.get(deadSvc) ?? new Set();
-      callers.forEach(caller => {
-        // Only count callers NOT on the target host
-        if (!servicesOnHostSet.has(caller)) {
-          affectedServices.add(caller);
-          serviceEdges.push({ from: caller, to: deadSvc });
-        }
+    while (frontier.size > 0) {
+      const next = new Set<string>();
+      frontier.forEach(svc => {
+        (callerMap.get(svc) ?? new Set()).forEach(caller => {
+          if (!servicesOnHostSet.has(caller)) {
+            if (!visited.has(caller)) {
+              visited.add(caller);
+              next.add(caller);
+            }
+            serviceEdges.push({ from: caller, to: svc });
+          }
+        });
       });
-    });
+      frontier = next;
+    }
+    const affectedServices = new Set<string>([...visited].filter(s => !servicesOnHostSet.has(s)));
 
     // Group affected services by their host
     const remoteHostMap = new Map<string, { services: string[]; affectedServices: string[] }>();
@@ -5373,18 +5414,26 @@ export const ServicesOverview = () => {
       callerMap.get(d.Callee)!.add(d.Caller);
     });
 
-    // Find all services that call services on the target workload
-    const affectedServices = new Set<string>();
+    // Full unbounded BFS — follow callers transitively across all tiers
+    const visited = new Set<string>(servicesOnWorkloadSet);
+    let frontier = new Set<string>(servicesOnWorkload);
     const serviceEdges: { from: string; to: string }[] = [];
-    servicesOnWorkload.forEach(deadSvc => {
-      const callers = callerMap.get(deadSvc) ?? new Set();
-      callers.forEach(caller => {
-        if (!servicesOnWorkloadSet.has(caller)) {
-          affectedServices.add(caller);
-          serviceEdges.push({ from: caller, to: deadSvc });
-        }
+    while (frontier.size > 0) {
+      const next = new Set<string>();
+      frontier.forEach(svc => {
+        (callerMap.get(svc) ?? new Set()).forEach(caller => {
+          if (!servicesOnWorkloadSet.has(caller)) {
+            if (!visited.has(caller)) {
+              visited.add(caller);
+              next.add(caller);
+            }
+            serviceEdges.push({ from: caller, to: svc });
+          }
+        });
       });
-    });
+      frontier = next;
+    }
+    const affectedServices = new Set<string>([...visited].filter(s => !servicesOnWorkloadSet.has(s)));
 
     // Group affected services by their workload
     const remoteWorkloadMap = new Map<string, { services: string[]; affectedServices: string[] }>();
@@ -5442,13 +5491,17 @@ export const ServicesOverview = () => {
   const k8sClusterServiceMap = useMemo(() => {
     const records = k8sClusterWorkloadMapResult.data?.records ?? [];
     const clusterToWorkloads = new Map<string, Map<string, Set<string>>>(); // cluster → workload → services
+    // Populate clusterNameToId from the smartscape cluster entity map (has all clusters + IDs)
     const clusterNameToId = new Map<string, string>();
+    (k8sClusterMapResult.data?.records ?? []).forEach((r: any) => {
+      const name = String(r.name ?? "");
+      const id = String(r.id ?? "");
+      if (name && id) clusterNameToId.set(name, id);
+    });
     records.forEach((r: any) => {
       const cluster = String(r.clusterName ?? "");
       const wl = String(r.workloadName ?? "");
-      const cId = String(r.clusterId ?? "");
       if (!cluster || !wl) return;
-      if (cId && !clusterNameToId.has(cluster)) clusterNameToId.set(cluster, cId);
       if (!clusterToWorkloads.has(cluster)) clusterToWorkloads.set(cluster, new Map());
       const wlMap = clusterToWorkloads.get(cluster)!;
       if (!wlMap.has(wl)) wlMap.set(wl, new Set());
@@ -5457,7 +5510,7 @@ export const ServicesOverview = () => {
       if (svcs) svcs.forEach(s => wlMap.get(wl)!.add(s));
     });
     return { clusterToWorkloads, clusterNameToId };
-  }, [k8sClusterWorkloadMapResult.data, k8sWorkloadServiceMap]);
+  }, [k8sClusterWorkloadMapResult.data, k8sClusterMapResult.data, k8sWorkloadServiceMap]);
 
   // Clusters sorted by workload+service count (for dropdown)
   const blastRadiusSortedClusters = useMemo(() => {
@@ -5486,23 +5539,31 @@ export const ServicesOverview = () => {
     });
     workloadsOnCluster.sort((a, b) => b.serviceCount - a.serviceCount);
 
-    // Find external services that call into this cluster's services
+    // Full unbounded BFS outward from all cluster services
     const callerMap = new Map<string, Set<string>>();
     dependenciesData.forEach(d => {
       if (!callerMap.has(d.Callee)) callerMap.set(d.Callee, new Set());
       callerMap.get(d.Callee)!.add(d.Caller);
     });
-    const affectedExternalServices = new Set<string>();
+    const visited = new Set<string>(allServicesOnCluster);
+    let frontier = new Set<string>(allServicesOnCluster);
     const serviceEdges: { from: string; to: string }[] = [];
-    allServicesOnCluster.forEach(deadSvc => {
-      const callers = callerMap.get(deadSvc) ?? new Set();
-      callers.forEach(caller => {
-        if (!allServicesOnCluster.has(caller)) {
-          affectedExternalServices.add(caller);
-          serviceEdges.push({ from: caller, to: deadSvc });
-        }
+    while (frontier.size > 0) {
+      const next = new Set<string>();
+      frontier.forEach(svc => {
+        (callerMap.get(svc) ?? new Set()).forEach(caller => {
+          if (!allServicesOnCluster.has(caller)) {
+            if (!visited.has(caller)) {
+              visited.add(caller);
+              next.add(caller);
+            }
+            serviceEdges.push({ from: caller, to: svc });
+          }
+        });
       });
-    });
+      frontier = next;
+    }
+    const affectedExternalServices = new Set<string>([...visited].filter(s => !allServicesOnCluster.has(s)));
 
     return {
       targetCluster: blastRadiusClusterTarget,
@@ -5546,6 +5607,79 @@ export const ServicesOverview = () => {
       budgetConsumed9999: Math.min(999, (impactDurationMin / allowedDowntime9999) * 100),
     };
   }, [blastRadiusClusterTarget, k8sClusterBlastRadiusData, svcDetailsData, impactDurationMin, revenuePerRequest, timeframe]);
+
+  // ─── Cloud Region entity map ─────────────────────────────────────────────
+  const cloudRegionMap = useMemo(() => {
+    const regionToEntities = new Map<string, { clusters: string[]; hosts: string[] }>();
+    (cloudRegionClusterResult.data?.records ?? []).forEach((r: any) => {
+      const region = String(r.region ?? "");
+      const name = String(r.clusterName ?? "");
+      if (!region || !name) return;
+      if (!regionToEntities.has(region)) regionToEntities.set(region, { clusters: [], hosts: [] });
+      regionToEntities.get(region)!.clusters.push(name);
+    });
+    (cloudRegionHostResult.data?.records ?? []).forEach((r: any) => {
+      const region = String(r.region ?? "");
+      const name = String(r.hostName ?? "");
+      if (!region || !name) return;
+      if (!regionToEntities.has(region)) regionToEntities.set(region, { clusters: [], hosts: [] });
+      regionToEntities.get(region)!.hosts.push(name);
+    });
+    return regionToEntities;
+  }, [cloudRegionClusterResult.data, cloudRegionHostResult.data]);
+
+  const sortedRegions = useMemo(() =>
+    [...cloudRegionMap.entries()]
+      .map(([region, entities]) => ({ region, clusterCount: entities.clusters.length, hostCount: entities.hosts.length }))
+      .sort((a, b) => (b.clusterCount + b.hostCount) - (a.clusterCount + a.hostCount)),
+  [cloudRegionMap]);
+
+  // Cloud region blast radius simulation
+  const cloudRegionBlastRadiusData = useMemo(() => {
+    if (!blastRadiusRegionTarget || !dependenciesData.length) return null;
+    const entities = cloudRegionMap.get(blastRadiusRegionTarget);
+    if (!entities) return null;
+
+    const affectedEntityServices = new Set<string>();
+    entities.clusters.forEach(clusterName => {
+      const wlMap = k8sClusterServiceMap.clusterToWorkloads.get(clusterName);
+      if (wlMap) wlMap.forEach(svcs => svcs.forEach(s => affectedEntityServices.add(s)));
+    });
+    entities.hosts.forEach(hostName => {
+      (hostServiceMap.hostToServices.get(hostName) ?? new Set()).forEach(s => affectedEntityServices.add(s));
+    });
+
+    const callerMap = new Map<string, Set<string>>();
+    dependenciesData.forEach(d => {
+      if (!callerMap.has(d.Callee)) callerMap.set(d.Callee, new Set());
+      callerMap.get(d.Callee)!.add(d.Caller);
+    });
+
+    const visited = new Set<string>(affectedEntityServices);
+    let frontier = new Set<string>(affectedEntityServices);
+    const serviceEdges: { from: string; to: string }[] = [];
+    while (frontier.size > 0) {
+      const next = new Set<string>();
+      frontier.forEach(svc => {
+        (callerMap.get(svc) ?? new Set()).forEach(caller => {
+          if (!affectedEntityServices.has(caller)) {
+            if (!visited.has(caller)) { visited.add(caller); next.add(caller); }
+            serviceEdges.push({ from: caller, to: svc });
+          }
+        });
+      });
+      frontier = next;
+    }
+    const affectedExternalServices = [...visited].filter(s => !affectedEntityServices.has(s));
+    return {
+      region: blastRadiusRegionTarget,
+      directServices: [...affectedEntityServices],
+      affectedExternalServices,
+      serviceEdges,
+      clusters: entities.clusters,
+      hosts: entities.hosts,
+    };
+  }, [blastRadiusRegionTarget, cloudRegionMap, k8sClusterServiceMap, hostServiceMap, dependenciesData]);
 
   // ─── K8s Namespace → Workload → Service Map (for namespace blast radius) ───
   const k8sNamespaceServiceMap = useMemo(() => {
@@ -7098,7 +7232,7 @@ export const ServicesOverview = () => {
       case "Dependencies & Impact":
         switch (depsImpactSubTab) {
           case 0: return analyzeDependencies(dependenciesData);
-          case 1: return analyzeBlastRadius(blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData);
+          case 1: return analyzeBlastRadius(blastRadiusData, blastRadiusMode, hostBlastRadiusData, k8sBlastRadiusData, k8sClusterBlastRadiusData, k8sNodeBlastRadiusData, k8sNamespaceBlastRadiusData, k8sPodBlastRadiusData, k8sContainerBlastRadiusData, cloudRegionBlastRadiusData);
           default: return analyzeDependencies(dependenciesData);
         }
       case "Incidents & Changes":
@@ -8016,7 +8150,7 @@ export const ServicesOverview = () => {
           <p>Latency projections use a logarithmic contention model: at 2× load, expect ~30% latency increase; at 10× load, expect ~100% increase. Errors scale slightly above linear due to cascading failure effects.</p>
 
           <h4>Blast Radius Simulator</h4>
-          <p>Six modes available via the toggle at the top of the tab:</p>
+          <p>Seven modes available via the toggle at the top of the tab:</p>
           <p><strong>⚙️ Services Mode</strong> — Select a service to simulate its failure and see cascading impact across your topology. Uses probabilistic propagation across all tiers (not just one extra hop): if A depends on B by 50% and B depends on C by 50%, then C-failure contributes ~25% risk to A through that path.</p>
           <ul>
             <li><strong>Direct Callers</strong> — Services that directly call the target (1st hop)</li>
@@ -8091,6 +8225,15 @@ export const ServicesOverview = () => {
             <li><strong>Graph Visualization</strong> — Center = target container (📦), pod (🫛) above-left, workload (☸️) above-right, siblings below, services outer ring</li>
             <li><strong>Cascade Simulation</strong> — Animates: container fails → pod impact → workload degradation → service disruption</li>
             <li><strong>Business Impact Simulator</strong> — Models impact based on container-to-pod-to-workload cascade severity</li>
+          </ul>
+
+          <p><strong>🌍 Cloud Region Mode</strong> — Simulate a full cloud region outage. Select a region (e.g., us-east-1, eastus, europe-west1) to treat every cluster and host in that region as simultaneously failed. The simulator identifies all services running on those entities, then runs full unbounded BFS through the service dependency graph to find all upstream callers cascade-impacted across every tier. Requires cloud provider integration (AWS, Azure, or GCP) to be configured in Dynatrace so that region metadata is populated on entity attributes.</p>
+          <ul>
+            <li><strong>Multi-entity scope</strong> — All clusters and hosts in the region are included in the initial failure set</li>
+            <li><strong>Full BFS propagation</strong> — Like Services mode, impact propagates across all tiers of callers — not just direct neighbors</li>
+            <li><strong>Direct vs Cascade</strong> — Clearly separates services directly on the downed entities from those cascade-impacted via call chains</li>
+            <li><strong>Circuit breaker guidance</strong> — AI Insights recommends where to add circuit breakers to contain blast radius across region boundaries</li>
+            <li><strong>No region data?</strong> — Configure your cloud integration under Dynatrace Settings → Cloud and virtualization → AWS/Azure/GCP</li>
           </ul>
 
           <h4>Error Budget Forecast</h4>
@@ -11529,7 +11672,7 @@ export const ServicesOverview = () => {
                 {getVisibleSubSubTabs("Blast Radius").map((label, idx, arr) => {
                   const mode = BLAST_RADIUS_MODE_MAP[label] ?? "services";
                   const isActive = blastRadiusMode === mode;
-                  const emoji = label === "Services" ? "⚙️" : label === "Hosts" ? "🖥️" : label === "Workloads" ? "☸️" : label === "Clusters" ? "🌐" : label === "Namespaces" ? "📦" : label === "Nodes" ? "🖥️" : label === "Pods" ? "🫛" : "📦";
+                  const emoji = label === "Services" ? "⚙️" : label === "Hosts" ? "🖥️" : label === "Workloads" ? "☸️" : label === "Clusters" ? "🌐" : label === "Namespaces" ? "📦" : label === "Nodes" ? "🖥️" : label === "Pods" ? "🫛" : label === "Cloud Region" ? "🌍" : "📦";
                   return (
                     <button key={label} onClick={() => setBlastRadiusMode(mode as any)} style={{ padding: "6px 18px", fontSize: 13, fontWeight: isActive ? 700 : 400, background: isActive ? "rgba(69,137,255,0.15)" : "rgba(128,128,128,0.06)", border: `1px solid ${isActive ? BLUE : "rgba(128,128,128,0.3)"}`, borderLeft: idx === 0 ? undefined : "none", borderRadius: idx === 0 ? "6px 0 0 6px" : idx === arr.length - 1 ? "0 6px 6px 0" : undefined, cursor: "pointer", color: isActive ? BLUE : "inherit" }}>{emoji} {label}</button>
                   );
@@ -13066,6 +13209,67 @@ export const ServicesOverview = () => {
                 </>
               )}
               </>)}
+
+              {blastRadiusMode === "cloud-region" && (<>
+              <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
+                <div style={{ maxWidth: 800 }}>
+                  <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 4, display: "block" }}>Simulate a full cloud region outage. All clusters and hosts in the selected region go down simultaneously. Full BFS propagation finds all cascade-impacted services.</Text>
+                  {sortedRegions.length === 0 ? (
+                    <Text style={{ opacity: 0.5, fontSize: 13 }}>No cloud region data available. Configure your AWS, Azure, or GCP integration in Dynatrace Settings → Cloud and virtualization to populate region metadata on entities.</Text>
+                  ) : (
+                    <Select
+                      value={blastRadiusRegionTarget || null}
+                      onChange={(val) => setBlastRadiusRegionTarget(val as string ?? "")}
+                    >
+                      <Select.Filter />
+                      <Select.Content>
+                        {sortedRegions.map(r => (
+                          <Select.Option key={r.region} value={r.region}>🌍 {r.region} ({r.clusterCount} cluster{r.clusterCount !== 1 ? "s" : ""}{r.hostCount > 0 ? `, ${r.hostCount} host${r.hostCount !== 1 ? "s" : ""}` : ""})</Select.Option>
+                        ))}
+                      </Select.Content>
+                    </Select>
+                  )}
+                </div>
+              </div>
+
+              {blastRadiusRegionTarget && cloudRegionBlastRadiusData && (
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
+                  <Flex gap={16} flexWrap="wrap" style={{ marginBottom: 16 }}>
+                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: "#4589FF" }}>{cloudRegionBlastRadiusData.clusters.length}</div>
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>Clusters Down</div>
+                    </div>
+                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: "#FF8C00" }}>{cloudRegionBlastRadiusData.directServices.length}</div>
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>Services Directly Down</div>
+                    </div>
+                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: "#C21930" }}>{cloudRegionBlastRadiusData.affectedExternalServices.length}</div>
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>Cascade Impacted</div>
+                    </div>
+                  </Flex>
+                  {cloudRegionBlastRadiusData.directServices.length === 0 && (
+                    <Text style={{ opacity: 0.5 }}>No services mapped to this region's entities. Ensure K8s workload-to-service monitoring is active.</Text>
+                  )}
+                  {cloudRegionBlastRadiusData.affectedExternalServices.length > 0 && (
+                    <div style={{ background: "rgba(194,25,48,0.08)", border: "1px solid rgba(194,25,48,0.3)", borderRadius: 8, padding: 12 }}>
+                      <Text style={{ fontWeight: 600, color: "#C21930", marginBottom: 8, display: "block" }}>
+                        🌊 {cloudRegionBlastRadiusData.affectedExternalServices.length} services cascade-impacted outside the region
+                      </Text>
+                      <Flex flexWrap="wrap" gap={4}>
+                        {cloudRegionBlastRadiusData.affectedExternalServices.slice(0, 60).map(svc => (
+                          <span key={svc} style={{ background: "rgba(194,25,48,0.15)", borderRadius: 4, padding: "2px 8px", fontSize: 12 }}>{svc}</span>
+                        ))}
+                        {cloudRegionBlastRadiusData.affectedExternalServices.length > 60 && (
+                          <span style={{ fontSize: 12, opacity: 0.6 }}>+{cloudRegionBlastRadiusData.affectedExternalServices.length - 60} more</span>
+                        )}
+                      </Flex>
+                    </div>
+                  )}
+                </div>
+              )}
+              </>)}
+
             </Flex>
                 </Tab>
               </Tabs>

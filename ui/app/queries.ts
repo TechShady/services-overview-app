@@ -1034,14 +1034,18 @@ export function k8sWorkloadServiceMapQuery(): string {
 }
 
 // ---------------------------------------------------------------------------
-// K8s Cluster → Workload Map — maps clusters to their workloads via timeseries co-occurrence
+// K8s Cluster → Workload Map — traverse K8S_CLUSTER → K8S_NAMESPACE → workload types
+// Avoids timeseries row-count cap; uses smartscape topology (confirmed edge types)
 // ---------------------------------------------------------------------------
 export function k8sClusterWorkloadMapQuery(): string {
-  return `timeseries avg(dt.kubernetes.container.cpu_usage), by:{dt.entity.kubernetes_cluster, dt.entity.cloud_application}, from:now()-2h
-| fieldsAdd clusterName = entityName(dt.entity.kubernetes_cluster), workloadName = entityName(dt.entity.cloud_application)
-| filter isNotNull(clusterName) AND isNotNull(workloadName)
-| fields clusterName, workloadName, clusterId = dt.entity.kubernetes_cluster, workloadId = dt.entity.cloud_application
-| dedup clusterName, workloadName`;
+  return `smartscapeNodes K8S_CLUSTER
+| fields clusterName = name
+| traverse edgeTypes: {contains}, targetTypes: {K8S_NAMESPACE}, fieldsKeep: {clusterName}
+| traverse edgeTypes: {contains}, targetTypes: {K8S_DEPLOYMENT, K8S_DAEMONSET, K8S_STATEFULSET}, fieldsKeep: {clusterName}
+| fields clusterName, workloadName = k8s.workload.name, workloadId = id
+| filter isNotNull(workloadName) AND isNotNull(clusterName)
+| dedup workloadName, clusterName
+| limit 10000`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1075,30 @@ export function k8sWorkloadEntityMapQuery(): string {
 export function k8sClusterEntityMapQuery(): string {
   return `smartscapeNodes K8S_CLUSTER
 | fields id, name = k8s.cluster.name`;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Region → Cluster Map — clusters grouped by cloud region
+// ---------------------------------------------------------------------------
+export function cloudRegionClusterQuery(): string {
+  return `smartscapeNodes K8S_CLUSTER
+| fields clusterId = id, clusterName = name
+| fieldsAdd region = coalesce(aws.region, azure.region, gcp.region)
+| filter isNotNull(region) AND isNotNull(clusterName)
+| fields clusterId, clusterName, region
+| limit 1000`;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Region → Host Map — hosts grouped by cloud region
+// ---------------------------------------------------------------------------
+export function cloudRegionHostQuery(): string {
+  return `smartscapeNodes HOST
+| fields hostId = id, hostName = name
+| fieldsAdd region = coalesce(aws.region, azure.region, gcp.region)
+| filter isNotNull(region) AND isNotNull(hostName)
+| fields hostId, hostName, region
+| limit 10000`;
 }
 
 // ---------------------------------------------------------------------------

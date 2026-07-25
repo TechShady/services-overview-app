@@ -5685,6 +5685,30 @@ export const ServicesOverview = () => {
     };
   }, [blastRadiusRegionTarget, cloudRegionMap, k8sClusterServiceMap, hostServiceMap, dependenciesData]);
 
+  // Cloud Region blast radius business impact
+  const cloudRegionImpactSimulation = useMemo(() => {
+    if (!blastRadiusRegionTarget || !cloudRegionBlastRadiusData?.directServices.length || !svcDetailsData.length) return null;
+    const durationMinutes = Math.max(1, (timeframe.toMs - timeframe.fromMs) / 60000);
+    const allImpacted = [...new Set([...cloudRegionBlastRadiusData.directServices, ...cloudRegionBlastRadiusData.affectedExternalServices])];
+    const totalAffectedRpm = allImpacted.reduce((sum, name) => {
+      const svc = svcDetailsData.find(s => s.Service === name);
+      return sum + ((svc?.Requests ?? 0) / durationMinutes);
+    }, 0);
+    const affectedRequests = Math.round(totalAffectedRpm * impactDurationMin);
+    const revenueLoss = affectedRequests * revenuePerRequest;
+    const monthlyMinutes = 30 * 24 * 60;
+    const allowedDowntime999 = monthlyMinutes * 0.001;
+    const allowedDowntime9999 = monthlyMinutes * 0.0001;
+    return {
+      affectedRequests, totalAffectedRpm, totalImpactedServices: allImpacted.length, revenueLoss,
+      slo999breached: impactDurationMin > allowedDowntime999,
+      slo9999breached: impactDurationMin > allowedDowntime9999,
+      allowedDowntime999, allowedDowntime9999,
+      budgetConsumed999: Math.min(999, (impactDurationMin / allowedDowntime999) * 100),
+      budgetConsumed9999: Math.min(999, (impactDurationMin / allowedDowntime9999) * 100),
+    };
+  }, [blastRadiusRegionTarget, cloudRegionBlastRadiusData, svcDetailsData, impactDurationMin, revenuePerRequest, timeframe]);
+
   // ─── K8s Namespace → Workload → Service Map (for namespace blast radius) ───
   const k8sNamespaceServiceMap = useMemo(() => {
     const records = k8sNamespaceWorkloadMapResult.data?.records ?? [];
@@ -13236,28 +13260,89 @@ export const ServicesOverview = () => {
                 </div>
               </div>
 
-              {blastRadiusRegionTarget && cloudRegionBlastRadiusData && (
-                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
-                  <Flex gap={16} flexWrap="wrap" style={{ marginBottom: 16 }}>
-                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
-                      <div style={{ fontSize: 24, fontWeight: 700, color: "#4589FF" }}>{cloudRegionBlastRadiusData.clusters.length}</div>
-                      <div style={{ fontSize: 12, opacity: 0.6 }}>Clusters Down</div>
+              {blastRadiusRegionTarget && cloudRegionBlastRadiusData && (<>
+                {/* KPI summary tiles */}
+                <Flex gap={16} flexWrap="wrap">
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7 }}>Target Region</Text>
+                    <Heading level={3} style={{ margin: "4px 0 0" }}>🌍 {blastRadiusRegionTarget}</Heading>
+                  </div>
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7 }}>Hosts Down</Text>
+                    <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.hosts.length > 0 ? RED : "inherit" }}>{cloudRegionBlastRadiusData.hosts.length}</Heading>
+                  </div>
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7 }}>Clusters Down</Text>
+                    <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.clusters.length > 0 ? RED : "inherit" }}>{cloudRegionBlastRadiusData.clusters.length}</Heading>
+                  </div>
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7 }}>Services Directly Down</Text>
+                    <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.directServices.length > 5 ? RED : cloudRegionBlastRadiusData.directServices.length > 0 ? YELLOW : GREEN }}>{cloudRegionBlastRadiusData.directServices.length}</Heading>
+                  </div>
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                    <Text style={{ fontSize: 12, opacity: 0.7 }}>Cascade Impacted</Text>
+                    <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.affectedExternalServices.length > 5 ? RED : cloudRegionBlastRadiusData.affectedExternalServices.length > 0 ? YELLOW : GREEN }}>{cloudRegionBlastRadiusData.affectedExternalServices.length}</Heading>
+                  </div>
+                </Flex>
+
+                {/* Directly-down services chip list */}
+                {cloudRegionBlastRadiusData.directServices.length > 0 && (
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
+                    <div style={{ background: "rgba(255,140,0,0.08)", border: "1px solid rgba(255,140,0,0.3)", borderRadius: 8, padding: 12 }}>
+                      <Text style={{ fontWeight: 600, color: ORANGE, marginBottom: 8, display: "block" }}>
+                        🔴 {cloudRegionBlastRadiusData.directServices.length} services directly down in {blastRadiusRegionTarget}
+                      </Text>
+                      <Flex flexWrap="wrap" gap={4}>
+                        {cloudRegionBlastRadiusData.directServices.slice(0, 80).map(svc => (
+                          <span key={svc} style={{ background: "rgba(255,140,0,0.15)", borderRadius: 4, padding: "2px 8px", fontSize: 12 }}>{svc}</span>
+                        ))}
+                        {cloudRegionBlastRadiusData.directServices.length > 80 && (
+                          <span style={{ fontSize: 12, opacity: 0.6 }}>+{cloudRegionBlastRadiusData.directServices.length - 80} more</span>
+                        )}
+                      </Flex>
                     </div>
-                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
-                      <div style={{ fontSize: 24, fontWeight: 700, color: "#FF8C00" }}>{cloudRegionBlastRadiusData.directServices.length}</div>
-                      <div style={{ fontSize: 12, opacity: 0.6 }}>Services Directly Down</div>
-                    </div>
-                    <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "12px 20px", minWidth: 130, textAlign: "center" }}>
-                      <div style={{ fontSize: 24, fontWeight: 700, color: "#C21930" }}>{cloudRegionBlastRadiusData.affectedExternalServices.length}</div>
-                      <div style={{ fontSize: 12, opacity: 0.6 }}>Cascade Impacted</div>
-                    </div>
-                  </Flex>
-                  {cloudRegionBlastRadiusData.directServices.length === 0 && (
-                    <Text style={{ opacity: 0.5 }}>No services mapped to this region's entities. Ensure K8s workload-to-service monitoring is active.</Text>
-                  )}
-                  {cloudRegionBlastRadiusData.affectedExternalServices.length > 0 && (
+                  </div>
+                )}
+
+                {/* Hosts in region with per-host service breakdown */}
+                {cloudRegionBlastRadiusData.hosts.length > 0 && (
+                  <div className="svc-table-tile">
+                    <Heading level={6}>Hosts in {blastRadiusRegionTarget} — {cloudRegionBlastRadiusData.hosts.length}</Heading>
+                    <DataTable
+                      data={cloudRegionBlastRadiusData.hosts.map(hostName => {
+                        const svcs = [...(hostServiceMap.hostToServices.get(hostName) ?? new Set())];
+                        return { Host: hostName, "dt.entity.host": hostServiceMap.hostNameToId.get(hostName) ?? "", Services: svcs.join(", "), "Service Count": svcs.length };
+                      }).sort((a, b) => b["Service Count"] - a["Service Count"])}
+                      columns={[
+                        { id: "Host", header: "Host", accessor: "Host", cell: ({ value, rowData }: any) => {
+                          const hostId = rowData["dt.entity.host"];
+                          if (!hostId) return <span>{value}</span>;
+                          const url = `${envUrl}/ui/apps/dynatrace.infraops/explorer/Hosts?perspective=Health&sort=healthIndicators%3Adescending&${tfAppParam(tfFrom, tfTo)}&fullPageId=${encodeURIComponent(hostId)}`;
+                          return <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{value}</a>;
+                        }},
+                        { id: "Service Count", header: "Services", accessor: "Service Count" },
+                        { id: "Services", header: "Service List", accessor: "Services", cell: ({ value, rowData }: any) => {
+                          const svcs = rowData.Services ? String(rowData.Services).split(", ").filter(Boolean) : [];
+                          if (!svcs.length) return <span style={{ opacity: 0.4, fontSize: 12 }}>none mapped</span>;
+                          return (<span>{svcs.map((s: string, i: number) => {
+                            const svcId = depsEntityIdMap.get(s);
+                            if (!svcId) return <span key={i}>{s}{i < svcs.length - 1 ? ", " : ""}</span>;
+                            const url = `${envUrl}/ui/apps/dynatrace.smartscape/view/dynatrace.smartscape.vertical-topology/${svcId}?${tfParams(tfFrom, tfTo)}`;
+                            return <span key={i}><a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{s}</a>{i < svcs.length - 1 ? ", " : ""}</span>;
+                          })}</span>);
+                        }},
+                      ]}
+                    >
+                      <DataTable.Pagination defaultPageSize={25} />
+                    </DataTable>
+                  </div>
+                )}
+
+                {/* Cascade-impacted services chip list */}
+                {cloudRegionBlastRadiusData.affectedExternalServices.length > 0 && (
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>
                     <div style={{ background: "rgba(194,25,48,0.08)", border: "1px solid rgba(194,25,48,0.3)", borderRadius: 8, padding: 12 }}>
-                      <Text style={{ fontWeight: 600, color: "#C21930", marginBottom: 8, display: "block" }}>
+                      <Text style={{ fontWeight: 600, color: RED, marginBottom: 8, display: "block" }}>
                         🌊 {cloudRegionBlastRadiusData.affectedExternalServices.length} services cascade-impacted outside the region
                       </Text>
                       <Flex flexWrap="wrap" gap={4}>
@@ -13269,9 +13354,75 @@ export const ServicesOverview = () => {
                         )}
                       </Flex>
                     </div>
-                  )}
-                </div>
-              )}
+                  </div>
+                )}
+
+                {/* Business Impact Simulator */}
+                {cloudRegionImpactSimulation && (<>
+                  <SectionHeader title="Business Impact Simulator" />
+                  <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 20 }}>
+                    <Flex gap={24} flexWrap="wrap" alignItems="flex-start">
+                      <div style={{ flex: "1 1 280px" }}>
+                        <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 8, display: "block" }}>Simulated Outage Duration</Text>
+                        <Flex gap={12} alignItems="center">
+                          <input type="range" min={1} max={1440} step={1} value={impactDurationMin}
+                            onChange={e => setImpactDurationMin(Number(e.target.value))}
+                            style={{ flex: 1, accentColor: RED }} />
+                          <span style={{ minWidth: 64, fontWeight: 700, fontSize: 15, color: impactDurationMin > 60 ? RED : impactDurationMin > 15 ? ORANGE : YELLOW }}>
+                            {impactDurationMin >= 60 ? `${(impactDurationMin / 60).toFixed(1)}h` : `${impactDurationMin}m`}
+                          </span>
+                        </Flex>
+                        <Flex gap={6} style={{ marginTop: 6 }} flexWrap="wrap">
+                          {[5, 15, 30, 60, 120, 480].map(m => (
+                            <button key={m} onClick={() => setImpactDurationMin(m)}
+                              style={{ background: impactDurationMin === m ? "rgba(69,137,255,0.2)" : "rgba(99,130,191,0.1)", border: `1px solid ${impactDurationMin === m ? BLUE : "rgba(99,130,191,0.2)"}`, borderRadius: 4, padding: "2px 8px", fontSize: 11, color: impactDurationMin === m ? BLUE : "rgba(255,255,255,0.6)", cursor: "pointer" }}>
+                              {m >= 60 ? `${m / 60}h` : `${m}m`}
+                            </button>
+                          ))}
+                        </Flex>
+                        <div style={{ marginTop: 14 }}>
+                          <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
+                          <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                            onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                            style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                        </div>
+                      </div>
+                      <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(194,25,48,0.06)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>Affected Requests</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{formatCount(cloudRegionImpactSimulation.affectedRequests)}</div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>{formatCount(Math.round(cloudRegionImpactSimulation.totalAffectedRpm))} req/min across {cloudRegionImpactSimulation.totalImpactedServices} services</Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: revenuePerRequest > 0 ? "rgba(194,25,48,0.06)" : undefined }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>Est. Revenue Loss</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.revenueLoss > 10000 ? RED : cloudRegionImpactSimulation.revenueLoss > 1000 ? ORANGE : "inherit" }}>
+                            {revenuePerRequest > 0 ? `$${cloudRegionImpactSimulation.revenueLoss >= 1000000 ? (cloudRegionImpactSimulation.revenueLoss / 1000000).toFixed(2) + "M" : cloudRegionImpactSimulation.revenueLoss >= 1000 ? (cloudRegionImpactSimulation.revenueLoss / 1000).toFixed(1) + "K" : cloudRegionImpactSimulation.revenueLoss.toFixed(0)}` : "—"}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>{revenuePerRequest > 0 ? `@ $${revenuePerRequest}/req` : "Set $/req above"}</Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: cloudRegionImpactSimulation.slo999breached ? "rgba(194,25,48,0.12)" : "rgba(13,156,41,0.06)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>SLO 99.9% Budget</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.slo999breached ? RED : GREEN }}>
+                            {cloudRegionImpactSimulation.slo999breached ? "BREACHED" : `${(100 - cloudRegionImpactSimulation.budgetConsumed999).toFixed(0)}% left`}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>
+                            {cloudRegionImpactSimulation.slo999breached ? `Exceeds ${cloudRegionImpactSimulation.allowedDowntime999.toFixed(0)}m monthly allowance` : `${cloudRegionImpactSimulation.budgetConsumed999.toFixed(0)}% of monthly budget consumed`}
+                          </Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: cloudRegionImpactSimulation.slo9999breached ? "rgba(194,25,48,0.12)" : "rgba(13,156,41,0.06)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>SLO 99.99% Budget</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.slo9999breached ? RED : GREEN }}>
+                            {cloudRegionImpactSimulation.slo9999breached ? "BREACHED" : `${(100 - cloudRegionImpactSimulation.budgetConsumed9999).toFixed(0)}% left`}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>
+                            {cloudRegionImpactSimulation.slo9999breached ? `Exceeds ${cloudRegionImpactSimulation.allowedDowntime9999.toFixed(1)}m monthly allowance` : `${cloudRegionImpactSimulation.budgetConsumed9999.toFixed(0)}% of monthly budget consumed`}
+                          </Text>
+                        </div>
+                      </Flex>
+                    </Flex>
+                  </div>
+                </>)}
+              </>)}
               </>)}
 
             </Flex>

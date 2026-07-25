@@ -1080,23 +1080,23 @@ export function k8sClusterEntityMapQuery(): string {
 // Cloud Region → Cluster Map — clusters grouped by cloud region
 // ---------------------------------------------------------------------------
 export function cloudRegionClusterQuery(): string {
-  return `fetch dt.entity.kubernetes_cluster
-| fields clusterId = id, clusterName = entity.name
-| fieldsAdd region = coalesce(awsRegion, azureRegion, gcpRegion)
+  return `smartscapeNodes K8S_CLUSTER
+| fields clusterId = id, clusterName = name, region = aws.region
 | filter isNotNull(region) AND isNotNull(clusterName)
-| fields clusterId, clusterName, region
+| append [smartscapeNodes K8S_CLUSTER | fields clusterId = id, clusterName = name, region = azure.region | filter isNotNull(region) AND isNotNull(clusterName)]
+| dedup clusterName, region
 | limit 1000`;
 }
 
 // ---------------------------------------------------------------------------
-// Cloud Region → Host Map — hosts grouped by cloud region
+// Cloud Region → Host Map — aws.region confirmed available on HOST smartscape nodes
 // ---------------------------------------------------------------------------
 export function cloudRegionHostQuery(): string {
-  return `fetch dt.entity.host
-| fields hostId = id, hostName = entity.name
-| fieldsAdd region = coalesce(awsRegion, azureRegion, gcpRegion)
+  return `smartscapeNodes HOST
+| fields hostId = id, hostName = name, region = aws.region
 | filter isNotNull(region) AND isNotNull(hostName)
-| fields hostId, hostName, region
+| append [smartscapeNodes HOST | fields hostId = id, hostName = name, region = azure.region | filter isNotNull(region) AND isNotNull(hostName)]
+| dedup hostName, region
 | limit 10000`;
 }
 

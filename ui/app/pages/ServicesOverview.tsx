@@ -30,6 +30,7 @@ import { K8sNodeBlastRadiusGraph } from "../components/K8sNodeBlastRadiusGraph";
 import { K8sNamespaceBlastRadiusGraph } from "../components/K8sNamespaceBlastRadiusGraph";
 import { K8sPodBlastRadiusGraph } from "../components/K8sPodBlastRadiusGraph";
 import { K8sContainerBlastRadiusGraph } from "../components/K8sContainerBlastRadiusGraph";
+import { CloudRegionBlastRadiusGraph } from "../components/CloudRegionBlastRadiusGraph";
 import { useAppTimeframe, previousPeriod, toTF } from "../state/TimeframeContext";
 import type { TF } from "../state/TimeframeContext";
 import { KpiCard, ForecastProvider } from "../components/KpiCard";
@@ -13284,6 +13285,23 @@ export const ServicesOverview = () => {
                     <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.affectedExternalServices.length > 5 ? RED : cloudRegionBlastRadiusData.affectedExternalServices.length > 0 ? YELLOW : GREEN }}>{cloudRegionBlastRadiusData.affectedExternalServices.length}</Heading>
                   </div>
                 </Flex>
+
+                {/* Blast radius graph */}
+                <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 0 }}>
+                  <CloudRegionBlastRadiusGraph
+                    region={blastRadiusRegionTarget}
+                    hosts={cloudRegionBlastRadiusData.hosts}
+                    clusters={cloudRegionBlastRadiusData.clusters}
+                    directServices={cloudRegionBlastRadiusData.directServices}
+                    affectedExternalServices={cloudRegionBlastRadiusData.affectedExternalServices}
+                    serviceEdges={cloudRegionBlastRadiusData.serviceEdges}
+                    hostToServices={hostServiceMap.hostToServices}
+                    hostIdMap={hostServiceMap.hostNameToId}
+                    serviceDetails={serviceDetailsMap}
+                    tfFrom={tfFrom}
+                    tfTo={tfTo}
+                  />
+                </div>
 
                 {/* Directly-down services chip list */}
                 {cloudRegionBlastRadiusData.directServices.length > 0 && (

@@ -1081,23 +1081,27 @@ export function k8sClusterEntityMapQuery(): string {
 // ---------------------------------------------------------------------------
 export function cloudRegionClusterQuery(): string {
   return `smartscapeNodes K8S_CLUSTER
-| fields clusterId = id, clusterName = name, region = aws.region
+| fields clusterId = id, clusterName = name, region = aws.availability_zone
 | filter isNotNull(region) AND isNotNull(clusterName)
+| append [smartscapeNodes K8S_CLUSTER | fields clusterId = id, clusterName = name, region = aws.region | filter isNotNull(region) AND isNotNull(clusterName)]
 | append [smartscapeNodes K8S_CLUSTER | fields clusterId = id, clusterName = name, region = azure.location | filter isNotNull(region) AND isNotNull(clusterName)]
+| append [smartscapeNodes K8S_CLUSTER | fields clusterId = id, clusterName = name, region = azure.region | filter isNotNull(region) AND isNotNull(clusterName)]
 | append [smartscapeNodes K8S_CLUSTER | fields clusterId = id, clusterName = name, region = gcp.region | filter isNotNull(region) AND isNotNull(clusterName)]
 | dedup clusterName, region
 | limit 1000`;
 }
 
 // ---------------------------------------------------------------------------
-// Cloud Region → Host Map — aws.region, azure.location, gcp.region on HOST nodes
+// Cloud Region → Host Map — aws.availability_zone, azure.location/region, gcp.region
+// host.name is used; coalesce with name for hosts that lack host.name
 // ---------------------------------------------------------------------------
 export function cloudRegionHostQuery(): string {
   return `smartscapeNodes HOST
-| fields hostId = id, hostName = host.name, region = aws.region
+| fields hostId = id, hostName = coalesce(host.name, name), region = aws.availability_zone
 | filter isNotNull(region) AND isNotNull(hostName)
-| append [smartscapeNodes HOST | fields hostId = id, hostName = host.name, region = azure.location | filter isNotNull(region) AND isNotNull(hostName)]
-| append [smartscapeNodes HOST | fields hostId = id, hostName = host.name, region = gcp.region | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = azure.location | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = azure.region | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = gcp.region | filter isNotNull(region) AND isNotNull(hostName)]
 | dedup hostName, region
 | limit 10000`;
 }

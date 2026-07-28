@@ -1093,17 +1093,82 @@ export function cloudRegionClusterQuery(): string {
 
 // ---------------------------------------------------------------------------
 // Cloud Region → Host Map — aws.availability_zone, azure.location/region, gcp.region
-// host.name is used; coalesce with name for hosts that lack host.name
+// Uses entity display name (name) to match hostServiceMapQuery which joins on entity.name
 // ---------------------------------------------------------------------------
 export function cloudRegionHostQuery(): string {
   return `smartscapeNodes HOST
-| fields hostId = id, hostName = coalesce(host.name, name), region = aws.availability_zone
+| fields hostId = id, hostName = name, region = aws.availability_zone
 | filter isNotNull(region) AND isNotNull(hostName)
-| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = azure.location | filter isNotNull(region) AND isNotNull(hostName)]
-| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = azure.region | filter isNotNull(region) AND isNotNull(hostName)]
-| append [smartscapeNodes HOST | fields hostId = id, hostName = coalesce(host.name, name), region = gcp.region | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = name, region = azure.location | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = name, region = azure.region | filter isNotNull(region) AND isNotNull(hostName)]
+| append [smartscapeNodes HOST | fields hostId = id, hostName = name, region = gcp.region | filter isNotNull(region) AND isNotNull(hostName)]
 | dedup hostName, region
 | limit 10000`;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Region → Process Map — maps hosts to their running process group instances
+// ---------------------------------------------------------------------------
+export function cloudRegionProcessQuery(): string {
+  return `fetch dt.entity.process_group_instance
+| fields pgiName = entity.name, hostId = belongs_to[dt.entity.host]
+| lookup [fetch dt.entity.host | fields id, hostName = entity.name], sourceField:hostId, lookupField:id, prefix:"host."
+| fields pgiName, hostName = host.hostName
+| filterOut isNull(hostName) OR isNull(pgiName)
+| dedup pgiName, hostName
+| limit 5000`;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Region → Lambda Map — AWS Lambda functions by region
+// ---------------------------------------------------------------------------
+export function cloudRegionLambdaQuery(): string {
+  return `fetch dt.entity.aws_lambda_function
+| fields lambdaName = entity.name, region = aws.region
+| filterOut isNull(region) OR isNull(lambdaName)
+| dedup lambdaName, region
+| limit 1000`;
+}
+
+// ---------------------------------------------------------------------------
+// Container → Process Map — processes running inside each container group instance
+// ---------------------------------------------------------------------------
+export function cloudRegionContainerProcessQuery(): string {
+  return `fetch dt.entity.process_group_instance
+| fields pgiName = entity.name,
+         containerId = belongs_to[dt.entity.container_group_instance],
+         hostId = belongs_to[dt.entity.host]
+| filter isNotNull(containerId)
+| lookup [fetch dt.entity.container_group_instance | fields id, containerName = entity.name], sourceField:containerId, lookupField:id, prefix:"cgi."
+| lookup [fetch dt.entity.host | fields id, hostName = entity.name], sourceField:hostId, lookupField:id, prefix:"host."
+| fields pgiName, containerName = cgi.containerName, hostName = host.hostName
+| filterOut isNull(containerName) OR isNull(pgiName)
+| dedup pgiName, containerName
+| limit 5000`;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Region → Azure Function App Map — Azure Function Apps by azure.location
+// ---------------------------------------------------------------------------
+export function cloudRegionAzureFunctionQuery(): string {
+  return `fetch dt.entity.azure_function_app
+| fields funcName = entity.name, region = azure.location
+| filterOut isNull(region) OR isNull(funcName)
+| dedup funcName, region
+| limit 1000`;
+}
+
+// ---------------------------------------------------------------------------
+// Host → Containers Map — container group instances belonging to hosts
+// ---------------------------------------------------------------------------
+export function cloudRegionContainerQuery(): string {
+  return `fetch dt.entity.container_group_instance
+| fields containerName = entity.name, hostId = belongs_to[dt.entity.host]
+| lookup [fetch dt.entity.host | fields id, hostName = entity.name], sourceField:hostId, lookupField:id, prefix:"host."
+| fields containerName, hostName = host.hostName
+| filterOut isNull(hostName) OR isNull(containerName)
+| dedup containerName, hostName
+| limit 5000`;
 }
 
 // ---------------------------------------------------------------------------

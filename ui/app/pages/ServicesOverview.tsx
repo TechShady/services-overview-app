@@ -127,6 +127,11 @@ import {
   flameGraphQuery,
   cloudRegionClusterQuery,
   cloudRegionHostQuery,
+  cloudRegionProcessQuery,
+  cloudRegionLambdaQuery,
+  cloudRegionAzureFunctionQuery,
+  cloudRegionContainerQuery,
+  cloudRegionContainerProcessQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -2882,6 +2887,11 @@ export const ServicesOverview = () => {
   const k8sContainerPodWorkloadMapResult = useDql({ query: depsTabEver ? k8sContainerPodWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
   const cloudRegionClusterResult = useDql({ query: depsTabEver ? cloudRegionClusterQuery() : NOOP_QUERY }, refetchOpts);
   const cloudRegionHostResult = useDql({ query: depsTabEver ? cloudRegionHostQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionProcessResult = useDql({ query: depsTabEver ? cloudRegionProcessQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionLambdaResult = useDql({ query: depsTabEver ? cloudRegionLambdaQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionAzureFuncResult = useDql({ query: depsTabEver ? cloudRegionAzureFunctionQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionContainerResult = useDql({ query: depsTabEver ? cloudRegionContainerQuery() : NOOP_QUERY }, refetchOpts);
+  const cloudRegionContainerProcessResult = useDql({ query: depsTabEver ? cloudRegionContainerProcessQuery() : NOOP_QUERY }, refetchOpts);
   const svcEntityTypesResult = useDql({ query: serviceEntityTypesQuery() }, refetchOpts);
   const closedProblemsResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const closedProblemsPrevResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
@@ -5245,6 +5255,9 @@ export const ServicesOverview = () => {
   const [selectedFailedServices, setSelectedFailedServices] = useState<string[]>([]);
   const [impactDurationMin, setImpactDurationMin] = useState(30);
   const [revenuePerRequest, setRevenuePerRequest] = useState(0.001);
+  const [costPerProcess, setCostPerProcess] = useState(0);
+  const [costPerContainer, setCostPerContainer] = useState(0);
+  const [costPerFunction, setCostPerFunction] = useState(0);
   const [rightSizingSubTab, setRightSizingSubTab] = useState<"hosts" | "databases" | "k8s" | "k8s-clusters" | "k8s-nodes" | "k8s-namespaces" | "k8s-services" | "k8s-pods" | "k8s-containers">("hosts");
   const [rsVerdictFilter, setRsVerdictFilter] = useState<string[]>([]);
 
@@ -5633,11 +5646,85 @@ export const ServicesOverview = () => {
     return regionToEntities;
   }, [cloudRegionClusterResult.data, cloudRegionHostResult.data]);
 
+  // sortedRegions is computed after hostToProcesses and regionToLambdas so it can include their counts
+
+  // Host → Processes map (for cloud region blast radius)
+  const hostToProcesses = useMemo(() => {
+    const m = new Map<string, string[]>();
+    (cloudRegionProcessResult.data?.records ?? []).forEach((r: any) => {
+      const host = String(r.hostName ?? "");
+      const pgi = String(r.pgiName ?? "");
+      if (!host || !pgi) return;
+      if (!m.has(host)) m.set(host, []);
+      m.get(host)!.push(pgi);
+    });
+    return m;
+  }, [cloudRegionProcessResult.data]);
+
+  // Region → Lambda map — aws.availability_zone regions need parent-region lookup (strip trailing AZ letter)
+  const regionToLambdas = useMemo(() => {
+    const m = new Map<string, string[]>();
+    (cloudRegionLambdaResult.data?.records ?? []).forEach((r: any) => {
+      const region = String(r.region ?? "");
+      const name = String(r.lambdaName ?? "");
+      if (!region || !name) return;
+      if (!m.has(region)) m.set(region, []);
+      m.get(region)!.push(name);
+    });
+    return m;
+  }, [cloudRegionLambdaResult.data]);
+
+  // Region → Azure Function App map — keyed by azure.location
+  const regionToAzureFunctions = useMemo(() => {
+    const m = new Map<string, string[]>();
+    (cloudRegionAzureFuncResult.data?.records ?? []).forEach((r: any) => {
+      const region = String(r.region ?? "");
+      const name = String(r.funcName ?? "");
+      if (!region || !name) return;
+      if (!m.has(region)) m.set(region, []);
+      m.get(region)!.push(name);
+    });
+    return m;
+  }, [cloudRegionAzureFuncResult.data]);
+
+  // Host → Containers map
+  const hostToContainers = useMemo(() => {
+    const m = new Map<string, string[]>();
+    (cloudRegionContainerResult.data?.records ?? []).forEach((r: any) => {
+      const host = String(r.hostName ?? "");
+      const container = String(r.containerName ?? "");
+      if (!host || !container) return;
+      if (!m.has(host)) m.set(host, []);
+      m.get(host)!.push(container);
+    });
+    return m;
+  }, [cloudRegionContainerResult.data]);
+
+  // Container → Processes map (processes running inside each container)
+  const containerToProcesses = useMemo(() => {
+    const m = new Map<string, string[]>();
+    (cloudRegionContainerProcessResult.data?.records ?? []).forEach((r: any) => {
+      const container = String(r.containerName ?? "");
+      const pgi = String(r.pgiName ?? "");
+      if (!container || !pgi) return;
+      if (!m.has(container)) m.set(container, []);
+      m.get(container)!.push(pgi);
+    });
+    return m;
+  }, [cloudRegionContainerProcessResult.data]);
+
   const sortedRegions = useMemo(() =>
     [...cloudRegionMap.entries()]
-      .map(([region, entities]) => ({ region, clusterCount: entities.clusters.length, hostCount: entities.hosts.length }))
+      .map(([region, entities]) => {
+        const processCount = new Set(entities.hosts.flatMap(h => hostToProcesses.get(h) ?? [])).size;
+        const containerCount = new Set(entities.hosts.flatMap(h => hostToContainers.get(h) ?? [])).size;
+        const parentRegion = /^[a-z]+-[a-z]+-\d+[a-z]$/.test(region) ? region.slice(0, -1) : region;
+        const lambdaCount = (regionToLambdas.get(parentRegion) ?? regionToLambdas.get(region) ?? []).length;
+        const azureFuncCount = (regionToAzureFunctions.get(region) ?? []).length;
+        return { region, clusterCount: entities.clusters.length, hostCount: entities.hosts.length, processCount, containerCount, lambdaCount, azureFuncCount };
+      })
       .sort((a, b) => (b.clusterCount + b.hostCount) - (a.clusterCount + a.hostCount)),
-  [cloudRegionMap]);
+  [cloudRegionMap, hostToProcesses, hostToContainers, regionToLambdas, regionToAzureFunctions]);
 
   // Cloud region blast radius simulation
   const cloudRegionBlastRadiusData = useMemo(() => {
@@ -5688,7 +5775,7 @@ export const ServicesOverview = () => {
 
   // Cloud Region blast radius business impact
   const cloudRegionImpactSimulation = useMemo(() => {
-    if (!blastRadiusRegionTarget || !cloudRegionBlastRadiusData?.directServices.length || !svcDetailsData.length) return null;
+    if (!blastRadiusRegionTarget || !cloudRegionBlastRadiusData) return null;
     const durationMinutes = Math.max(1, (timeframe.toMs - timeframe.fromMs) / 60000);
     const allImpacted = [...new Set([...cloudRegionBlastRadiusData.directServices, ...cloudRegionBlastRadiusData.affectedExternalServices])];
     const totalAffectedRpm = allImpacted.reduce((sum, name) => {
@@ -5696,19 +5783,26 @@ export const ServicesOverview = () => {
       return sum + ((svc?.Requests ?? 0) / durationMinutes);
     }, 0);
     const affectedRequests = Math.round(totalAffectedRpm * impactDurationMin);
-    const revenueLoss = affectedRequests * revenuePerRequest;
     const monthlyMinutes = 30 * 24 * 60;
     const allowedDowntime999 = monthlyMinutes * 0.001;
     const allowedDowntime9999 = monthlyMinutes * 0.0001;
+    // Entity counts for non-service types
+    const totalImpactedProcesses = new Set(cloudRegionBlastRadiusData.hosts.flatMap(h => hostToProcesses.get(h) ?? [])).size;
+    const totalImpactedContainers = new Set(cloudRegionBlastRadiusData.hosts.flatMap(h => hostToContainers.get(h) ?? [])).size;
+    const parentRegion = /^[a-z]+-[a-z]+-\d+[a-z]$/.test(blastRadiusRegionTarget) ? blastRadiusRegionTarget.slice(0, -1) : blastRadiusRegionTarget;
+    const totalImpactedFunctions = (regionToLambdas.get(parentRegion) ?? regionToLambdas.get(blastRadiusRegionTarget) ?? []).length + (regionToAzureFunctions.get(blastRadiusRegionTarget) ?? []).length;
+    const revenueLoss = affectedRequests * revenuePerRequest + totalImpactedProcesses * costPerProcess + totalImpactedContainers * costPerContainer + totalImpactedFunctions * costPerFunction;
     return {
-      affectedRequests, totalAffectedRpm, totalImpactedServices: allImpacted.length, revenueLoss,
+      affectedRequests, totalAffectedRpm, totalImpactedServices: allImpacted.length,
+      totalImpactedProcesses, totalImpactedContainers, totalImpactedFunctions,
+      revenueLoss,
       slo999breached: impactDurationMin > allowedDowntime999,
       slo9999breached: impactDurationMin > allowedDowntime9999,
       allowedDowntime999, allowedDowntime9999,
       budgetConsumed999: Math.min(999, (impactDurationMin / allowedDowntime999) * 100),
       budgetConsumed9999: Math.min(999, (impactDurationMin / allowedDowntime9999) * 100),
     };
-  }, [blastRadiusRegionTarget, cloudRegionBlastRadiusData, svcDetailsData, impactDurationMin, revenuePerRequest, timeframe]);
+  }, [blastRadiusRegionTarget, cloudRegionBlastRadiusData, svcDetailsData, impactDurationMin, revenuePerRequest, costPerProcess, costPerContainer, costPerFunction, timeframe, hostToProcesses, hostToContainers, regionToLambdas, regionToAzureFunctions]);
 
   // ─── K8s Namespace → Workload → Service Map (for namespace blast radius) ───
   const k8sNamespaceServiceMap = useMemo(() => {
@@ -11851,11 +11945,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -12173,11 +12287,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -12344,11 +12478,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -12514,11 +12668,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -12684,11 +12858,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -12860,11 +13054,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -13029,11 +13243,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -13194,11 +13428,31 @@ export const ServicesOverview = () => {
                                 </button>
                               ))}
                             </Flex>
-                            <div style={{ marginTop: 14 }}>
-                              <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                              <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                                onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                                style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                                <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                                  onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerProcess}
+                                  onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerContainer}
+                                  onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
+                              <div>
+                                <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                                <input type="number" min={0} step={0.01} value={costPerFunction}
+                                  onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                                  style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                              </div>
                             </div>
                           </div>
                           <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -13253,7 +13507,7 @@ export const ServicesOverview = () => {
                       <Select.Filter />
                       <Select.Content>
                         {sortedRegions.map(r => (
-                          <Select.Option key={r.region} value={r.region}>🌍 {r.region} ({r.clusterCount} cluster{r.clusterCount !== 1 ? "s" : ""}{r.hostCount > 0 ? `, ${r.hostCount} host${r.hostCount !== 1 ? "s" : ""}` : ""})</Select.Option>
+                          <Select.Option key={r.region} value={r.region}>🌍 {r.region} ({r.clusterCount} cluster{r.clusterCount !== 1 ? "s" : ""}{r.hostCount > 0 ? `, ${r.hostCount} host${r.hostCount !== 1 ? "s" : ""}` : ""}{r.processCount > 0 ? `, ${r.processCount} proc${r.processCount !== 1 ? "s" : ""}` : ""}{r.containerCount > 0 ? `, ${r.containerCount} ctr${r.containerCount !== 1 ? "s" : ""}` : ""}{r.lambdaCount > 0 ? `, ${r.lambdaCount} λ` : ""}{r.azureFuncCount > 0 ? `, ${r.azureFuncCount} ƒ` : ""})</Select.Option>
                         ))}
                       </Select.Content>
                     </Select>
@@ -13284,6 +13538,35 @@ export const ServicesOverview = () => {
                     <Text style={{ fontSize: 12, opacity: 0.7 }}>Cascade Impacted</Text>
                     <Heading level={2} style={{ margin: "4px 0 0", color: cloudRegionBlastRadiusData.affectedExternalServices.length > 5 ? RED : cloudRegionBlastRadiusData.affectedExternalServices.length > 0 ? YELLOW : GREEN }}>{cloudRegionBlastRadiusData.affectedExternalServices.length}</Heading>
                   </div>
+                  {(() => {
+                    const processCount = new Set(cloudRegionBlastRadiusData.hosts.flatMap(h => hostToProcesses.get(h) ?? [])).size;
+                    return (
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                        <Text style={{ fontSize: 12, opacity: 0.7 }}>Processes Down</Text>
+                        <Heading level={2} style={{ margin: "4px 0 0", color: processCount > 0 ? RED : "inherit" }}>{processCount}</Heading>
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const containerCount = new Set(cloudRegionBlastRadiusData.hosts.flatMap(h => hostToContainers.get(h) ?? [])).size;
+                    return (
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                        <Text style={{ fontSize: 12, opacity: 0.7 }}>Containers Down</Text>
+                        <Heading level={2} style={{ margin: "4px 0 0", color: containerCount > 0 ? RED : "inherit" }}>{containerCount}</Heading>
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const parentRegion = /^[a-z]+-[a-z]+-\d+[a-z]$/.test(blastRadiusRegionTarget) ? blastRadiusRegionTarget.slice(0, -1) : blastRadiusRegionTarget;
+                    const lambdaCount = (regionToLambdas.get(parentRegion) ?? regionToLambdas.get(blastRadiusRegionTarget) ?? []).length;
+                    const azureFuncCount = (regionToAzureFunctions.get(blastRadiusRegionTarget) ?? []).length;
+                    return (
+                      <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16, flex: "1 1 130px" }}>
+                        <Text style={{ fontSize: 12, opacity: 0.7 }}>Functions / Lambda</Text>
+                        <Heading level={2} style={{ margin: "4px 0 0", color: (lambdaCount + azureFuncCount) > 0 ? RED : "inherit" }}>{lambdaCount + azureFuncCount}</Heading>
+                      </div>
+                    );
+                  })()}
                 </Flex>
 
                 {/* Blast radius graph */}
@@ -13298,6 +13581,17 @@ export const ServicesOverview = () => {
                     hostToServices={hostServiceMap.hostToServices}
                     hostIdMap={hostServiceMap.hostNameToId}
                     serviceDetails={serviceDetailsMap}
+                    hostToProcesses={hostToProcesses}
+                    hostToContainers={hostToContainers}
+                    containerToProcesses={containerToProcesses}
+                    lambdas={(() => {
+                      // Lambda is region-scoped; AZ regions like "us-east-1d" → parent "us-east-1"
+                      const parentRegion = /^[a-z]+-[a-z]+-\d+[a-z]$/.test(blastRadiusRegionTarget)
+                        ? blastRadiusRegionTarget.slice(0, -1)
+                        : blastRadiusRegionTarget;
+                      return regionToLambdas.get(parentRegion) ?? regionToLambdas.get(blastRadiusRegionTarget) ?? [];
+                    })()}
+                    azureFunctions={regionToAzureFunctions.get(blastRadiusRegionTarget) ?? []}
                     tfFrom={tfFrom}
                     tfTo={tfTo}
                   />
@@ -13398,11 +13692,31 @@ export const ServicesOverview = () => {
                             </button>
                           ))}
                         </Flex>
-                        <div style={{ marginTop: 14 }}>
-                          <Text style={{ fontSize: 12, opacity: 0.7, marginBottom: 6, display: "block" }}>Revenue per Request ($)</Text>
-                          <input type="number" min={0} step={0.0001} value={revenuePerRequest}
-                            onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
-                            style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                          <div>
+                            <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Service Request ($)</Text>
+                            <input type="number" min={0} step={0.0001} value={revenuePerRequest}
+                              onChange={e => setRevenuePerRequest(Math.max(0, Number(e.target.value)))}
+                              style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                          </div>
+                          <div>
+                            <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Process Down ($)</Text>
+                            <input type="number" min={0} step={0.01} value={costPerProcess}
+                              onChange={e => setCostPerProcess(Math.max(0, Number(e.target.value)))}
+                              style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                          </div>
+                          <div>
+                            <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Container Down ($)</Text>
+                            <input type="number" min={0} step={0.01} value={costPerContainer}
+                              onChange={e => setCostPerContainer(Math.max(0, Number(e.target.value)))}
+                              style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                          </div>
+                          <div>
+                            <Text style={{ fontSize: 11, opacity: 0.6, marginBottom: 4, display: "block" }}>Cost / Function Down ($)</Text>
+                            <input type="number" min={0} step={0.01} value={costPerFunction}
+                              onChange={e => setCostPerFunction(Math.max(0, Number(e.target.value)))}
+                              style={{ background: "rgba(99,130,191,0.1)", border: "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", color: "#fff", fontSize: 13, width: 120 }} />
+                          </div>
                         </div>
                       </div>
                       <Flex gap={12} flexWrap="wrap" style={{ flex: "2 1 400px" }}>
@@ -13411,12 +13725,12 @@ export const ServicesOverview = () => {
                           <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{formatCount(cloudRegionImpactSimulation.affectedRequests)}</div>
                           <Text style={{ fontSize: 10, opacity: 0.5 }}>{formatCount(Math.round(cloudRegionImpactSimulation.totalAffectedRpm))} req/min across {cloudRegionImpactSimulation.totalImpactedServices} services</Text>
                         </div>
-                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: revenuePerRequest > 0 ? "rgba(194,25,48,0.06)" : undefined }}>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: (revenuePerRequest > 0 || costPerProcess > 0 || costPerContainer > 0 || costPerFunction > 0) ? "rgba(194,25,48,0.06)" : undefined }}>
                           <Text style={{ fontSize: 11, opacity: 0.6 }}>Est. Revenue Loss</Text>
                           <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.revenueLoss > 10000 ? RED : cloudRegionImpactSimulation.revenueLoss > 1000 ? ORANGE : "inherit" }}>
-                            {revenuePerRequest > 0 ? `$${cloudRegionImpactSimulation.revenueLoss >= 1000000 ? (cloudRegionImpactSimulation.revenueLoss / 1000000).toFixed(2) + "M" : cloudRegionImpactSimulation.revenueLoss >= 1000 ? (cloudRegionImpactSimulation.revenueLoss / 1000).toFixed(1) + "K" : cloudRegionImpactSimulation.revenueLoss.toFixed(0)}` : "—"}
+                            {(revenuePerRequest > 0 || costPerProcess > 0 || costPerContainer > 0 || costPerFunction > 0) ? `$${cloudRegionImpactSimulation.revenueLoss >= 1000000 ? (cloudRegionImpactSimulation.revenueLoss / 1000000).toFixed(2) + "M" : cloudRegionImpactSimulation.revenueLoss >= 1000 ? (cloudRegionImpactSimulation.revenueLoss / 1000).toFixed(1) + "K" : cloudRegionImpactSimulation.revenueLoss.toFixed(0)}` : "—"}
                           </div>
-                          <Text style={{ fontSize: 10, opacity: 0.5 }}>{revenuePerRequest > 0 ? `@ $${revenuePerRequest}/req` : "Set $/req above"}</Text>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>{(revenuePerRequest > 0 || costPerProcess > 0 || costPerContainer > 0 || costPerFunction > 0) ? "service + process + container + function costs" : "Set costs above"}</Text>
                         </div>
                         <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: cloudRegionImpactSimulation.slo999breached ? "rgba(194,25,48,0.12)" : "rgba(13,156,41,0.06)" }}>
                           <Text style={{ fontSize: 11, opacity: 0.6 }}>SLO 99.9% Budget</Text>
@@ -13435,6 +13749,27 @@ export const ServicesOverview = () => {
                           <Text style={{ fontSize: 10, opacity: 0.5 }}>
                             {cloudRegionImpactSimulation.slo9999breached ? `Exceeds ${cloudRegionImpactSimulation.allowedDowntime9999.toFixed(1)}m monthly allowance` : `${cloudRegionImpactSimulation.budgetConsumed9999.toFixed(0)}% of monthly budget consumed`}
                           </Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(230,113,35,0.08)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>Processes Down</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.totalImpactedProcesses > 0 ? ORANGE : "inherit" }}>
+                            {cloudRegionImpactSimulation.totalImpactedProcesses}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>process group instances on affected hosts</Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(69,137,255,0.08)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>Containers Down</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.totalImpactedContainers > 0 ? BLUE : "inherit" }}>
+                            {cloudRegionImpactSimulation.totalImpactedContainers}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>container group instances on affected hosts</Text>
+                        </div>
+                        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 14, flex: "1 1 120px", background: "rgba(230,190,0,0.08)" }}>
+                          <Text style={{ fontSize: 11, opacity: 0.6 }}>Functions / Lambda</Text>
+                          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4, color: cloudRegionImpactSimulation.totalImpactedFunctions > 0 ? YELLOW : "inherit" }}>
+                            {cloudRegionImpactSimulation.totalImpactedFunctions}
+                          </div>
+                          <Text style={{ fontSize: 10, opacity: 0.5 }}>AWS Lambda + Azure Function Apps in region</Text>
                         </div>
                       </Flex>
                     </Flex>

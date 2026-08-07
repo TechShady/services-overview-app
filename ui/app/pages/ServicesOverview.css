@@ -625,6 +625,36 @@
   animation-play-state: paused;
 }
 
+.svc-kpi-marquee.paused .svc-kpi-marquee-track {
+  animation-play-state: paused;
+}
+
+.svc-kpi-marquee-toggle {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: rgba(30, 35, 55, 0.85);
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.svc-kpi-marquee-toggle:hover {
+  background: rgba(69, 137, 255, 0.25);
+  transform: scale(1.08);
+}
+
 @keyframes svc-kpi-scroll {
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }

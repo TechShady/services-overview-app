@@ -2339,6 +2339,7 @@ export const ServicesOverview = () => {
   const [performanceSubTab, setPerformanceSubTab] = useState(0);
   const [depsImpactSubTab, setDepsImpactSubTab] = useState(0);
   const [flameGraphService, setFlameGraphService] = useState<string>("");
+  const [marqueePaused, setMarqueePaused] = useState(true);
 
   // Lazy-loading: track which tabs/sub-tabs have ever been activated.
   // Queries are gated on these sets so they fire once on first visit and
@@ -8649,7 +8650,16 @@ export const ServicesOverview = () => {
                   return { kpiId, opt, value, color, rawValue, prevRawValue, sparkline, higherIsBetter };
                 });
                 return (
-                  <div className="svc-kpi-marquee">
+                  <div className={`svc-kpi-marquee${marqueePaused ? " paused" : ""}`}>
+                    <button
+                      type="button"
+                      className="svc-kpi-marquee-toggle"
+                      onClick={() => setMarqueePaused(p => !p)}
+                      title={marqueePaused ? "Resume marquee scroll" : "Pause marquee scroll"}
+                      aria-label={marqueePaused ? "Resume marquee scroll" : "Pause marquee scroll"}
+                    >
+                      {marqueePaused ? "▶" : "⏸"}
+                    </button>
                     <div className="svc-kpi-marquee-track">
                       {[...allCards, ...allCards].map((card, i) => (
                         <KpiCard
@@ -8662,6 +8672,7 @@ export const ServicesOverview = () => {
                           color={card.color}
                           higherIsBetter={card.higherIsBetter}
                           isLoading={svcDetailsResult.isLoading}
+                          style={card.kpiId === "avgLatency" || card.kpiId === "avgP90" ? { flex: "1 1 200px", minWidth: 200 } : undefined}
                         />
                       ))}
                     </div>

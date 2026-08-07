@@ -125,6 +125,8 @@ import {
   reliabilityTrendQuery,
   problemsPrevSummaryQuery,
   flameGraphQuery,
+  servicesWithSpansQuery,
+  n1QueryPatternQuery,
   cloudRegionClusterQuery,
   cloudRegionHostQuery,
   cloudRegionProcessQuery,
@@ -2807,9 +2809,11 @@ export const ServicesOverview = () => {
   }, [svcDetailsPrevData, problemsPrevSummaryResult.data, sloTarget]);
 
   // Request Details — lazy: Summary Details > Request Details sub-tab (index 1)
+  //  OR Performance > Endpoint Heatmap sub-tab (index 0) which reuses the same data.
   const summaryRequestDetailsEver = visitedTabs.has("Summary Details") && visitedSummarySubTabs.has(1);
+  const endpointHeatmapEver = visitedTabs.has("Performance") && visitedPerformanceSubTabs.has(0);
   const reqDetailsResult = useDql({
-    query: summaryRequestDetailsEver ? requestDetailsQuery(topN, tf) : NOOP_QUERY,
+    query: (summaryRequestDetailsEver || endpointHeatmapEver) ? requestDetailsQuery(topN, tf) : NOOP_QUERY,
   }, refetchOpts);
   const reqDetailsData = useMemo(() => {
     if (!reqDetailsResult.data?.records) return [];
@@ -2879,6 +2883,8 @@ export const ServicesOverview = () => {
   const changeImpactResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const changeImpactPrevResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
   const dependenciesResult = useDql({ query: depsTabEver ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
+  // N+1 anti-pattern — sibling spans under the same parent (real detection from trace data)
+  const n1QueryResult = useDql({ query: depsTabEver ? n1QueryPatternQuery(tf) : NOOP_QUERY }, refetchOpts);
   const hostServiceMapResult = useDql({ query: depsTabEver ? hostServiceMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sWorkloadServiceMapResult = useDql({ query: depsTabEver ? k8sWorkloadServiceMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sClusterWorkloadMapResult = useDql({ query: depsTabEver ? k8sClusterWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
@@ -2904,6 +2910,19 @@ export const ServicesOverview = () => {
   const flameGraphResult = useDql({
     query: visitedPerformanceSubTabs.has(2) && flameGraphService ? flameGraphQuery(flameGraphService, tf) : NOOP_QUERY,
   }, refetchOpts);
+  // Services that actually have spans in the current timeframe — used to filter
+  // the flame graph dropdown so we don't offer services with no span data.
+  const servicesWithSpansResult = useDql({
+    query: visitedPerformanceSubTabs.has(2) ? servicesWithSpansQuery(tf) : NOOP_QUERY,
+  }, refetchOpts);
+  const servicesWithSpans = useMemo(() => {
+    const set = new Set<string>();
+    servicesWithSpansResult.data?.records?.forEach((r: any) => {
+      const name = r["Service"];
+      if (typeof name === "string" && name) set.add(name);
+    });
+    return set;
+  }, [servicesWithSpansResult.data]);
   const flameGraphData = useMemo(() => {
     if (!flameGraphResult.data?.records) return [];
     return flameGraphResult.data.records.map((r: any) => ({
@@ -7049,7 +7068,8 @@ export const ServicesOverview = () => {
 
   // ─── Communication Anti-Patterns ───
   const antiPatternData = useMemo(() => {
-    if (!dependenciesData.length) return { patterns: [] as { type: string; severity: string; services: string[]; detail: string }[], totalEdges: 0 };
+    const n1Records = (n1QueryResult.data?.records ?? []) as any[];
+    if (!dependenciesData.length && n1Records.length === 0) return { patterns: [] as { type: string; severity: string; services: string[]; detail: string }[], totalEdges: 0 };
     const patterns: { type: string; severity: string; services: string[]; detail: string }[] = [];
     // 1. Circular dependencies
     const outMap = new Map<string, Set<string>>();
@@ -7092,30 +7112,48 @@ export const ServicesOverview = () => {
     inMap.forEach((callers, callee) => {
       if (callers.size > 5) patterns.push({ type: "Critical Shared Dependency", severity: "warning", services: [callee], detail: `"${callee}" is called by ${callers.size} services — single point of failure risk` });
     });
-    // 5. N+1 Query — callee receives far more requests than caller implies per-request amplification
-    const svcReqTotals = new Map<string, number>();
-    reqDetailsData.forEach(r => {
-      svcReqTotals.set(r.Service, (svcReqTotals.get(r.Service) ?? 0) + (r.Requests ?? 0));
+    // 5. N+1 Query — sibling spans under the same parent in a single trace (real span-based detection)
+    n1Records.forEach((r) => {
+      const service = String(r["Service"] ?? "Unknown");
+      const operation = String(r["operation"] ?? "unknown");
+      const patternCount = Number(r["pattern_count"] ?? 0);
+      const totalSpans = Number(r["total_spans"] ?? 0);
+      const maxSiblings = Number(r["max_siblings"] ?? 0);
+      if (patternCount <= 0 || totalSpans <= 0) return;
+      patterns.push({
+        type: "N+1 Query",
+        severity: maxSiblings >= 50 ? "critical" : "warning",
+        services: [service],
+        detail: `"${service}" · operation "${operation}": ${patternCount.toLocaleString()} N+1 occurrence(s), ${totalSpans.toLocaleString()} sibling spans, worst trace had ${maxSiblings.toLocaleString()} siblings under the same parent`,
+      });
     });
-    const n1Seen = new Set<string>();
-    dependenciesData.forEach(d => {
-      const edgeKey = `${d.Caller}→${d.Callee}`;
-      if (n1Seen.has(edgeKey)) return;
-      n1Seen.add(edgeKey);
-      const callerReqs = svcReqTotals.get(d.Caller) ?? 0;
-      const calleeReqs = svcReqTotals.get(d.Callee) ?? 0;
-      if (callerReqs > 0 && calleeReqs > callerReqs * 5) {
-        const ratio = Math.round(calleeReqs / callerReqs);
-        patterns.push({
-          type: "N+1 Query",
-          severity: ratio > 10 ? "critical" : "warning",
-          services: [d.Caller, d.Callee],
-          detail: `"${d.Caller}" → "${d.Callee}": callee receives ~${ratio}× more requests than caller — likely N+1 loop (${Math.round(calleeReqs).toLocaleString()} vs ${Math.round(callerReqs).toLocaleString()} req/period)`,
-        });
-      }
-    });
+    // Fallback heuristic — if span-based query returned nothing, fall back to
+    // per-service request-volume amplification detection.
+    if (n1Records.length === 0) {
+      const svcReqTotals = new Map<string, number>();
+      reqDetailsData.forEach(r => {
+        svcReqTotals.set(r.Service, (svcReqTotals.get(r.Service) ?? 0) + (r.Requests ?? 0));
+      });
+      const n1Seen = new Set<string>();
+      dependenciesData.forEach(d => {
+        const edgeKey = `${d.Caller}→${d.Callee}`;
+        if (n1Seen.has(edgeKey)) return;
+        n1Seen.add(edgeKey);
+        const callerReqs = svcReqTotals.get(d.Caller) ?? 0;
+        const calleeReqs = svcReqTotals.get(d.Callee) ?? 0;
+        if (callerReqs > 0 && calleeReqs > callerReqs * 5) {
+          const ratio = Math.round(calleeReqs / callerReqs);
+          patterns.push({
+            type: "N+1 Query",
+            severity: ratio > 10 ? "critical" : "warning",
+            services: [d.Caller, d.Callee],
+            detail: `"${d.Caller}" → "${d.Callee}": callee receives ~${ratio}× more requests than caller — likely N+1 loop (${Math.round(calleeReqs).toLocaleString()} vs ${Math.round(callerReqs).toLocaleString()} req/period)`,
+          });
+        }
+      });
+    }
     return { patterns: patterns.sort((a, b) => (a.severity === "critical" ? 0 : 1) - (b.severity === "critical" ? 0 : 1)), totalEdges: dependenciesData.length };
-  }, [dependenciesData, reqDetailsData]);
+  }, [dependenciesData, reqDetailsData, n1QueryResult.data]);
 
   // ─── On-Call Health / Alert Fatigue ───
   const onCallHealthData = useMemo(() => {
@@ -11552,6 +11590,7 @@ export const ServicesOverview = () => {
                   >
                     <Select.Content>
                       {[...new Set(svcDetailsData.map((s: any) => s.Service).filter(Boolean))]
+                        .filter((name: string) => servicesWithSpans.size === 0 || servicesWithSpans.has(name))
                         .sort()
                         .map((name: string) => (
                           <Select.Option key={name} value={name}>{name}</Select.Option>

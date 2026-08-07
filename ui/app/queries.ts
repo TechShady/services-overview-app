@@ -604,7 +604,9 @@ export function closedProblemsQuery(tf: TF): string {
   return `fetch dt.davis.problems, ${tfClause(tf)}
 | filter dt.davis.is_duplicate == false AND event.status == "CLOSED"
 | fields display_id, event.id, event.name, event.start, event.end, resolved_problem_duration, management_zones, root_cause_entity_name
-| fieldsAdd duration_minutes = toDouble(resolved_problem_duration) / 60000000000.0
+| fieldsAdd computed_duration_ns = if(isNotNull(event.end) AND isNotNull(event.start), toLong(event.end - event.start), else: 0)
+| fieldsAdd effective_duration_ns = if(isNotNull(resolved_problem_duration) AND toLong(resolved_problem_duration) > 0, toLong(resolved_problem_duration), else: computed_duration_ns)
+| fieldsAdd duration_minutes = toDouble(effective_duration_ns) / 60000000000.0
 | sort event.start desc
 | limit 500`;
 }
@@ -1357,4 +1359,38 @@ export function flameGraphQuery(serviceName: string, tf: TF): string {
   }
 | sort total_duration desc
 | limit 50`;
+}
+
+// ---------------------------------------------------------------------------
+// Services With Spans — distinct list for flame graph service dropdown
+// ---------------------------------------------------------------------------
+export function servicesWithSpansQuery(tf: TF): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(dt.entity.service)
+| summarize spanCount = count(), by:{dt.entity.service}
+| filter spanCount > 0
+| fieldsAdd Service = coalesce(entityAttr(dt.entity.service, "entity.name"), toString(dt.entity.service))
+| fields Service, spanCount
+| sort spanCount desc
+| limit 1000`;
+}
+
+// ---------------------------------------------------------------------------
+// N+1 Query Anti-Pattern — sibling spans under the same parent in a trace
+// ---------------------------------------------------------------------------
+export function n1QueryPatternQuery(tf: TF): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(trace.id) AND isNotNull(parent.span.id) AND isNotNull(endpoint.name)
+| summarize sibling_count = count(),
+    service_id = takeFirst(dt.entity.service),
+    by:{trace.id, parent.span.id, endpoint.name}
+| filter sibling_count >= 10
+| summarize
+    pattern_count = count(),
+    total_spans = sum(sibling_count),
+    max_siblings = max(sibling_count),
+    by:{service_id, operation = endpoint.name}
+| fieldsAdd Service = coalesce(entityAttr(service_id, "entity.name", type:"dt.entity.service"), toString(service_id))
+| sort total_spans desc
+| limit 100`;
 }

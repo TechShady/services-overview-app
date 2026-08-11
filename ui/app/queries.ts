@@ -1376,21 +1376,40 @@ export function servicesWithSpansQuery(tf: TF): string {
 }
 
 // ---------------------------------------------------------------------------
-// N+1 Query Anti-Pattern — sibling spans under the same parent in a trace
+// N+1 Query Anti-Pattern — DB spans issued per parent span (database fan-out)
+// Matches Pattern Problems app approach: count db.system spans under each parent.
 // ---------------------------------------------------------------------------
 export function n1QueryPatternQuery(tf: TF): string {
   return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
-| filter isNotNull(trace.id) AND isNotNull(parent.span.id) AND isNotNull(endpoint.name)
-| summarize sibling_count = count(),
+| filter isNotNull(trace.id) AND isNotNull(parent.span.id) AND isNotNull(db.system)
+| summarize db_count = count(),
     service_id = takeFirst(dt.entity.service),
-    by:{trace.id, parent.span.id, endpoint.name}
-| filter sibling_count >= 10
+    db_system = takeFirst(db.system),
+    by:{trace.id, parent.span.id}
+| filter db_count >= 5
 | summarize
     pattern_count = count(),
-    total_spans = sum(sibling_count),
-    max_siblings = max(sibling_count),
-    by:{service_id, operation = endpoint.name}
+    total_spans = sum(db_count),
+    avg_queries = avg(db_count),
+    max_siblings = max(db_count),
+    by:{service_id, db = db_system}
 | fieldsAdd Service = coalesce(entityAttr(service_id, "entity.name", type:"dt.entity.service"), toString(service_id))
 | sort total_spans desc
+| limit 100`;
+}
+
+// ---------------------------------------------------------------------------
+// Circular Dependency — services appearing multiple times in the same trace.
+// Matches Pattern Problems "Circular Dependencies" tab approach.
+// ---------------------------------------------------------------------------
+export function circularDependencySpanQuery(tf: TF): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(trace.id) AND isNotNull(dt.entity.service)
+| fieldsAdd service_name = coalesce(entityAttr(dt.entity.service, "entity.name"), toString(dt.entity.service))
+| summarize visit_count = count(), by:{trace.id, service_name}
+| filter visit_count > 1
+| summarize circular_traces = count(), avg_revisits = avg(visit_count), max_revisits = max(visit_count), by:{service = service_name}
+| filter circular_traces >= 10
+| sort circular_traces desc
 | limit 100`;
 }

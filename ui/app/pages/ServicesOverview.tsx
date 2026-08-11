@@ -127,6 +127,7 @@ import {
   flameGraphQuery,
   servicesWithSpansQuery,
   n1QueryPatternQuery,
+  circularDependencySpanQuery,
   cloudRegionClusterQuery,
   cloudRegionHostQuery,
   cloudRegionProcessQuery,
@@ -2882,9 +2883,11 @@ export const ServicesOverview = () => {
   const deploymentsPrevResult = useDql({ query: incidentsTabEver ? deploymentEventsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
   const changeImpactResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const changeImpactPrevResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
-  const dependenciesResult = useDql({ query: depsTabEver ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
-  // N+1 anti-pattern — sibling spans under the same parent (real detection from trace data)
-  const n1QueryResult = useDql({ query: depsTabEver ? n1QueryPatternQuery(tf) : NOOP_QUERY }, refetchOpts);
+  // Also trigger topology fetch when Detection & Analysis is visited so Anti-Patterns doesn't need deps tab first
+  const dependenciesResult = useDql({ query: (depsTabEver || detectionTabEver) ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
+  // N+1 and circular dep queries fire on Detection & Analysis visit (not deps tab)
+  const n1QueryResult = useDql({ query: detectionTabEver ? n1QueryPatternQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const circularDepSpanResult = useDql({ query: detectionTabEver ? circularDependencySpanQuery(tf) : NOOP_QUERY }, refetchOpts);
   const hostServiceMapResult = useDql({ query: depsTabEver ? hostServiceMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sWorkloadServiceMapResult = useDql({ query: depsTabEver ? k8sWorkloadServiceMapQuery() : NOOP_QUERY }, refetchOpts);
   const k8sClusterWorkloadMapResult = useDql({ query: depsTabEver ? k8sClusterWorkloadMapQuery() : NOOP_QUERY }, refetchOpts);
@@ -7069,9 +7072,28 @@ export const ServicesOverview = () => {
   // ─── Communication Anti-Patterns ───
   const antiPatternData = useMemo(() => {
     const n1Records = (n1QueryResult.data?.records ?? []) as any[];
-    if (!dependenciesData.length && n1Records.length === 0) return { patterns: [] as { type: string; severity: string; services: string[]; detail: string }[], totalEdges: 0 };
+    const circularSpanRecords = (circularDepSpanResult.data?.records ?? []) as any[];
+    if (!dependenciesData.length && n1Records.length === 0 && circularSpanRecords.length === 0) {
+      return { patterns: [] as { type: string; severity: string; services: string[]; detail: string }[], totalEdges: 0 };
+    }
     const patterns: { type: string; severity: string; services: string[]; detail: string }[] = [];
-    // 1. Circular dependencies
+
+    // 1a. Circular dependencies — trace-based (Pattern Problems approach).
+    //     Services appearing multiple times in the same distributed trace.
+    circularSpanRecords.forEach((r) => {
+      const service = String(r["service"] ?? "Unknown");
+      const circularTraces = Number(r["circular_traces"] ?? 0);
+      const maxRevisits = Number(r["max_revisits"] ?? 0);
+      if (circularTraces <= 0) return;
+      patterns.push({
+        type: "Circular Dependency",
+        severity: maxRevisits >= 5 ? "critical" : "warning",
+        services: [service],
+        detail: `"${service}" appeared in ${circularTraces.toLocaleString()} traces where it was invoked multiple times (max ${maxRevisits} re-visits in one trace) — indicates a re-entrant or looping call chain`,
+      });
+    });
+
+    // 1b. Circular dependencies — topology-based fallback (direct bidirectional edges A→B and B→A).
     const outMap = new Map<string, Set<string>>();
     dependenciesData.forEach(d => {
       if (!outMap.has(d.Caller)) outMap.set(d.Caller, new Set());
@@ -7080,10 +7102,12 @@ export const ServicesOverview = () => {
     dependenciesData.forEach(d => {
       if (outMap.get(d.Callee)?.has(d.Caller)) {
         const pair = [d.Caller, d.Callee].sort().join(" ↔ ");
-        if (!patterns.some(p => p.type === "Circular Dependency" && p.detail.includes(pair)))
-          patterns.push({ type: "Circular Dependency", severity: "critical", services: [d.Caller, d.Callee], detail: `Bidirectional calls detected: ${pair}` });
+        const alreadyFound = patterns.some(p => p.type === "Circular Dependency" && (p.services.includes(d.Caller) || p.services.includes(d.Callee)));
+        if (!alreadyFound)
+          patterns.push({ type: "Circular Dependency", severity: "critical", services: [d.Caller, d.Callee], detail: `Bidirectional calls detected in entity topology: ${pair}` });
       }
     });
+
     // 2. Deep call chains (>3 hops)
     const findDepth = (svc: string, visited: Set<string>): number => {
       if (visited.has(svc)) return 0;
@@ -7099,10 +7123,12 @@ export const ServicesOverview = () => {
       const depth = findDepth(caller, new Set());
       if (depth > 3) patterns.push({ type: "Deep Call Chain", severity: "warning", services: [caller], detail: `"${caller}" initiates a call chain ${depth} levels deep (>3 is a code smell)` });
     });
+
     // 3. Fan-out storms (>5 downstream)
     outMap.forEach((callees, caller) => {
       if (callees.size > 5) patterns.push({ type: "Fan-Out Storm", severity: "warning", services: [caller, ...callees], detail: `"${caller}" calls ${callees.size} downstream services — high blast radius` });
     });
+
     // 4. High fan-in (>5 upstream callers)
     const inMap = new Map<string, Set<string>>();
     dependenciesData.forEach(d => {
@@ -7112,24 +7138,26 @@ export const ServicesOverview = () => {
     inMap.forEach((callers, callee) => {
       if (callers.size > 5) patterns.push({ type: "Critical Shared Dependency", severity: "warning", services: [callee], detail: `"${callee}" is called by ${callers.size} services — single point of failure risk` });
     });
-    // 5. N+1 Query — sibling spans under the same parent in a single trace (real span-based detection)
+
+    // 5. N+1 Query — DB spans per parent span (Pattern Problems approach: db.system-based).
     n1Records.forEach((r) => {
       const service = String(r["Service"] ?? "Unknown");
-      const operation = String(r["operation"] ?? "unknown");
+      const dbSystem = String(r["db"] ?? r["operation"] ?? "unknown");
       const patternCount = Number(r["pattern_count"] ?? 0);
       const totalSpans = Number(r["total_spans"] ?? 0);
+      const avgQueries = Number(r["avg_queries"] ?? r["max_siblings"] ?? 0);
       const maxSiblings = Number(r["max_siblings"] ?? 0);
       if (patternCount <= 0 || totalSpans <= 0) return;
       patterns.push({
         type: "N+1 Query",
         severity: maxSiblings >= 50 ? "critical" : "warning",
         services: [service],
-        detail: `"${service}" · operation "${operation}": ${patternCount.toLocaleString()} N+1 occurrence(s), ${totalSpans.toLocaleString()} sibling spans, worst trace had ${maxSiblings.toLocaleString()} siblings under the same parent`,
+        detail: `"${service}" [${dbSystem}]: ${patternCount.toLocaleString()} N+1 occurrence(s), ${totalSpans.toLocaleString()} total DB queries, avg ${avgQueries.toFixed(1)} queries/parent span, worst span issued ${maxSiblings.toLocaleString()} queries`,
       });
     });
-    // Fallback heuristic — if span-based query returned nothing, fall back to
-    // per-service request-volume amplification detection.
-    if (n1Records.length === 0) {
+
+    // Fallback heuristic — request-volume amplification between caller/callee.
+    if (n1Records.length === 0 && dependenciesData.length > 0) {
       const svcReqTotals = new Map<string, number>();
       reqDetailsData.forEach(r => {
         svcReqTotals.set(r.Service, (svcReqTotals.get(r.Service) ?? 0) + (r.Requests ?? 0));
@@ -7152,8 +7180,9 @@ export const ServicesOverview = () => {
         }
       });
     }
+
     return { patterns: patterns.sort((a, b) => (a.severity === "critical" ? 0 : 1) - (b.severity === "critical" ? 0 : 1)), totalEdges: dependenciesData.length };
-  }, [dependenciesData, reqDetailsData, n1QueryResult.data]);
+  }, [dependenciesData, reqDetailsData, n1QueryResult.data, circularDepSpanResult.data]);
 
   // ─── On-Call Health / Alert Fatigue ───
   const onCallHealthData = useMemo(() => {
@@ -11572,11 +11601,11 @@ export const ServicesOverview = () => {
               <SectionHeader title="Service Trace Flame Graph" />
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
                 <div className="chart-description">
-                  Visualizes span distribution across operations for a selected service. Bar width = share of total observed duration. Color = error rate:{" "}
+                  Visualizes span distribution across operations for a selected service, stacked by span kind (Ingress → Internal → Egress). Each row fills 100% width — box width = operation's share of its kind's total duration. Color = error rate:{" "}
                   <span style={{ color: GREEN }}>green = 0%</span>,{" "}
                   <span style={{ color: YELLOW }}>yellow = 1–5%</span>,{" "}
                   <span style={{ color: RED }}>red = &gt;5%</span>.
-                  Hover a bar for P50/P90/P99 details.
+                  Hover any box for P50/P90/P99 and call-count details.
                 </div>
               </div>
 
@@ -11615,11 +11644,9 @@ export const ServicesOverview = () => {
                 </div>
               ) : (
                 <div className="svc-chart-tile" style={{ padding: 16 }}>
-                  {/* Root service bar */}
                   {(() => {
+                    const grandTotal = flameGraphData.reduce((s, d) => s + d.total_duration, 0);
                     const totalCalls = flameGraphData.reduce((s, d) => s + d.count, 0);
-                    const totalDuration = flameGraphData.reduce((s, d) => s + d.total_duration, 0);
-                    const maxDuration = flameGraphData[0]?.total_duration ?? 1;
 
                     const formatUs = (us: number) => {
                       if (us >= 1_000_000) return (us / 1_000_000).toFixed(2) + " s";
@@ -11627,94 +11654,246 @@ export const ServicesOverview = () => {
                       return us.toFixed(0) + " µs";
                     };
 
+                    // Group operations by span kind to create stack depth rows.
+                    // Semantic order bottom→top: server (entry point) → internal (business logic) → client (outbound calls).
+                    const KIND_ORDER = ["server", "consumer", "producer", "internal", "client"];
+                    const KIND_LABELS: Record<string, string> = {
+                      server: "Ingress", client: "Egress", internal: "Internal",
+                      consumer: "Consumer", producer: "Producer",
+                    };
+                    const seenKinds = new Set(flameGraphData.map(d => d.kind));
+                    const allKinds = [
+                      ...KIND_ORDER.filter(k => seenKinds.has(k)),
+                      ...[...seenKinds].filter(k => !KIND_ORDER.includes(k)),
+                    ];
+                    const rows = allKinds.map(kind => ({
+                      kind,
+                      label: KIND_LABELS[kind] ?? kind,
+                      ops: flameGraphData.filter(d => d.kind === kind).sort((a, b) => b.total_duration - a.total_duration),
+                    })).filter(r => r.ops.length > 0);
+
+                    // Analysis helpers
+                    const topOp = flameGraphData[0];
+                    const topShare = grandTotal > 0 ? (((topOp?.total_duration ?? 0) / grandTotal) * 100).toFixed(1) : "0";
+                    const errorOps = flameGraphData.filter(d => d.count > 0 && (d.errors / d.count) * 100 > 5);
+                    const slowOps = flameGraphData.filter(d => d.p90 > 1_000_000);
+
                     return (
                       <div>
-                        {/* Service root bar */}
-                        <div style={{ height: 34, background: BLUE, borderRadius: 4, display: "flex", alignItems: "center", paddingLeft: 12, marginBottom: 10, color: "#fff", fontWeight: 700, fontSize: 13, overflow: "hidden" }}>
-                          {flameGraphService} &mdash; {totalCalls.toLocaleString()} spans &nbsp;&middot;&nbsp; {formatUs(totalDuration)} total
-                        </div>
+                        {/* ── Flame graph canvas ── */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
 
-                        {/* Operation rows */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          {flameGraphData.map((entry, i) => {
-                            const pct = maxDuration > 0 ? (entry.total_duration / maxDuration) * 100 : 0;
-                            const errRate = entry.count > 0 ? (entry.errors / entry.count) * 100 : 0;
-                            const barColor = errRate === 0 ? GREEN : errRate < 5 ? YELLOW : RED;
-                            const textColor = errRate >= 1 && errRate < 5 ? "#000" : "#fff";
-
+                          {/* Kind rows — reversed so server (root) is at the bottom */}
+                          {[...rows].reverse().map((row) => {
+                            const rowTotal = row.ops.reduce((s, d) => s + d.total_duration, 0);
                             return (
-                              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, position: "relative" }}>
-                                {/* Label column */}
-                                <div style={{ width: 240, fontSize: 11, textAlign: "right", opacity: 0.75, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}
-                                  title={`${entry.operation} (${entry.kind})`}>
-                                  {entry.operation}
+                              <div key={row.kind} style={{ display: "flex", alignItems: "stretch" }}>
+                                {/* Y-axis kind label */}
+                                <div style={{
+                                  width: 66, flexShrink: 0, fontSize: 10, opacity: 0.45,
+                                  display: "flex", alignItems: "center", justifyContent: "flex-end",
+                                  paddingRight: 8, fontFamily: "monospace", letterSpacing: "0.02em",
+                                }}>
+                                  {row.label}
                                 </div>
-
-                                {/* Bar + tooltip group */}
-                                <div style={{ flex: 1, position: "relative" }} className="svc-flame-row">
-                                  <div
-                                    style={{
-                                      width: `${Math.max(pct, 0.3)}%`,
-                                      minWidth: 6,
-                                      height: 28,
-                                      background: barColor,
-                                      borderRadius: 3,
-                                      display: "flex",
-                                      alignItems: "center",
-                                      paddingLeft: 8,
-                                      overflow: "hidden",
-                                      boxSizing: "border-box",
-                                    }}>
-                                    {pct > 10 && (
-                                      <span style={{ fontSize: 10, color: textColor, fontWeight: 600, whiteSpace: "nowrap" }}>
-                                        {entry.count.toLocaleString()} calls &nbsp;&middot;&nbsp; {formatUs(entry.avg_duration)} avg
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  {/* Hover tooltip rendered via CSS group hover */}
-                                  <div className="svc-flame-tooltip" style={{
-                                    display: "none",
-                                    position: "absolute",
-                                    left: `${Math.min(pct + 1, 55)}%`,
-                                    top: "100%",
-                                    marginTop: 4,
-                                    zIndex: 200,
-                                    background: "var(--dt-colors-surface-overlay, #1a1b2e)",
-                                    border: "1px solid var(--dt-colors-border-default, #444)",
-                                    borderRadius: 6,
-                                    padding: "10px 14px",
-                                    minWidth: 230,
-                                    pointerEvents: "none",
-                                    boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
-                                    fontSize: 11,
-                                  }}>
-                                    <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 12, wordBreak: "break-all" }}>{entry.operation}</div>
-                                    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 10px" }}>
-                                      <span style={{ opacity: 0.65 }}>Kind</span><span>{entry.kind}</span>
-                                      <span style={{ opacity: 0.65 }}>Calls</span><span>{entry.count.toLocaleString()}</span>
-                                      <span style={{ opacity: 0.65 }}>Errors</span><span style={{ color: errRate > 0 ? RED : "inherit" }}>{entry.errors.toLocaleString()} ({errRate.toFixed(1)}%)</span>
-                                      <span style={{ opacity: 0.65 }}>Total</span><span>{formatUs(entry.total_duration)}</span>
-                                      <span style={{ opacity: 0.65 }}>Avg</span><span>{formatUs(entry.avg_duration)}</span>
-                                      <span style={{ opacity: 0.65 }}>P50</span><span>{formatUs(entry.p50)}</span>
-                                      <span style={{ opacity: 0.65 }}>P90</span><span>{formatUs(entry.p90)}</span>
-                                      <span style={{ opacity: 0.65 }}>P99</span><span>{formatUs(entry.p99)}</span>
-                                      <span style={{ opacity: 0.65 }}>Share</span><span>{pct.toFixed(1)}%</span>
-                                    </div>
-                                  </div>
+                                {/* Packed boxes filling 100% of the row */}
+                                <div style={{ flex: 1, display: "flex", height: 26, overflow: "hidden" }}>
+                                  {row.ops.map((entry, opIdx) => {
+                                    const pct = rowTotal > 0 ? (entry.total_duration / rowTotal) * 100 : 0;
+                                    const globalPct = grandTotal > 0 ? (entry.total_duration / grandTotal) * 100 : 0;
+                                    const errRate = entry.count > 0 ? (entry.errors / entry.count) * 100 : 0;
+                                    const barColor = errRate === 0 ? GREEN : errRate < 5 ? YELLOW : RED;
+                                    const textColor = errRate >= 1 && errRate < 5 ? "#111" : "#fff";
+                                    return (
+                                      <div key={opIdx} className="svc-flame-cell" style={{
+                                        width: `${pct}%`,
+                                        minWidth: 2,
+                                        height: 26,
+                                        background: barColor,
+                                        borderLeft: opIdx > 0 ? "1px solid rgba(0,0,0,0.18)" : undefined,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        paddingLeft: 4,
+                                        overflow: "hidden",
+                                        boxSizing: "border-box",
+                                        position: "relative",
+                                        flexShrink: 0,
+                                        cursor: "default",
+                                      }}>
+                                        {pct > 3.5 && (
+                                          <span style={{
+                                            fontSize: 10, color: textColor, fontWeight: 600,
+                                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                            display: "block", userSelect: "none",
+                                          }}>
+                                            {entry.operation}
+                                          </span>
+                                        )}
+                                        {/* CSS-triggered hover tooltip */}
+                                        <div className="svc-flame-tooltip" style={{
+                                          display: "none",
+                                          position: "absolute",
+                                          left: 0,
+                                          top: "100%",
+                                          marginTop: 4,
+                                          zIndex: 300,
+                                          background: "var(--dt-colors-surface-overlay, #1a1b2e)",
+                                          border: "1px solid var(--dt-colors-border-default, #444)",
+                                          borderRadius: 6,
+                                          padding: "10px 14px",
+                                          minWidth: 240,
+                                          pointerEvents: "none",
+                                          boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+                                          fontSize: 11,
+                                          whiteSpace: "nowrap",
+                                        }}>
+                                          <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 12, wordBreak: "break-all", whiteSpace: "normal" }}>{entry.operation}</div>
+                                          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 10px" }}>
+                                            <span style={{ opacity: 0.65 }}>Kind</span><span>{entry.kind}</span>
+                                            <span style={{ opacity: 0.65 }}>Calls</span><span>{entry.count.toLocaleString()}</span>
+                                            <span style={{ opacity: 0.65 }}>Errors</span><span style={{ color: errRate > 0 ? RED : "inherit" }}>{entry.errors.toLocaleString()} ({errRate.toFixed(1)}%)</span>
+                                            <span style={{ opacity: 0.65 }}>Total</span><span>{formatUs(entry.total_duration)}</span>
+                                            <span style={{ opacity: 0.65 }}>Avg</span><span>{formatUs(entry.avg_duration)}</span>
+                                            <span style={{ opacity: 0.65 }}>P50</span><span>{formatUs(entry.p50)}</span>
+                                            <span style={{ opacity: 0.65 }}>P90</span><span>{formatUs(entry.p90)}</span>
+                                            <span style={{ opacity: 0.65 }}>P99</span><span>{formatUs(entry.p99)}</span>
+                                            <span style={{ opacity: 0.65 }}>Row share</span><span>{pct.toFixed(1)}%</span>
+                                            <span style={{ opacity: 0.65 }}>Global share</span><span>{globalPct.toFixed(1)}%</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             );
                           })}
+
+                          {/* Service root bar — full width, anchors the bottom of the graph */}
+                          <div style={{ display: "flex", alignItems: "stretch" }}>
+                            <div style={{ width: 66, flexShrink: 0 }} />
+                            <div style={{
+                              flex: 1, height: 34,
+                              background: BLUE,
+                              borderRadius: "0 0 4px 4px",
+                              display: "flex", alignItems: "center",
+                              paddingLeft: 12, color: "#fff", fontWeight: 700, fontSize: 13, overflow: "hidden",
+                            }}>
+                              {flameGraphService} &mdash; {totalCalls.toLocaleString()} spans &nbsp;&middot;&nbsp; {formatUs(grandTotal)} total
+                            </div>
+                          </div>
                         </div>
 
                         {/* Legend */}
-                        <Flex gap={20} style={{ marginTop: 14 }}>
+                        <Flex gap={20} style={{ marginTop: 10, marginLeft: 66 }} flexWrap="wrap">
                           <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: GREEN, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>0% errors</Text></Flex>
                           <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: YELLOW, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>1–5% errors</Text></Flex>
                           <Flex alignItems="center" gap={6}><div style={{ width: 12, height: 12, background: RED, borderRadius: 2 }} /><Text style={{ fontSize: 11, opacity: 0.7 }}>&gt;5% errors</Text></Flex>
-                          <Text style={{ fontSize: 11, opacity: 0.5 }}>Width = share of total duration &nbsp;|&nbsp; Top 50 operations by total duration</Text>
+                          <Text style={{ fontSize: 11, opacity: 0.5 }}>Width = share of row duration &nbsp;|&nbsp; Y-axis = span kind &nbsp;|&nbsp; Top 50 operations &nbsp;|&nbsp; Hover for details</Text>
                         </Flex>
+
+                        {/* ── Analysis section ── */}
+                        <div style={{ marginTop: 20, borderTop: "1px solid var(--dt-colors-border-default, #333)", paddingTop: 16 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, opacity: 0.9 }}>Analysis</div>
+
+                          {/* Narrative summary */}
+                          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 14, lineHeight: 1.65 }}>
+                            <strong>{flameGraphService}</strong> produced{" "}
+                            <strong>{flameGraphData.length} distinct operations</strong> across{" "}
+                            <strong>{totalCalls.toLocaleString()} spans</strong> in the selected timeframe.
+                            {topOp && (
+                              <> The dominant hotspot is{" "}
+                              <strong style={{ fontFamily: "monospace" }}>{topOp.operation}</strong>, which consumed{" "}
+                              <strong>{topShare}%</strong> of total observed duration
+                              ({topOp.count.toLocaleString()} calls at an average of {formatUs(topOp.avg_duration)}).</>
+                            )}
+                            {errorOps.length === 0 && slowOps.length === 0
+                              ? " No high-error or high-latency operations were detected — the service appears healthy within this timeframe."
+                              : <> {errorOps.length > 0 && <><strong style={{ color: RED }}>{errorOps.length} operation{errorOps.length > 1 ? "s" : ""}</strong> exceeded a 5% error rate.</>}{" "}{slowOps.length > 0 && <><strong style={{ color: YELLOW }}>{slowOps.length} operation{slowOps.length > 1 ? "s" : ""}</strong> had a P90 above 1 second.</>}</>
+                            }
+                          </div>
+
+                          {/* Finding cards */}
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+
+                            {/* Top hotspots */}
+                            <div style={{ background: "rgba(69,137,255,0.07)", border: "1px solid rgba(69,137,255,0.2)", borderRadius: 8, padding: "12px 14px" }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.55, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Top Duration Hotspots</div>
+                              {flameGraphData.slice(0, 4).map((op, i) => {
+                                const share = grandTotal > 0 ? ((op.total_duration / grandTotal) * 100).toFixed(1) : "0";
+                                return (
+                                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, fontSize: 11 }}>
+                                    <span style={{ opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%", fontFamily: "monospace" }} title={op.operation}>{op.operation}</span>
+                                    <span style={{ fontWeight: 700, flexShrink: 0, marginLeft: 8 }}>{share}%</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Error-prone operations */}
+                            {errorOps.length > 0 && (
+                              <div style={{ background: "rgba(250,82,82,0.07)", border: "1px solid rgba(250,82,82,0.25)", borderRadius: 8, padding: "12px 14px" }}>
+                                <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.55, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, color: RED }}>High Error Rate (&gt;5%)</div>
+                                {errorOps.slice(0, 4).map((op, i) => {
+                                  const errRate = ((op.errors / op.count) * 100).toFixed(1);
+                                  return (
+                                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, fontSize: 11 }}>
+                                      <span style={{ opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%", fontFamily: "monospace" }} title={op.operation}>{op.operation}</span>
+                                      <span style={{ fontWeight: 700, color: RED, flexShrink: 0, marginLeft: 8 }}>{errRate}%</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {/* Slow operations */}
+                            {slowOps.length > 0 && (
+                              <div style={{ background: "rgba(255,181,71,0.07)", border: "1px solid rgba(255,181,71,0.25)", borderRadius: 8, padding: "12px 14px" }}>
+                                <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.55, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, color: YELLOW }}>Slow Operations (P90 &gt; 1s)</div>
+                                {slowOps.slice(0, 4).map((op, i) => (
+                                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, fontSize: 11 }}>
+                                    <span style={{ opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%", fontFamily: "monospace" }} title={op.operation}>{op.operation}</span>
+                                    <span style={{ fontWeight: 700, color: YELLOW, flexShrink: 0, marginLeft: 8 }}>P90 {formatUs(op.p90)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Recommendations */}
+                          {(errorOps.length > 0 || slowOps.length > 0 || parseFloat(topShare) > 40) && (
+                            <div style={{ marginTop: 12, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "12px 16px" }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.55, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Recommendations</div>
+                              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, lineHeight: 1.85, opacity: 0.85 }}>
+                                {parseFloat(topShare) > 40 && topOp && (
+                                  <li>
+                                    <strong style={{ fontFamily: "monospace" }}>{topOp.operation}</strong> consumes {topShare}% of observed duration
+                                    ({topOp.count.toLocaleString()} calls, avg {formatUs(topOp.avg_duration)}). Consider adding
+                                    caching, reducing call frequency, or profiling the operation for internal bottlenecks.
+                                  </li>
+                                )}
+                                {errorOps.slice(0, 2).map((op, i) => {
+                                  const errRate = ((op.errors / op.count) * 100).toFixed(1);
+                                  return (
+                                    <li key={i}>
+                                      <strong style={{ fontFamily: "monospace" }}>{op.operation}</strong> has a {errRate}% error rate
+                                      ({op.errors.toLocaleString()} failures). Filter distributed traces to this operation and
+                                      review error tags and logs to identify the failure pattern.
+                                    </li>
+                                  );
+                                })}
+                                {slowOps.slice(0, 2).map((op, i) => (
+                                  <li key={i}>
+                                    <strong style={{ fontFamily: "monospace" }}>{op.operation}</strong> has a P90 of {formatUs(op.p90)}.
+                                    {op.kind === "client"
+                                      ? " This is an outbound client span — investigate for N+1 query patterns, missing connection pooling, or slow upstream dependencies."
+                                      : " Investigate for synchronous blocking calls, lock contention, or CPU-bound work that could be moved off the critical path."}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     );
                   })()}

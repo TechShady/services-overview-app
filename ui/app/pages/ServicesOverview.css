@@ -814,3 +814,13 @@
 .svc-flame-row:hover .svc-flame-tooltip {
   display: block !important;
 }
+.svc-flame-cell:hover .svc-flame-tooltip {
+  display: block !important;
+}
+.svc-flame-cell {
+  transition: filter 0.1s ease;
+}
+.svc-flame-cell:hover {
+  filter: brightness(1.15);
+  z-index: 10;
+}

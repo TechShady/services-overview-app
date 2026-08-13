@@ -4,6 +4,7 @@ import { Route, Routes } from "react-router-dom";
 import { DisclaimerModal } from "./components/DisclaimerModal";
 import { ServicesOverview } from "./pages/ServicesOverview";
 import { TimeframeProvider } from "./state/TimeframeContext";
+import { TimelapseProvider } from "./TimelapseContext";
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -36,14 +37,16 @@ export const App = () => {
   return (
     <ErrorBoundary>
       <TimeframeProvider>
-        <DisclaimerModal />
-        <Page>
-          <Page.Main>
-            <Routes>
-              <Route path="/" element={<ServicesOverview />} />
-            </Routes>
-          </Page.Main>
-        </Page>
+        <TimelapseProvider>
+          <DisclaimerModal />
+          <Page>
+            <Page.Main>
+              <Routes>
+                <Route path="/" element={<ServicesOverview />} />
+              </Routes>
+            </Page.Main>
+          </Page>
+        </TimelapseProvider>
       </TimeframeProvider>
     </ErrorBoundary>
   );

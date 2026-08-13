@@ -1413,3 +1413,103 @@ export function circularDependencySpanQuery(tf: TF): string {
 | sort circular_traces desc
 | limit 100`;
 }
+
+// ---------------------------------------------------------------------------
+// Timelapse problems — lightweight fetch of problem start/end times for bucket matching
+// ---------------------------------------------------------------------------
+export function tlProblemsQuery(tf: TF): string {
+  return `fetch dt.davis.problems, ${tfClause(tf)}
+| filter isNotNull(event.id)
+| fields
+    problem_id = event.id,
+    display_id,
+    title = coalesce(event.name, display_id, event.id, "Problem"),
+    start = event.start,
+    end = event.end
+| sort start desc
+| limit 500`;
+}
+
+// ---------------------------------------------------------------------------
+// Service Flow Sankey — trace-level service call chains
+// Mirrors the user-journey sankeyQuery structure (s0–s4 + sessions count)
+// so the shared buildSankey layout engine can be reused unchanged.
+// ---------------------------------------------------------------------------
+export function serviceFlowSankeyQuery(tf: TF): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(dt.entity.service) AND isNotNull(trace.id)
+| fieldsAdd service_name = coalesce(entityAttr(dt.entity.service, "entity.name"), toString(dt.entity.service))
+| sort timestamp asc
+| summarize path = collectArray(service_name), by: {trace.id}
+| fieldsAdd pathLen = arraySize(path)
+| filter pathLen >= 2
+| fieldsAdd
+    s0 = path[0], s1 = path[1],
+    s2 = if(pathLen >= 3, path[2], else: "(exit)"),
+    s3 = if(pathLen >= 4, path[3], else: "(exit)"),
+    s4 = if(pathLen >= 5, path[4], else: "(exit)")
+| summarize sessions = count(), by: {s0, s1, s2, s3, s4}
+| sort sessions desc
+| limit 200`;
+}
+
+// ---------------------------------------------------------------------------
+// Service Flow Sankey Timelapse — per-bucket service call chains
+// Mirrors sankeyTimelapseQuery from user-journey so the same bucket parsing
+// logic works identically.
+// ---------------------------------------------------------------------------
+export function serviceFlowSankeyTimelapseQuery(tf: TF, bucket: string): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(dt.entity.service) AND isNotNull(trace.id)
+| fieldsAdd service_name = coalesce(entityAttr(dt.entity.service, "entity.name"), toString(dt.entity.service))
+| fieldsAdd span_ts = coalesce(start_time, timestamp)
+| sort span_ts asc
+| summarize path = collectArray(service_name), trace_start = min(span_ts), by: {trace.id}
+| fieldsAdd pathLen = arraySize(path)
+| filter pathLen >= 2
+| fieldsAdd
+    s0 = path[0], s1 = path[1],
+    s2 = if(pathLen >= 3, path[2], else: "(exit)"),
+    s3 = if(pathLen >= 4, path[3], else: "(exit)"),
+    s4 = if(pathLen >= 5, path[4], else: "(exit)")
+| fieldsAdd bucket_ts = bin(trace_start, ${bucket})
+| fieldsAdd bucket = formatTimestamp(bucket_ts, format: "yyyy-MM-dd HH:mm")
+| summarize sessions = count(), by: {bucket, s0, s1, s2, s3, s4}
+| sort bucket asc, sessions desc
+| summarize top_paths = arraySlice(collectArray(record(s0, s1, s2, s3, s4, sessions)), from: 0, to: 100), by: {bucket}
+| expand top_paths
+| fields
+    bucket,
+    s0 = top_paths[s0],
+    s1 = top_paths[s1],
+    s2 = top_paths[s2],
+    s3 = top_paths[s3],
+    s4 = top_paths[s4],
+    sessions = top_paths[sessions]
+| sort bucket asc, sessions desc
+| limit 200000`;
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure Timelapse Metrics — multi-signal hotness for Hotness Assist
+// Per-bucket: error rate, P90 latency, request volume (spans-based)
+// ---------------------------------------------------------------------------
+export function tlInfraMetricsQuery(tf: TF, bucket: string): string {
+  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
+| filter isNotNull(dt.entity.service)
+| fieldsAdd
+    span_ts = coalesce(start_time, timestamp),
+    is_error = toLong(if(error == true, 1, else: 0)),
+    dur_ms = duration / 1000000
+| fieldsAdd bucket_ts = bin(span_ts, ${bucket})
+| fieldsAdd bucket = formatTimestamp(bucket_ts, format: "yyyy-MM-dd HH:mm")
+| summarize
+    requests = count(),
+    errors = sum(is_error),
+    avg_latency_ms = avg(dur_ms),
+    p90_latency_ms = percentile(dur_ms, 90)
+  by: {bucket}
+| fieldsAdd error_rate = if(requests > 0, errors / requests * 100.0, else: 0.0)
+| fields bucket, requests, errors, error_rate, avg_latency_ms, p90_latency_ms
+| sort bucket asc`;
+}

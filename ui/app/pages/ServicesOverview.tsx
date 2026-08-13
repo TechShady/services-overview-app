@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import "./ServicesOverview.css";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Strong, Text } from "@dynatrace/strato-components/typography";
@@ -33,6 +34,7 @@ import { K8sContainerBlastRadiusGraph } from "../components/K8sContainerBlastRad
 import { CloudRegionBlastRadiusGraph } from "../components/CloudRegionBlastRadiusGraph";
 import { useAppTimeframe, previousPeriod, toTF } from "../state/TimeframeContext";
 import type { TF } from "../state/TimeframeContext";
+import { useTimelapse, TL_BUCKETS, TL_SPEEDS, TlBucket } from "../TimelapseContext";
 import { KpiCard, ForecastProvider } from "../components/KpiCard";
 import { ForecastModal } from "../components/ForecastModal";
 import { CorrelationsContext, CorrelationsPanel } from "../components/CorrelationsPanel";
@@ -135,6 +137,10 @@ import {
   cloudRegionAzureFunctionQuery,
   cloudRegionContainerQuery,
   cloudRegionContainerProcessQuery,
+  serviceFlowSankeyQuery,
+  serviceFlowSankeyTimelapseQuery,
+  tlProblemsQuery,
+  tlInfraMetricsQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -145,6 +151,8 @@ const YELLOW = "#FCD53F";
 const RED = "#C21930";
 const ORANGE = "#FF8C00";
 const BLUE = "#4589FF";
+const PURPLE = "#A56EFF";
+const CYAN = "#00B4C8";
 const K8S_COLOR = "#326CE5";
 const DEFAULT_TOP_N = 1000;
 const DEFAULT_PROBLEMS_LOOKBACK_HOURS = 7;
@@ -199,7 +207,7 @@ const SUB_TAB_KEYS = {
   "Reliability": ["SLO & Error Budget", "MTTR / MTTA", "Budget Forecast", "Reliability Report"],
   "Quality": ["Scorecards", "Service Maturity"],
   "Performance": ["Endpoint Heatmap", "Apdex", "Flame Graph"],
-  "Dependencies & Impact": ["Dependencies", "Blast Radius"],
+  "Dependencies & Impact": ["Dependencies", "Service Flow", "Blast Radius"],
   "Incidents & Changes": ["Incident Timeline", "Change Impact", "Deploy Readiness", "On-Call Health"],
   "Detection & Analysis": ["Anomaly Detection", "Correlation Engine", "Anti-Patterns", "Baselines", "Alert Rules"],
   "Capacity & Sizing": ["Right-Sizing", "Traffic Patterns", "What-If"],
@@ -1099,6 +1107,566 @@ function useAIInsights(analysisFn: () => AIInsightsData): { panel: React.ReactNo
   return {
     panel: open && data ? <AIInsightsPanel data={data} onClose={close} /> : null,
   };
+}
+
+// ===========================================================================
+// HOTNESS ASSIST — Flame Button, Floating Panel & Infrastructure Analysis Engine
+// ===========================================================================
+
+// --- shared number formatter (used by analysis engine + panel) ---
+function haFmtN(n: number): string {
+  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : String(Math.round(n));
+}
+
+function FlameIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2C12 2 7 8 7 13a5 5 0 0010 0c0-2.5-1.5-4.5-3-6 0 2-1 3.5-2 4.5C11 10 12 7.5 12 2z" fill="url(#ha-flame-grad)" />
+      <path d="M12 14c0 1.1-.9 2-2 2s-2-.9-2-2c0-1.5 2-3.5 2-3.5S12 12.5 12 14z" fill="url(#ha-flame-grad)" opacity="0.7" />
+      <defs>
+        <linearGradient id="ha-flame-grad" x1="7" y1="2" x2="17" y2="20">
+          <stop stopColor="#FF832B" />
+          <stop offset="1" stopColor="#FF3D9A" />
+        </linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+function HotnessAssistButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+  return (
+    <button className={`svc-ha-btn${active ? " active" : ""}`} onClick={onClick} title="Hotness Assist — deep infrastructure analytics on timelapse hotness signals">
+      <FlameIcon />
+      Hotness Assist
+    </button>
+  );
+}
+
+// --- Types ---
+interface InfraBucketData {
+  bucket: string;
+  bucketEpochMs: number;
+  requests: number;
+  errors: number;
+  errorRate: number;
+  avgLatencyMs: number;
+  p90LatencyMs: number;
+  problemCount: number;
+}
+
+interface InfraBaselines {
+  meanErrRate: number; stdErrRate: number;
+  meanP90: number; stdP90: number;
+  meanReqs: number; stdReqs: number;
+  meanProbs: number; stdProbs: number;
+}
+
+interface HotnessAssistInfraData {
+  totalBuckets: number;
+  hotBuckets: number;
+  criticalBuckets: number;
+  problemStormBuckets: number;
+  worstIdx: number;
+  bestIdx: number;
+  worstBucket: InfraBucketData;
+  bestBucket: InfraBucketData;
+  worstZ: number;
+  bestZ: number;
+  worstDriver: string;
+  worstDriverColor: string;
+  baselines: InfraBaselines;
+  worstZScores: { errZ: number; latZ: number; volZ: number; probZ: number };
+  summary: string;
+  insights: InsightItem[];
+  recommendations: RecommendationItem[];
+  activeProblemsAtWorst: Array<{ title: string; displayId: string }>;
+}
+
+// --- Analysis engine (pure, deterministic) ---
+function analyzeInfraHotness(
+  buckets: InfraBucketData[],
+  hotness: number[],
+  baselines: InfraBaselines,
+  tlProblemsList: Array<{ problemId: string; displayId: string; title: string; startMs: number; endMs: number | null }>,
+  bucketLabel: string,
+  bucketMs: number,
+): HotnessAssistInfraData {
+  const n = buckets.length;
+  const hotBuckets = hotness.filter(z => z >= 0.75).length;
+  const criticalBuckets = hotness.filter(z => z >= 2.5).length;
+
+  let worstIdx = 0, bestIdx = 0;
+  hotness.forEach((z, i) => {
+    if (z > (hotness[worstIdx] ?? 0)) worstIdx = i;
+    if (z < (hotness[bestIdx] ?? 0)) bestIdx = i;
+  });
+
+  const worstBucket = buckets[worstIdx];
+  const bestBucket = buckets[bestIdx];
+  const worstZ = hotness[worstIdx] ?? 0;
+  const bestZ = hotness[bestIdx] ?? 0;
+
+  const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs } = baselines;
+
+  const safeZ = (v: number, mean: number, std: number) => std > 0 ? (v - mean) / std : 0;
+  const errZ = safeZ(worstBucket.errorRate, meanErrRate, stdErrRate);
+  const latZ = safeZ(worstBucket.p90LatencyMs, meanP90, stdP90);
+  const volZ = safeZ(worstBucket.requests, meanReqs, stdReqs);
+  const probZ = safeZ(worstBucket.problemCount, meanProbs, stdProbs);
+
+  let worstDriver = "Mixed signals";
+  let worstDriverColor = "#FFB800";
+  if (probZ >= 2.5 && errZ >= 1.5) { worstDriver = "Problem storm"; worstDriverColor = "#FF3D9A"; }
+  else if (probZ >= 1.5) { worstDriver = "Active incident"; worstDriverColor = "#FF3D9A"; }
+  else if (errZ >= 2.5 && latZ >= 1.5) { worstDriver = "Cascading failure"; worstDriverColor = "#FF3D9A"; }
+  else if (errZ >= 2.5) { worstDriver = "Error storm"; worstDriverColor = "#FF832B"; }
+  else if (latZ >= 2.5) { worstDriver = "Severe latency spike"; worstDriverColor = "#FF832B"; }
+  else if (latZ >= 1.5) { worstDriver = "Latency regression"; worstDriverColor = "#FFB800"; }
+  else if (volZ >= 2.5) { worstDriver = "Traffic surge"; worstDriverColor = "#FFB800"; }
+  else if (volZ <= -2.5) { worstDriver = "Traffic collapse"; worstDriverColor = "#FF3D9A"; }
+  else if (errZ >= 1.5) { worstDriver = "Error rate spike"; worstDriverColor = "#FF832B"; }
+  else if (worstZ >= 0.75) { worstDriver = "Performance degradation"; worstDriverColor = "#FFB800"; }
+  else { worstDriver = "Within normal range"; worstDriverColor = "#00A36C"; }
+
+  const worstFromMs = worstBucket.bucketEpochMs;
+  const worstToMs = worstFromMs + bucketMs;
+  const activeProblemsAtWorst = tlProblemsList.filter(p =>
+    p.startMs < worstToMs && (p.endMs === null || p.endMs > worstFromMs)
+  ).map(p => ({ title: p.title, displayId: p.displayId }));
+
+  const problemStormBuckets = hotness.filter((z, i) => z >= 0.75 && (buckets[i]?.problemCount ?? 0) > 0).length;
+
+  const insights: InsightItem[] = [];
+  const recommendations: RecommendationItem[] = [];
+
+  // Peak hotness
+  if (worstZ >= 2.5) {
+    insights.push({ severity: "critical", icon: "🔴", text: `Critical hotness (Z=${worstZ.toFixed(2)}) at bucket ${worstIdx + 1} (${worstBucket.bucket}): ${worstDriver} — ${worstBucket.errorRate.toFixed(1)}% error rate and ${worstBucket.p90LatencyMs.toFixed(0)}ms P90 latency.` });
+  } else if (worstZ >= 1.5) {
+    insights.push({ severity: "warning", icon: "⚠️", text: `Elevated hotness (Z=${worstZ.toFixed(2)}) in bucket ${worstIdx + 1} — ${worstDriver}. Error rate ${worstBucket.errorRate.toFixed(1)}%, P90 ${worstBucket.p90LatencyMs.toFixed(0)}ms above the ${bucketLabel} average.` });
+  } else if (worstZ >= 0.75) {
+    insights.push({ severity: "info", icon: "ℹ️", text: `Mild signal elevation (Z=${worstZ.toFixed(2)}) in bucket ${worstIdx + 1}. Metrics are within tolerable bounds but worth monitoring for persistence.` });
+  } else {
+    insights.push({ severity: "good", icon: "✅", text: `All ${n} buckets within normal operating range — no significant spikes detected during this period.` });
+  }
+
+  // Error rate gap
+  const errGap = worstBucket.errorRate - bestBucket.errorRate;
+  if (errGap > 5) {
+    insights.push({ severity: "critical", icon: "🔴", text: `Error rate gap: ${errGap.toFixed(1)}pp between worst (${worstBucket.errorRate.toFixed(1)}%) and best (${bestBucket.errorRate.toFixed(1)}%) bucket — a ${bestBucket.errorRate > 0 ? (errGap / bestBucket.errorRate * 100).toFixed(0) + "x" : "massive"} relative increase at peak.` });
+    recommendations.push({ impact: "high", text: `Investigate error root cause in bucket ${worstIdx + 1} (${worstBucket.bucket}). Fetch spans filtered by error==true, group by service and exception.type to identify the blast radius and dominant failure mode.` });
+  } else if (errGap > 1) {
+    insights.push({ severity: "warning", icon: "⚠️", text: `Error rate rose ${errGap.toFixed(1)}pp at peak (${worstBucket.errorRate.toFixed(1)}% vs best ${bestBucket.errorRate.toFixed(1)}%). Check for a deployment or dependency change coinciding with bucket ${worstIdx + 1}.` });
+  } else if (worstBucket.errorRate < 0.1 && bestBucket.errorRate < 0.1) {
+    insights.push({ severity: "good", icon: "✅", text: `Error rate stayed very low across all buckets (peak ${worstBucket.errorRate.toFixed(2)}%). Reliability is excellent during this window.` });
+  }
+
+  // Latency gap
+  const latGap = worstBucket.p90LatencyMs - bestBucket.p90LatencyMs;
+  const latPct = bestBucket.p90LatencyMs > 0 ? latGap / bestBucket.p90LatencyMs * 100 : 0;
+  if (latGap > 500 || latPct > 50) {
+    insights.push({ severity: "critical", icon: "🔴", text: `P90 latency spiked ${latGap.toFixed(0)}ms above best window (${bestBucket.p90LatencyMs.toFixed(0)}ms → ${worstBucket.p90LatencyMs.toFixed(0)}ms, +${latPct.toFixed(0)}%). Indicates resource contention, GC pressure, thread pool saturation, or a slow upstream dependency.` });
+    recommendations.push({ impact: "high", text: `Profile the flame graph for impacted services around bucket ${worstIdx + 1}. Navigate to Performance > Flame Graph, select a service that handles high request volume, and identify the hot code path contributing to the ${latGap.toFixed(0)}ms P90 regression.` });
+  } else if (latGap > 100 || latPct > 20) {
+    insights.push({ severity: "warning", icon: "⚠️", text: `P90 latency increased ${latGap.toFixed(0)}ms at peak (+${latPct.toFixed(0)}% vs best window). Monitor thread pool saturation and database query duration as likely contributors.` });
+  }
+
+  // Volume anomaly
+  const volPctChange = meanReqs > 0 ? (worstBucket.requests - meanReqs) / meanReqs * 100 : 0;
+  if (volZ >= 2.5) {
+    insights.push({ severity: "warning", icon: "📈", text: `Traffic surged ${volPctChange.toFixed(0)}% above average in bucket ${worstIdx + 1} (${haFmtN(worstBucket.requests)} vs avg ${haFmtN(Math.round(meanReqs))} requests). High load is likely driving the observed latency and error increases.` });
+    recommendations.push({ impact: "medium", text: `Verify auto-scaling activated during the traffic surge. Check HPA events under Metrics > K8s Workloads and review Capacity & Sizing > Right-Sizing for under-provisioned workloads that may have been overwhelmed.` });
+  } else if (volZ <= -2.5) {
+    insights.push({ severity: "critical", icon: "📉", text: `Request volume collapsed ${Math.abs(volPctChange).toFixed(0)}% below average (${haFmtN(worstBucket.requests)} vs avg ${haFmtN(Math.round(meanReqs))}). This signals upstream failure, circuit breaker trips, or infrastructure issues blocking inbound traffic.` });
+    recommendations.push({ impact: "high", text: `Traffic collapse detected at bucket ${worstIdx + 1}. Check upstream load balancer health, circuit breaker states, and DNS resolution. Review the Problems timeline for active incidents that may have blocked or shed traffic.` });
+  }
+
+  // CPU/memory correlation insight (heuristic)
+  if (latZ >= 1.5 && errZ < 0.5 && volZ < 0.5) {
+    insights.push({ severity: "warning", icon: "🖥️", text: `Latency spiked without a corresponding error or volume spike — classic CPU/memory pressure signature. GC pauses, thread pool exhaustion, or I/O saturation are the most likely root causes.` });
+    recommendations.push({ impact: "high", text: `Check process CPU and memory metrics in Metrics > Process Metrics for the period around bucket ${worstIdx + 1}. Look for GC pause time spikes, memory working set growth, or CPU time that exceeds the allocated limits.` });
+  }
+
+  // Cascading failure
+  if (errZ >= 1.5 && latZ >= 1.5) {
+    insights.push({ severity: "critical", icon: "⛓️", text: `Error rate and latency co-elevated (errZ=${errZ.toFixed(2)}, latZ=${latZ.toFixed(2)}) — cascading failure signature. Slow upstream dependencies cause timeout errors that propagate through the call chain.` });
+    recommendations.push({ impact: "high", text: `Open the Blast Radius graph for the worst bucket's timeframe to identify which service originated the cascade. Trace the longest-running spans for calls to databases, external APIs, or shared caches that may be bottlenecking the dependency chain.` });
+  }
+
+  // Problem coincidence
+  if (activeProblemsAtWorst.length > 0) {
+    insights.push({ severity: "critical", icon: "🚨", text: `${activeProblemsAtWorst.length} Davis problem${activeProblemsAtWorst.length > 1 ? "s were" : " was"} active during the peak: ${activeProblemsAtWorst.slice(0, 2).map(p => p.displayId || p.title).join(", ")}${activeProblemsAtWorst.length > 2 ? ` +${activeProblemsAtWorst.length - 2} more` : ""}. Davis AI has likely already identified root cause entities.` });
+    recommendations.push({ impact: "high", text: `Open Incidents & Changes and cross-reference the ${activeProblemsAtWorst.length} active problem(s) with the ${bucketLabel} hotness spike. Davis AI root cause analysis may already have flagged the responsible service and suggested a remediation path.` });
+  } else if (worstZ >= 1.5) {
+    insights.push({ severity: "info", icon: "ℹ️", text: `No Davis problems were active during the hottest bucket — the degradation may be sub-threshold or caused by gradual resource saturation not yet triggering anomaly detection.` });
+    recommendations.push({ impact: "medium", text: `Create custom anomaly detection rules for: error rate > ${Math.max(1, meanErrRate * 1.5).toFixed(1)}% or P90 latency > ${(meanP90 * 1.5).toFixed(0)}ms. Navigate to Detection & Analysis > Alert Rules to set thresholds that give earlier warning than the default Davis sensitivity.` });
+  }
+
+  // Deployment correlation heuristic
+  if (errZ >= 1.5 || latZ >= 1.5) {
+    recommendations.push({ impact: "medium", text: `Check Incidents & Changes > Change Impact for deployments coinciding with bucket ${worstIdx + 1} (${worstBucket.bucket}). A deploy regression is a common root cause when error rate and latency spike together without a corresponding traffic increase.` });
+  }
+
+  // Best window
+  insights.push({ severity: "good", icon: "✅", text: `Best performance window: bucket ${bestIdx + 1} (${bestBucket.bucket}) — ${bestBucket.errorRate.toFixed(1)}% error rate, ${bestBucket.p90LatencyMs.toFixed(0)}ms P90, ${haFmtN(bestBucket.requests)} requests. Set your SLO targets based on this healthy baseline.` });
+  recommendations.push({ impact: "low", text: `Configure SLO targets in Reliability > SLO & Error Budget: error rate ≤ ${Math.max(0.1, bestBucket.errorRate * 1.1).toFixed(1)}% and P90 latency ≤ ${(bestBucket.p90LatencyMs * 1.1).toFixed(0)}ms, based on the best-window metrics from bucket ${bestIdx + 1}.` });
+
+  // Sustained hotness
+  if (hotBuckets >= Math.ceil(n * 0.3) && hotBuckets > 2) {
+    insights.push({ severity: "warning", icon: "⏳", text: `${hotBuckets}/${n} buckets (${(hotBuckets / n * 100).toFixed(0)}%) showed elevated signals — sustained pressure, not a brief spike. Review resource allocation and auto-scaling headroom.` });
+    recommendations.push({ impact: "medium", text: `Sustained hotness across ${hotBuckets} buckets suggests a structural capacity shortfall. Use Capacity & Sizing > What-If simulator to model the effect of scaling up workloads by 25–50% and project the SLO impact.` });
+  }
+
+  // Recovery pattern
+  if (worstIdx < n - 3 && hotness.slice(worstIdx + 1, worstIdx + 3).every(z => z < worstZ * 0.5) && worstZ >= 1.5) {
+    insights.push({ severity: "info", icon: "🔄", text: `Metrics recovered within 2 ${bucketLabel} buckets after peak — suggests a transient event (deployment restart, GC pause, or brief traffic burst) rather than a persistent infrastructure failure.` });
+  }
+
+  const hotPct = (hotBuckets / n * 100).toFixed(0);
+  const summary = [
+    `Analyzed ${n} ${bucketLabel} buckets.`,
+    hotBuckets > 0
+      ? `${hotBuckets} bucket${hotBuckets > 1 ? "s" : ""} (${hotPct}%) elevated${criticalBuckets > 0 ? `, ${criticalBuckets} critical` : ""}.`
+      : "All buckets within normal range.",
+    `Peak at bucket ${worstIdx + 1} (${worstBucket.bucket}): ${worstDriver} — ${worstBucket.errorRate.toFixed(1)}% error rate, ${worstBucket.p90LatencyMs.toFixed(0)}ms P90, ${haFmtN(worstBucket.requests)} req.`,
+    activeProblemsAtWorst.length > 0 ? `${activeProblemsAtWorst.length} Davis problem${activeProblemsAtWorst.length > 1 ? "s" : ""} active at peak.` : "",
+    `Best window: bucket ${bestIdx + 1} — ${bestBucket.errorRate.toFixed(1)}% error rate, ${bestBucket.p90LatencyMs.toFixed(0)}ms P90.`,
+  ].filter(Boolean).join(" ");
+
+  return {
+    totalBuckets: n,
+    hotBuckets,
+    criticalBuckets,
+    problemStormBuckets,
+    worstIdx,
+    bestIdx,
+    worstBucket,
+    bestBucket,
+    worstZ,
+    bestZ,
+    worstDriver,
+    worstDriverColor,
+    baselines,
+    worstZScores: { errZ, latZ, volZ, probZ },
+    summary,
+    insights,
+    recommendations,
+    activeProblemsAtWorst,
+  };
+}
+
+// --- Hotness Assist Floating Panel ---
+function HotnessAssistPanel({
+  data,
+  pos,
+  onClose,
+  onDragStart,
+  hotness,
+  currentIdx,
+  bucketLabel,
+}: {
+  data: HotnessAssistInfraData;
+  pos: { x: number; y: number };
+  onClose: () => void;
+  onDragStart: (e: React.MouseEvent) => void;
+  hotness: number[];
+  currentIdx: number;
+  bucketLabel: string;
+}) {
+  const TL_HOT_HIGH = "#FF3D9A"; const TL_HOT_WARM = "#FF832B"; const TL_HOT_ELEV = "#FFB800"; const TL_HOT_NONE = "#4589FF";
+  const hotnessColor = (z: number) => z >= 2.5 ? TL_HOT_HIGH : z >= 1.5 ? TL_HOT_WARM : z >= 0.75 ? TL_HOT_ELEV : TL_HOT_NONE;
+  const maxZ = Math.max(0.5, ...hotness);
+  const stripH = 40;
+
+  const summaryWordCount = data.summary.split(/\s+/).length;
+  const summaryDuration = summaryWordCount * 60;
+  let blockOffset = summaryDuration + 400;
+  const insightDurations = data.insights.map(i => i.text.split(/\s+/).length * 55);
+
+  const worstZ = data.worstZ;
+  const w = data.worstBucket;
+  const b = data.bestBucket;
+
+  const kpiTiles = [
+    { label: "Hot Buckets", value: String(data.hotBuckets), sub: `of ${data.totalBuckets} total`, color: data.hotBuckets > 0 ? TL_HOT_ELEV : "#00A36C" },
+    { label: "Critical Spikes", value: String(data.criticalBuckets), sub: "Z ≥ 2.5", color: data.criticalBuckets > 0 ? TL_HOT_HIGH : "#00A36C" },
+    { label: "Peak Error Rate", value: `${w.errorRate.toFixed(1)}%`, sub: `avg ${data.baselines.meanErrRate.toFixed(1)}%`, color: w.errorRate > data.baselines.meanErrRate * 1.5 + 1 ? TL_HOT_WARM : "#e0e0e0" },
+    { label: "Peak P90", value: `${w.p90LatencyMs.toFixed(0)}ms`, sub: `avg ${data.baselines.meanP90.toFixed(0)}ms`, color: w.p90LatencyMs > data.baselines.meanP90 * 1.5 + 50 ? TL_HOT_WARM : "#e0e0e0" },
+  ];
+
+  const deltaRows = [
+    { label: "Error Rate", best: `${b.errorRate.toFixed(1)}%`, worst: `${w.errorRate.toFixed(1)}%`, gap: `+${(w.errorRate - b.errorRate).toFixed(1)}pp`, bad: w.errorRate > b.errorRate + 0.5 },
+    { label: "P90 Latency", best: `${b.p90LatencyMs.toFixed(0)}ms`, worst: `${w.p90LatencyMs.toFixed(0)}ms`, gap: `+${(w.p90LatencyMs - b.p90LatencyMs).toFixed(0)}ms`, bad: w.p90LatencyMs > b.p90LatencyMs * 1.1 + 20 },
+    { label: "Avg Latency", best: `${b.avgLatencyMs.toFixed(0)}ms`, worst: `${w.avgLatencyMs.toFixed(0)}ms`, gap: `+${(w.avgLatencyMs - b.avgLatencyMs).toFixed(0)}ms`, bad: w.avgLatencyMs > b.avgLatencyMs * 1.1 + 10 },
+    { label: "Requests", best: haFmtN(b.requests), worst: haFmtN(w.requests), gap: `${((w.requests - b.requests) / Math.max(1, b.requests) * 100).toFixed(0)}%`, bad: false },
+    { label: "Hotness Z", best: b === w ? "—" : data.bestZ.toFixed(2), worst: worstZ.toFixed(2), gap: `+${(worstZ - data.bestZ).toFixed(2)}`, bad: worstZ > 1.5 },
+  ];
+
+  return createPortal(
+    <div
+      className="svc-ha-panel"
+      style={{ left: pos.x, top: pos.y }}
+    >
+      {/* Header */}
+      <div className="svc-ha-panel-header" onMouseDown={onDragStart}>
+        <FlameIcon />
+        <span style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>Hotness Assist</span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginRight: 8 }}>
+          {data.hotBuckets > 0 && (
+            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 10, background: `${hotnessColor(data.worstZ)}22`, border: `1px solid ${hotnessColor(data.worstZ)}55`, color: hotnessColor(data.worstZ) }}>
+              {data.hotBuckets} hot · {data.criticalBuckets} critical
+            </span>
+          )}
+          <span style={{ fontSize: 10, opacity: 0.5, padding: "2px 7px", borderRadius: 10, background: "rgba(128,128,128,0.1)", border: "1px solid rgba(128,128,128,0.25)" }}>
+            {data.totalBuckets} × {bucketLabel}
+          </span>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16, opacity: 0.45, padding: "2px 6px", lineHeight: 1 }}>✕</button>
+      </div>
+
+      {/* Body */}
+      <div className="svc-ha-panel-body">
+        {/* Summary */}
+        <div style={{ marginBottom: 16 }}>
+          <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: "100ms" }}>Analysis Summary</div>
+          <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,131,43,0.05)", border: "1px solid rgba(255,131,43,0.15)" }}>
+            <StreamText text={data.summary} baseDelay={200} style={{ fontSize: 13, lineHeight: "1.6" }} />
+          </div>
+        </div>
+
+        {/* KPI tiles */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+          {kpiTiles.map(t => (
+            <div key={t.label} style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(128,128,128,0.06)", border: "1px solid rgba(128,128,128,0.15)", textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "monospace", color: t.color }}>{t.value}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.65, marginTop: 2, textTransform: "uppercase" as const, letterSpacing: 0.4 }}>{t.label}</div>
+              <div style={{ fontSize: 10, opacity: 0.4, marginTop: 1 }}>{t.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Hotness timeline mini-chart */}
+        {(() => {
+          blockOffset += 300;
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Hotness Timeline ({bucketLabel} buckets)</div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: stripH, background: "rgba(128,128,128,0.05)", borderRadius: 6, padding: "4px 6px", position: "relative" }}>
+                {/* Reference lines */}
+                {[{ z: 0.75, label: "0.75" }, { z: 1.5, label: "1.5" }, { z: 2.5, label: "2.5" }].map(({ z, label }) => {
+                  const pct = Math.min(100, z / maxZ * 100);
+                  return (
+                    <div key={z} style={{ position: "absolute", left: 6, right: 6, bottom: `calc(${pct}% + 4px)`, borderTop: "1px dashed rgba(255,255,255,0.15)", pointerEvents: "none" }}>
+                      <span style={{ fontSize: 8, opacity: 0.4, position: "absolute", right: 2, top: -8 }}>{label}</span>
+                    </div>
+                  );
+                })}
+                {hotness.map((v, i) => {
+                  const norm = Math.min(1, v / maxZ);
+                  const color = hotnessColor(v);
+                  const h = Math.max(3, norm * (stripH - 8));
+                  const isWorst = i === data.worstIdx;
+                  const isBest = i === data.bestIdx && data.bestIdx !== data.worstIdx;
+                  const isCurrent = i === currentIdx;
+                  return (
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "flex-end", height: "100%", position: "relative" }}>
+                      {isWorst && <div style={{ position: "absolute", top: 0, fontSize: 8, color: TL_HOT_HIGH, fontWeight: 700 }}>▼</div>}
+                      {isBest && <div style={{ position: "absolute", top: 0, fontSize: 8, color: "#00A36C", fontWeight: 700 }}>▲</div>}
+                      <div style={{ width: "100%", height: h, background: color, opacity: isCurrent ? 1 : 0.7, borderRadius: 1, outline: isCurrent ? "1px solid rgba(255,255,255,0.8)" : "none", transition: "opacity 0.15s" }} title={`Bucket ${i + 1} · Z=${v.toFixed(2)}`} />
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 10, opacity: 0.5 }}>
+                <span>▼ worst · ▲ best</span>
+                <span style={{ marginLeft: "auto" }}>
+                  <span style={{ color: TL_HOT_NONE }}>■</span> normal&nbsp;
+                  <span style={{ color: TL_HOT_ELEV }}>■</span> elevated&nbsp;
+                  <span style={{ color: TL_HOT_WARM }}>■</span> hot&nbsp;
+                  <span style={{ color: TL_HOT_HIGH }}>■</span> critical
+                </span>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Worst vs Best cards */}
+        {(() => {
+          blockOffset += 400;
+          const cardStyle = (color: string): React.CSSProperties => ({
+            flex: 1, padding: "12px 14px", borderRadius: 8, background: `${color}08`, border: `1px solid ${color}25`,
+            opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms`,
+          });
+          const metricRow = (label: string, value: string, note?: string) => (
+            <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+              <span style={{ fontSize: 11, opacity: 0.6 }}>{label}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>{value}{note ? <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 4 }}>{note}</span> : null}</span>
+            </div>
+          );
+          return (
+            <div style={{ marginBottom: 16 }}>
+              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset - 200}ms` }}>Worst vs Best Bucket</div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={cardStyle(TL_HOT_HIGH)}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: data.worstDriverColor, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 14 }}>🔥</span> Bucket {data.worstIdx + 1} — {data.worstDriver}
+                  </div>
+                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 8 }}>{w.bucket}</div>
+                  {metricRow("Error Rate", `${w.errorRate.toFixed(1)}%`)}
+                  {metricRow("P90 Latency", `${w.p90LatencyMs.toFixed(0)}ms`)}
+                  {metricRow("Avg Latency", `${w.avgLatencyMs.toFixed(0)}ms`)}
+                  {metricRow("Requests", haFmtN(w.requests))}
+                  {metricRow("Problems", String(w.problemCount))}
+                  <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: `${data.worstDriverColor}15`, fontSize: 10, fontWeight: 700, color: data.worstDriverColor, textAlign: "center" as const }}>
+                    Hotness Z = {data.worstZ.toFixed(2)}
+                  </div>
+                </div>
+                <div style={cardStyle("#00A36C")}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#00A36C", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 14 }}>✅</span> Bucket {data.bestIdx + 1} — Best Window
+                  </div>
+                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 8 }}>{b.bucket}</div>
+                  {metricRow("Error Rate", `${b.errorRate.toFixed(1)}%`)}
+                  {metricRow("P90 Latency", `${b.p90LatencyMs.toFixed(0)}ms`)}
+                  {metricRow("Avg Latency", `${b.avgLatencyMs.toFixed(0)}ms`)}
+                  {metricRow("Requests", haFmtN(b.requests))}
+                  {metricRow("Problems", String(b.problemCount))}
+                  <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(0,163,108,0.1)", fontSize: 10, fontWeight: 700, color: "#00A36C", textAlign: "center" as const }}>
+                    Hotness Z = {data.bestZ.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Z-score breakdown for worst bucket */}
+        {(() => {
+          blockOffset += 500;
+          const { errZ, latZ, volZ, probZ } = data.worstZScores;
+          const zRows = [
+            { label: "Error Rate", z: errZ, desc: "error rate vs average" },
+            { label: "P90 Latency", z: latZ, desc: "latency vs average" },
+            { label: "Request Volume", z: volZ, desc: "request count deviation" },
+            { label: "Problem Activity", z: probZ, desc: "Davis problems opened" },
+          ];
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Signal Z-Scores at Peak (Bucket {data.worstIdx + 1})</div>
+              {zRows.map(({ label, z, desc }) => {
+                const absZ = Math.abs(z); const barW = Math.min(100, absZ / 3 * 100);
+                const col = absZ >= 2.5 ? TL_HOT_HIGH : absZ >= 1.5 ? TL_HOT_WARM : absZ >= 0.75 ? TL_HOT_ELEV : "#00A36C";
+                return (
+                  <div key={label} style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>{label}</span>
+                      <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                        <span style={{ fontSize: 10, opacity: 0.45 }}>{desc}</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: col, fontFamily: "monospace", minWidth: 54, textAlign: "right" }}>{z >= 0 ? "+" : ""}{z.toFixed(2)}z</span>
+                      </div>
+                    </div>
+                    <div style={{ height: 5, background: "rgba(128,128,128,0.12)", borderRadius: 3 }}>
+                      <div style={{ height: "100%", width: `${barW}%`, background: col, borderRadius: 3, transition: "width 0.3s" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+
+        {/* Delta gap table */}
+        {(() => {
+          blockOffset += 300;
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Best vs Worst Delta</div>
+              <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+                <thead>
+                  <tr style={{ opacity: 0.5 }}>
+                    {["Metric", "Best", "Worst", "Gap"].map(h => (
+                      <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {deltaRows.map(({ label, best, worst, gap, bad }) => (
+                    <tr key={label} style={{ borderBottom: "1px solid rgba(128,128,128,0.08)" }}>
+                      <td style={{ padding: "5px 8px", opacity: 0.7 }}>{label}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: "#00A36C" }}>{best}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bad ? TL_HOT_WARM : "inherit" }}>{worst}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", fontWeight: 700, color: bad ? TL_HOT_WARM : "inherit" }}>{gap}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+
+        {/* Active problems at peak */}
+        {data.activeProblemsAtWorst.length > 0 && (() => {
+          blockOffset += 200;
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Active Problems at Peak (Bucket {data.worstIdx + 1})</div>
+              {data.activeProblemsAtWorst.slice(0, 6).map((p, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderRadius: 6, background: "rgba(255,61,154,0.06)", border: "1px solid rgba(255,61,154,0.12)", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12 }}>🚨</span>
+                  <span style={{ fontSize: 11, fontFamily: "monospace", color: TL_HOT_HIGH, fontWeight: 700, flexShrink: 0 }}>{p.displayId}</span>
+                  <span style={{ fontSize: 12, opacity: 0.8, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{p.title}</span>
+                </div>
+              ))}
+              {data.activeProblemsAtWorst.length > 6 && (
+                <div style={{ fontSize: 11, opacity: 0.5, padding: "4px 10px" }}>+{data.activeProblemsAtWorst.length - 6} more problems — see Incidents & Changes tab</div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Insights */}
+        {data.insights.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>Infrastructure Insights</div>
+            {data.insights.map((ins, i) => {
+              const myOffset = blockOffset + 200 + i * 100;
+              return (
+                <div key={i} className={`svc-ai-insight-row ${ins.severity}`} style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${myOffset}ms` }}>
+                  <Text style={{ fontSize: 14, flexShrink: 0 }}>{ins.icon}</Text>
+                  <StreamText text={ins.text} baseDelay={myOffset + 80} style={{ fontSize: 13 }} />
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Recommendations */}
+        {data.recommendations.length > 0 && (() => {
+          blockOffset += data.insights.length * 100 + 400;
+          return (
+            <div style={{ marginBottom: 8 }}>
+              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>Recommended Actions</div>
+              {data.recommendations.map((rec, i) => {
+                const myOffset = blockOffset + 300 + i * 500;
+                return (
+                  <div key={i} className="svc-ai-recommendation" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${myOffset}ms` }}>
+                    <span className={`svc-ai-rec-badge ${rec.impact}`}>{rec.impact}</span>
+                    <StreamText text={rec.text} baseDelay={myOffset + 100} style={{ fontSize: 13 }} />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+
+        {/* Footer */}
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(128,128,128,0.12)", fontSize: 10, opacity: 0.35, lineHeight: 1.5 }}>
+          Hotness Assist · Rule-based analysis from span-derived error rate, P90 latency, request volume, and Davis problem signals.
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2316,6 +2884,790 @@ function analyzeReliabilityReport(svcDetailsData: any[], problemsData: any[], sl
   return { summary, insights, recommendations: recs };
 }
 
+// ---------------------------------------------------------------------------
+// Service Flow Sankey — copied & adapted from user-journey SankeyTab
+// ---------------------------------------------------------------------------
+
+const SVC_SANKEY_COLORS = [BLUE, PURPLE, CYAN, GREEN, ORANGE, YELLOW, "#FF6B8A", "#36D399", "#6E9FFF", "#C084FC"];
+type SvcSankeyStyle = "classic" | "gradient" | "directed" | "alluvial" | "stateMachine" | "chord" | "heatmap";
+const SVC_SANKEY_STYLE_OPTIONS: { value: SvcSankeyStyle; label: string }[] = [
+  { value: "classic", label: "Classic Sankey" },
+  { value: "gradient", label: "Gradient Sankey" },
+  { value: "directed", label: "Directed Flow Graph" },
+  { value: "alluvial", label: "Alluvial / Columnar" },
+  { value: "stateMachine", label: "State Machine" },
+  { value: "chord", label: "Chord Diagram" },
+  { value: "heatmap", label: "Transition Heatmap" },
+];
+const SVC_SANKEY_STYLE_STATE_KEY = "svc-sankey-style";
+const TL_BUCKET_LABELS: Record<TlBucket, string> = { "1m": "1 min", "5m": "5 min", "10m": "10 min", "30m": "30 min", "1h": "1 hour" };
+
+interface SvcSankeyNode { id: string; label: string; depth: number; value: number; y: number; height: number; }
+interface SvcSankeyLink { source: string; target: string; value: number; sy: number; ty: number; thickness: number; }
+
+function buildSvcSankey(records: any[]): { nodes: SvcSankeyNode[]; links: SvcSankeyLink[]; maxDepth: number } {
+  const linkMap = new Map<string, number>();
+  for (const r of records) {
+    const steps = [String(r.s0 ?? ""), String(r.s1 ?? ""), String(r.s2 ?? ""), String(r.s3 ?? ""), String(r.s4 ?? "")];
+    const count = Number(r.sessions ?? 1);
+    for (let i = 0; i < 4; i++) {
+      const src = steps[i];
+      const tgt = steps[i + 1];
+      if (!src || !tgt || tgt === "(exit)") break;
+      const key = `${i}|${src}|||${i + 1}|${tgt}`;
+      linkMap.set(key, (linkMap.get(key) ?? 0) + count);
+    }
+  }
+
+  const nodeValueMap = new Map<string, number>();
+  const rawLinks: { srcDepth: number; src: string; tgtDepth: number; tgt: string; value: number }[] = [];
+  for (const [key, value] of linkMap) {
+    const [srcPart, tgtPart] = key.split("|||");
+    const srcDepth = Number(srcPart.substring(0, srcPart.indexOf("|")));
+    const src = srcPart.substring(srcPart.indexOf("|") + 1);
+    const tgtDepth = Number(tgtPart.substring(0, tgtPart.indexOf("|")));
+    const tgt = tgtPart.substring(tgtPart.indexOf("|") + 1);
+    rawLinks.push({ srcDepth, src, tgtDepth, tgt, value });
+    nodeValueMap.set(`${srcDepth}|${src}`, (nodeValueMap.get(`${srcDepth}|${src}`) ?? 0) + value);
+    nodeValueMap.set(`${tgtDepth}|${tgt}`, (nodeValueMap.get(`${tgtDepth}|${tgt}`) ?? 0) + value);
+  }
+
+  if (rawLinks.length === 0) return { nodes: [], links: [], maxDepth: 0 };
+
+  let maxDepth = 0;
+  for (const l of rawLinks) maxDepth = Math.max(maxDepth, l.tgtDepth);
+
+  const MAX_PER_COL = 8;
+  const depthNodes = new Map<number, { name: string; value: number }[]>();
+  for (const [key, value] of nodeValueMap) {
+    const [ds, ...nameParts] = key.split("|");
+    const depth = Number(ds);
+    const name = nameParts.join("|");
+    const arr = depthNodes.get(depth) ?? [];
+    arr.push({ name, value });
+    depthNodes.set(depth, arr);
+  }
+
+  const keptNodes = new Set<string>();
+  for (const [depth, arr] of depthNodes) {
+    arr.sort((a, b) => b.value - a.value);
+    for (const n of arr.slice(0, MAX_PER_COL)) keptNodes.add(`${depth}|${n.name}`);
+  }
+
+  const filteredLinks = rawLinks.filter(l => keptNodes.has(`${l.srcDepth}|${l.src}`) && keptNodes.has(`${l.tgtDepth}|${l.tgt}`));
+
+  const CHART_H = 500;
+  const NODE_PAD = 6;
+  const nodes: SvcSankeyNode[] = [];
+  const nodeMap = new Map<string, SvcSankeyNode>();
+
+  for (let d = 0; d <= maxDepth; d++) {
+    const col = (depthNodes.get(d) ?? []).filter(n => keptNodes.has(`${d}|${n.name}`)).sort((a, b) => b.value - a.value);
+    const totalVal = col.reduce((a, n) => a + n.value, 0);
+    const usableH = CHART_H - (col.length - 1) * NODE_PAD;
+    let yOff = 0;
+    for (const n of col) {
+      const h = Math.max(4, (n.value / totalVal) * usableH);
+      const id = `${d}|${n.name}`;
+      const node: SvcSankeyNode = { id, label: n.name, depth: d, value: n.value, y: yOff, height: h };
+      nodes.push(node);
+      nodeMap.set(id, node);
+      yOff += h + NODE_PAD;
+    }
+  }
+
+  const srcOffsets = new Map<string, number>();
+  const tgtOffsets = new Map<string, number>();
+  const links: SvcSankeyLink[] = [];
+  filteredLinks.sort((a, b) => b.value - a.value);
+  for (const l of filteredLinks) {
+    const srcNode = nodeMap.get(`${l.srcDepth}|${l.src}`);
+    const tgtNode = nodeMap.get(`${l.tgtDepth}|${l.tgt}`);
+    if (!srcNode || !tgtNode) continue;
+    const thickness = Math.max(1, (l.value / srcNode.value) * srcNode.height);
+    const sy = srcNode.y + (srcOffsets.get(srcNode.id) ?? 0);
+    const ty = tgtNode.y + (tgtOffsets.get(tgtNode.id) ?? 0);
+    srcOffsets.set(srcNode.id, (srcOffsets.get(srcNode.id) ?? 0) + thickness);
+    tgtOffsets.set(tgtNode.id, (tgtOffsets.get(tgtNode.id) ?? 0) + thickness);
+    links.push({ source: srcNode.id, target: tgtNode.id, value: l.value, sy, ty, thickness });
+  }
+
+  return { nodes, links, maxDepth };
+}
+
+function ServiceSankeyTab({
+  data, isLoading, chartStyle, onStyleChange, timelapseData, tlBucketList, tlBuckets,
+}: {
+  data: any; isLoading: boolean; chartStyle: SvcSankeyStyle; onStyleChange: (v: SvcSankeyStyle) => void;
+  timelapseData?: any; tlBucketList?: string[]; tlBuckets?: Map<string, any[]>;
+}) {
+  const fmtCount = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M" : n >= 1_000 ? (n / 1_000).toFixed(1) + "k" : String(Math.round(n));
+  const truncLabel = (s: string, max = 22) => s.length > max ? s.substring(0, max) + "…" : s;
+
+  const [svcSankeySubTab, setSvcSankeySubTab] = useState<"flow" | "callPatterns">("flow");
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const [focusLabel, setFocusLabel] = useState<string | null>(null);
+  const [focusMode, setFocusMode] = useState(false);
+
+  const tl = useTimelapse();
+  const sankeyTlActive = tl.enabled && svcSankeySubTab === "flow";
+
+  // Use pre-parsed buckets passed from parent (avoids mount dependency)
+  const sankeyTlBuckets = tlBuckets ?? new Map<string, any[]>();
+  const sankeyTlBucketList = tlBucketList ?? [];
+
+  const allRecords = (data?.data?.records ?? []) as any[];
+  const tlBucketRecords = React.useMemo(() => {
+    if (!sankeyTlActive || sankeyTlBucketList.length === 0) return null;
+    const key = sankeyTlBucketList[Math.min(tl.index, sankeyTlBucketList.length - 1)];
+    return sankeyTlBuckets.get(key) ?? [];
+  }, [sankeyTlActive, sankeyTlBucketList, sankeyTlBuckets, tl.index]);
+
+  const records = tlBucketRecords ?? allRecords;
+  const { nodes, links, maxDepth } = useMemo(() => buildSvcSankey(records), [records]);
+
+  const hasFocus = focusNodeId !== null;
+  const hasLabelFocus = focusLabel !== null;
+
+  const { connectedNodes, connectedLinks } = useMemo(() => {
+    if (!focusNodeId) return { connectedNodes: new Set<string>(), connectedLinks: new Set<number>() };
+    const cn = new Set<string>([focusNodeId]);
+    const cl = new Set<number>();
+    links.forEach((l, i) => {
+      if (l.source === focusNodeId || l.target === focusNodeId) { cl.add(i); cn.add(l.source); cn.add(l.target); }
+    });
+    return { connectedNodes: cn, connectedLinks: cl };
+  }, [focusNodeId, links]);
+
+  const connectedLabelSet = useMemo(() => {
+    if (!focusLabel) return new Set<string>();
+    const cl = new Set<string>([focusLabel]);
+    for (const l of links) {
+      const src = nodes.find(n => n.id === l.source);
+      const tgt = nodes.find(n => n.id === l.target);
+      if (src && tgt) { if (src.label === focusLabel) cl.add(tgt.label); if (tgt.label === focusLabel) cl.add(src.label); }
+    }
+    return cl;
+  }, [focusLabel, links, nodes]);
+
+  const exitNodeIds = useMemo(() => {
+    const labelOutbound = new Map<string, number>();
+    const labelValue = new Map<string, number>();
+    for (const l of links) {
+      const src = nodes.find(n => n.id === l.source);
+      if (src) labelOutbound.set(src.label, (labelOutbound.get(src.label) ?? 0) + l.value);
+    }
+    for (const n of nodes) labelValue.set(n.label, Math.max(labelValue.get(n.label) ?? 0, n.value));
+    const exitSet = new Set<string>();
+    for (const n of nodes) {
+      const outbound = labelOutbound.get(n.label) ?? 0;
+      if (n.value > 0 && outbound < n.value * 0.3) exitSet.add(n.id);
+    }
+    return exitSet;
+  }, [nodes, links]);
+
+  const exitLabels = useMemo(() => {
+    const s = new Set<string>();
+    for (const id of exitNodeIds) { const n = nodes.find(x => x.id === id); if (n) s.add(n.label); }
+    return s;
+  }, [exitNodeIds, nodes]);
+
+  const handleLabelClick = (label: string) => setFocusLabel(prev => prev === label ? null : label);
+
+  const focusNode = hasFocus ? nodes.find(n => n.id === focusNodeId) : null;
+  const focusInbound = hasFocus ? links.filter(l => l.target === focusNodeId) : [];
+  const focusOutbound = hasFocus ? links.filter(l => l.source === focusNodeId) : [];
+
+  const labelNodeIds = focusLabel ? nodes.filter(n => n.label === focusLabel).map(n => n.id) : [];
+  const labelInbound = focusLabel ? links.filter(l => labelNodeIds.includes(l.target)).reduce((acc, l) => {
+    const src = nodes.find(n => n.id === l.source)!;
+    const ex = acc.find(a => a.label === src.label);
+    if (ex) ex.value += l.value; else acc.push({ label: src.label, value: l.value });
+    return acc;
+  }, [] as { label: string; value: number }[]).sort((a, b) => b.value - a.value) : [];
+  const labelOutbound = focusLabel ? links.filter(l => labelNodeIds.includes(l.source)).reduce((acc, l) => {
+    const tgt = nodes.find(n => n.id === l.target)!;
+    const ex = acc.find(a => a.label === tgt.label);
+    if (ex) ex.value += l.value; else acc.push({ label: tgt.label, value: l.value });
+    return acc;
+  }, [] as { label: string; value: number }[]).sort((a, b) => b.value - a.value) : [];
+  const labelSessions = focusLabel ? nodes.filter(n => n.label === focusLabel).reduce((a, n) => Math.max(a, n.value), 0) : 0;
+
+  if (isLoading) return <div style={{ padding: 32, textAlign: "center", opacity: 0.5 }}>Loading service flow data…</div>;
+  if (nodes.length === 0) return (
+    <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
+      <Strong>No trace data found for the selected timeframe.</Strong>
+      <Text style={{ fontSize: 12, opacity: 0.5, display: "block", marginTop: 8 }}>Service flow requires spans with trace IDs. Ensure distributed tracing is enabled.</Text>
+    </div>
+  );
+
+  const totalTraces = records.reduce((a: number, r: any) => a + Number(r.sessions ?? 0), 0);
+  const uniqueServices = new Set(nodes.map(n => n.label)).size;
+
+  // ---- Layout constants ----
+  const W = 960, H = 540;
+  const PAD = { top: 20, right: 140, bottom: 20, left: 140 };
+  const innerW = W - PAD.left - PAD.right;
+  const innerH = H - PAD.top - PAD.bottom;
+  const colW = maxDepth > 0 ? innerW / maxDepth : innerW;
+  const NODE_W = 18;
+  const DEPTH_LABELS = ["Entry", "Level 2", "Level 3", "Level 4", "Level 5"];
+  const scaleY = innerH / 500;
+
+  // ---- Tooltip builders ----
+  const buildNodeTooltip = (nodeId: string): string => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return "";
+    const isExit = exitNodeIds.has(nodeId);
+    const inbound = links.filter(l => l.target === nodeId).map(l => { const s = nodes.find(n => n.id === l.source)!; return { label: s.label, value: l.value }; }).sort((a, b) => b.value - a.value);
+    const outbound = links.filter(l => l.source === nodeId).map(l => { const t = nodes.find(n => n.id === l.target)!; return { label: t.label, value: l.value }; }).sort((a, b) => b.value - a.value);
+    const totalIn = inbound.reduce((s, x) => s + x.value, 0);
+    const totalOut = outbound.reduce((s, x) => s + x.value, 0);
+    const exits = Math.max(0, node.value - totalOut);
+    const starts = Math.max(0, node.value - totalIn);
+    const lines: string[] = [`${node.label}: ${fmtCount(node.value)} traces${isExit ? " ⛔ Sink" : ""}`];
+    if (starts > 0) lines.push(`← Entry: ${fmtCount(starts)} traces started here`);
+    if (exits > 0) lines.push(`→ Sink: ${fmtCount(exits)} traces ended here`);
+    if (inbound.length > 0) { lines.push(`Callers (${inbound.length}):`); inbound.slice(0, 3).forEach(x => { const pct = totalIn > 0 ? (x.value / totalIn) * 100 : 0; lines.push(`  ${Math.round(pct)}% (${fmtCount(x.value)})  ${x.label}`); }); }
+    if (outbound.length > 0) { lines.push(`Callees (${outbound.length}):`); outbound.slice(0, 3).forEach(x => { const pct = totalOut > 0 ? (x.value / totalOut) * 100 : 0; lines.push(`  ${Math.round(pct)}% (${fmtCount(x.value)})  ${x.label}`); }); }
+    return lines.join("\n");
+  };
+
+  const buildLabelTooltip = (label: string): string => {
+    const matchNodes = nodes.filter(n => n.label === label);
+    const totalVal = matchNodes.reduce((a, n) => Math.max(a, n.value), 0);
+    const isExit = exitLabels.has(label);
+    return `${label}: ${fmtCount(totalVal)} traces${isExit ? " ⛔ Sink" : ""}`;
+  };
+
+  const renderLabelPopup = () => {
+    if (!focusLabel) return null;
+    const totalIn = labelInbound.reduce((s, l) => s + l.value, 0);
+    const totalOut = labelOutbound.reduce((s, l) => s + l.value, 0);
+    const starts = Math.max(0, labelSessions - totalIn);
+    const exits = Math.max(0, labelSessions - totalOut);
+    return (
+      <div style={{ marginTop: 12, padding: "12px 16px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: "3px solid " + BLUE }}>
+        <Flex alignItems="center" gap={8} style={{ marginBottom: 8 }}>
+          <Strong style={{ fontSize: 13 }}>{focusLabel}</Strong>
+          <Text style={{ fontSize: 12, opacity: 0.5 }}>{fmtCount(labelSessions)} traces</Text>
+          {exitLabels.has(focusLabel) && <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 3, background: "rgba(194,25,48,0.12)", border: "1px solid rgba(194,25,48,0.3)", color: RED, fontWeight: 700 }}>⛔ Sink</span>}
+          <button onClick={() => setFocusLabel(null)} style={{ marginLeft: "auto", background: "none", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 4, color: "rgba(255,255,255,0.6)", cursor: "pointer", padding: "2px 8px", fontSize: 12 }}>Clear</button>
+        </Flex>
+        <Flex gap={6} flexWrap="wrap" style={{ marginBottom: 8 }}>
+          {starts > 0 && <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: "rgba(69,137,255,0.12)", border: "1px solid rgba(69,137,255,0.3)", color: BLUE, fontWeight: 700 }}>← Entry: {fmtCount(starts)}</span>}
+          {exits > 0 && <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: "rgba(194,25,48,0.12)", border: "1px solid rgba(194,25,48,0.3)", color: RED, fontWeight: 700 }}>→ Sink: {fmtCount(exits)}</span>}
+        </Flex>
+        {labelInbound.length > 0 && <div style={{ marginBottom: 6 }}><Text style={{ fontSize: 12, opacity: 0.5 }}>Called by:</Text><Flex gap={6} flexWrap="wrap" style={{ marginTop: 2 }}>{labelInbound.slice(0, 6).map((l, i) => <span key={i} style={{ fontSize: 12, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.06)" }}>{truncLabel(l.label, 30)} <Strong style={{ color: CYAN }}>{fmtCount(l.value)}</Strong></span>)}</Flex></div>}
+        {labelOutbound.length > 0 && <div><Text style={{ fontSize: 12, opacity: 0.5 }}>Calls to:</Text><Flex gap={6} flexWrap="wrap" style={{ marginTop: 2 }}>{labelOutbound.slice(0, 6).map((l, i) => <span key={i} style={{ fontSize: 12, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.06)" }}>{truncLabel(l.label, 30)} <Strong style={{ color: GREEN }}>{fmtCount(l.value)}</Strong></span>)}</Flex></div>}
+      </div>
+    );
+  };
+
+  // ---- Classic Sankey ----
+  const renderClassicSankey = (useGradient: boolean) => (
+    <div className="svc-chart-tile" style={{ padding: 16, overflowX: "auto" }}>
+      <svg width={W} height={H} style={{ display: "block", margin: "0 auto", cursor: hasFocus ? "pointer" : "default" }} onClick={() => setFocusNodeId(null)}>
+        {useGradient && (
+          <defs>
+            {links.map((l, i) => {
+              const srcNode = nodes.find(n => n.id === l.source)!;
+              const tgtNode = nodes.find(n => n.id === l.target)!;
+              return (
+                <linearGradient key={`lg-${i}`} id={`svc-sankey-grad-${i}`} x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor={SVC_SANKEY_COLORS[srcNode.depth % SVC_SANKEY_COLORS.length]} />
+                  <stop offset="100%" stopColor={SVC_SANKEY_COLORS[tgtNode.depth % SVC_SANKEY_COLORS.length]} />
+                </linearGradient>
+              );
+            })}
+          </defs>
+        )}
+        {Array.from({ length: maxDepth + 1 }, (_, d) => (
+          <text key={`dl-${d}`} x={PAD.left + d * colW + NODE_W / 2} y={12} textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize={10} fontWeight={600}>{DEPTH_LABELS[d] ?? `Level ${d + 1}`}</text>
+        ))}
+        {links.map((l, i) => {
+          const srcNode = nodes.find(n => n.id === l.source)!;
+          const tgtNode = nodes.find(n => n.id === l.target)!;
+          const x0 = PAD.left + srcNode.depth * colW + NODE_W;
+          const x1 = PAD.left + tgtNode.depth * colW;
+          const y0 = PAD.top + l.sy * scaleY + (l.thickness * scaleY) / 2;
+          const y1 = PAD.top + l.ty * scaleY + (l.thickness * scaleY) / 2;
+          const curvature = (x1 - x0) * 0.4;
+          const color = useGradient ? `url(#svc-sankey-grad-${i})` : SVC_SANKEY_COLORS[srcNode.depth % SVC_SANKEY_COLORS.length];
+          const isConnected = !hasFocus || connectedLinks.has(i);
+          const opacity = hasFocus ? (isConnected ? 0.7 : (focusMode ? 0 : 0.06)) : 0.35;
+          return (
+            <path key={`link-${i}`} d={`M${x0},${y0} C${x0 + curvature},${y0} ${x1 - curvature},${y1} ${x1},${y1}`} fill="none"
+              stroke={color} strokeWidth={Math.max(1, l.thickness * scaleY)}
+              strokeOpacity={useGradient ? (hasFocus ? (isConnected ? 0.8 : (focusMode ? 0 : 0.08)) : 0.5) : opacity}
+              style={{ cursor: "pointer", transition: "stroke-opacity 0.2s" }}
+              onClick={(e) => { e.stopPropagation(); setFocusNodeId(srcNode.id); }}>
+              <title>{`${srcNode.label} → ${tgtNode.label}: ${fmtCount(l.value)} traces`}</title>
+            </path>
+          );
+        })}
+        {nodes.map((n) => {
+          const x = PAD.left + n.depth * colW;
+          const y = PAD.top + n.y * scaleY;
+          const h = Math.max(2, n.height * scaleY);
+          const isExit = exitNodeIds.has(n.id);
+          const color = isExit ? RED : SVC_SANKEY_COLORS[n.depth % SVC_SANKEY_COLORS.length];
+          const isLeft = n.depth === 0;
+          const labelX = isLeft ? x - 4 : x + NODE_W + 4;
+          const anchor = isLeft ? "end" : "start";
+          const isFocused = n.id === focusNodeId;
+          const isConnected = !hasFocus || connectedNodes.has(n.id);
+          const nodeOpacity = hasFocus ? (isFocused ? 1 : isConnected ? 0.85 : (focusMode ? 0 : 0.15)) : 0.85;
+          const labelOpacity = hasFocus ? (isConnected ? 0.9 : (focusMode ? 0 : 0.15)) : 0.7;
+          return (
+            <g key={n.id} style={{ cursor: "pointer", transition: "opacity 0.2s" }} onClick={(e) => { e.stopPropagation(); setFocusNodeId(isFocused ? null : n.id); }}>
+              <rect x={x} y={y} width={NODE_W} height={h} rx={3} fill={color} opacity={nodeOpacity} stroke={isFocused ? "#fff" : (isExit ? RED : "none")} strokeWidth={isFocused ? 2 : (isExit ? 1.5 : 0)}>
+                <title>{buildNodeTooltip(n.id)}</title>
+              </rect>
+              {h > 8 && <text x={labelX} y={y + h / 2 + 3.5} textAnchor={anchor} fill={`rgba(255,255,255,${labelOpacity})`} fontSize={10} fontWeight={isFocused || isExit ? 700 : 400}>{isExit ? "⛔ " : ""}{truncLabel(n.label)}</text>}
+            </g>
+          );
+        })}
+      </svg>
+      {hasFocus && focusNode && (
+        <div style={{ marginTop: 12, padding: "12px 16px", background: "rgba(69,137,255,0.08)", borderRadius: 8, borderLeft: `3px solid ${SVC_SANKEY_COLORS[focusNode.depth % SVC_SANKEY_COLORS.length]}` }}>
+          <Flex alignItems="center" gap={8} style={{ marginBottom: 8 }}>
+            <Strong style={{ fontSize: 13 }}>{focusNode.label}</Strong>
+            <Text style={{ fontSize: 12, opacity: 0.5 }}>{fmtCount(focusNode.value)} traces</Text>
+            <button onClick={() => setFocusNodeId(null)} style={{ marginLeft: "auto", background: "none", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 4, color: "rgba(255,255,255,0.6)", cursor: "pointer", padding: "2px 8px", fontSize: 12 }}>Clear</button>
+          </Flex>
+          {focusInbound.length > 0 && <div style={{ marginBottom: 6 }}><Text style={{ fontSize: 12, opacity: 0.5 }}>Called by:</Text><Flex gap={6} flexWrap="wrap" style={{ marginTop: 2 }}>{focusInbound.sort((a, b) => b.value - a.value).slice(0, 6).map((l, i) => { const src = nodes.find(n => n.id === l.source)!; return <span key={i} style={{ fontSize: 12, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.06)" }}>{truncLabel(src.label, 30)} <Strong style={{ color: CYAN }}>{fmtCount(l.value)}</Strong></span>; })}</Flex></div>}
+          {focusOutbound.length > 0 && <div><Text style={{ fontSize: 12, opacity: 0.5 }}>Calls to:</Text><Flex gap={6} flexWrap="wrap" style={{ marginTop: 2 }}>{focusOutbound.sort((a, b) => b.value - a.value).slice(0, 6).map((l, i) => { const tgt = nodes.find(n => n.id === l.target)!; return <span key={i} style={{ fontSize: 12, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.06)" }}>{truncLabel(tgt.label, 30)} <Strong style={{ color: GREEN }}>{fmtCount(l.value)}</Strong></span>; })}</Flex></div>}
+        </div>
+      )}
+    </div>
+  );
+
+  // ---- Directed Flow Graph ----
+  const renderDirectedFlowGraph = () => {
+    const uniqueNodes = new Map<string, { label: string; totalValue: number; depth: number }>();
+    for (const n of nodes) {
+      const existing = uniqueNodes.get(n.label);
+      if (!existing || n.value > existing.totalValue) uniqueNodes.set(n.label, { label: n.label, totalValue: n.value, depth: n.depth });
+    }
+    const uNodes = Array.from(uniqueNodes.values()).sort((a, b) => b.totalValue - a.totalValue).slice(0, 16);
+    const edgeMap = new Map<string, number>();
+    for (const l of links) {
+      const src = nodes.find(n => n.id === l.source)!;
+      const tgt = nodes.find(n => n.id === l.target)!;
+      const key = `${src.label}|||${tgt.label}`;
+      edgeMap.set(key, (edgeMap.get(key) ?? 0) + l.value);
+    }
+    const edges = Array.from(edgeMap.entries()).map(([k, v]) => { const [from, to] = k.split("|||"); return { from, to, value: v }; }).sort((a, b) => b.value - a.value).slice(0, 30);
+    const gW = 960, gH = 500, nodeRadius = 28;
+    const depthGroups = new Map<number, typeof uNodes>();
+    for (const n of uNodes) { const arr = depthGroups.get(n.depth) ?? []; arr.push(n); depthGroups.set(n.depth, arr); }
+    const maxD = Math.max(...Array.from(depthGroups.keys()));
+    const nodePositions = new Map<string, { x: number; y: number }>();
+    for (const [d, group] of depthGroups) {
+      const colX = 80 + (d / Math.max(maxD, 1)) * (gW - 160);
+      group.forEach((n, i) => { nodePositions.set(n.label, { x: colX, y: group.length === 1 ? gH / 2 : 50 + (i / Math.max(group.length - 1, 1)) * (gH - 100) }); });
+    }
+    return (
+      <div className="svc-chart-tile" style={{ padding: 16, overflowX: "auto" }}>
+        <svg width={gW} height={gH} style={{ display: "block", margin: "0 auto" }}>
+          <defs><marker id="svc-arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="rgba(255,255,255,0.5)" /></marker></defs>
+          {edges.map((e, i) => {
+            const from = nodePositions.get(e.from); const to = nodePositions.get(e.to);
+            if (!from || !to) return null;
+            const maxEdgeVal = edges[0]?.value ?? 1;
+            const thickness = Math.max(1, (e.value / maxEdgeVal) * 8);
+            const dx = to.x - from.x; const dy = to.y - from.y; const dist = Math.sqrt(dx * dx + dy * dy);
+            const offsetX = dist > 0 ? (dx / dist) * nodeRadius : 0; const offsetY = dist > 0 ? (dy / dist) * nodeRadius : 0;
+            const x1 = from.x + offsetX; const y1 = from.y + offsetY; const x2 = to.x - offsetX; const y2 = to.y - offsetY;
+            const edgeConnected = !hasLabelFocus || (connectedLabelSet.has(e.from) && connectedLabelSet.has(e.to) && (e.from === focusLabel || e.to === focusLabel));
+            const edgeOpacity = hasLabelFocus ? (edgeConnected ? 0.5 : (focusMode ? 0 : 0.06)) : 0.4;
+            return (
+              <g key={`edge-${i}`} style={{ transition: "opacity 0.2s" }}>
+                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={SVC_SANKEY_COLORS[i % SVC_SANKEY_COLORS.length]} strokeWidth={thickness} strokeOpacity={edgeOpacity} markerEnd="url(#svc-arrowhead)" />
+                {(!hasLabelFocus || edgeConnected) && <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 10} textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize={9} fontWeight={600}>{fmtCount(e.value)}</text>}
+              </g>
+            );
+          })}
+          {uNodes.map((n, i) => {
+            const pos = nodePositions.get(n.label); if (!pos) return null;
+            const isExit = exitLabels.has(n.label);
+            const color = isExit ? RED : SVC_SANKEY_COLORS[n.depth % SVC_SANKEY_COLORS.length];
+            const isFocused = focusLabel === n.label;
+            const isConnected = !hasLabelFocus || connectedLabelSet.has(n.label);
+            const nodeOpacity = hasLabelFocus ? (isFocused ? 1 : isConnected ? 0.85 : (focusMode ? 0 : 0.15)) : 0.8;
+            const labelVis = hasLabelFocus ? (isConnected ? 1 : (focusMode ? 0 : 0.15)) : 1;
+            return (
+              <g key={`node-${i}`} style={{ cursor: "pointer", transition: "opacity 0.2s" }} onClick={(e) => { e.stopPropagation(); handleLabelClick(n.label); }}>
+                <circle cx={pos.x} cy={pos.y} r={nodeRadius} fill={color} fillOpacity={nodeOpacity} stroke={isFocused ? "#fff" : color} strokeWidth={isFocused ? 3 : 2}><title>{buildLabelTooltip(n.label)}</title></circle>
+                <text x={pos.x} y={pos.y - 3} textAnchor="middle" fill="white" fontSize={8} fontWeight={600} opacity={labelVis}>{isExit ? "⛔ " : ""}{truncLabel(n.label, 14)}</text>
+                <text x={pos.x} y={pos.y + 10} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={8} opacity={labelVis}>{fmtCount(n.totalValue)}</text>
+              </g>
+            );
+          })}
+        </svg>
+        {renderLabelPopup()}
+      </div>
+    );
+  };
+
+  // ---- Alluvial / Columnar ----
+  const renderAlluvial = () => {
+    const maxNodesCol = Math.max(...Array.from(new Map<number, number>(nodes.map(n => [n.depth, 0] as [number, number])).keys()).map(d => nodes.filter(n => n.depth === d).length), 1);
+    const aW = 960, nodeW = 140, nodeH = 36, nodeGap = 8;
+    const aH = Math.max(540, Math.min(maxNodesCol, 12) * (nodeH + nodeGap) + 100);
+    const aPAD = { top: 50, right: 40, bottom: 20, left: 40 };
+    const aInnerW = aW - aPAD.left - aPAD.right, aInnerH = aH - aPAD.top - aPAD.bottom;
+    const numCols = maxDepth + 1, aColW = numCols > 0 ? aInnerW / numCols : aInnerW;
+    const depthCols = new Map<number, SvcSankeyNode[]>();
+    for (const n of nodes) { const arr = depthCols.get(n.depth) ?? []; arr.push(n); depthCols.set(n.depth, arr); }
+    const alluvialNodes = new Map<string, { x: number; y: number; w: number; h: number; label: string; value: number; depth: number; cx: number; cy: number }>();
+    for (const [d, col] of depthCols) {
+      const sorted = [...col].sort((a, b) => b.value - a.value).slice(0, 12);
+      const cx = aPAD.left + d * aColW + aColW / 2;
+      const totalH = sorted.length * nodeH + (sorted.length - 1) * nodeGap;
+      let yStart = aPAD.top + (aInnerH - totalH) / 2;
+      if (yStart < aPAD.top) yStart = aPAD.top;
+      for (const n of sorted) { alluvialNodes.set(n.id, { x: cx - nodeW / 2, y: yStart, w: nodeW, h: nodeH, label: n.label, value: n.value, depth: d, cx, cy: yStart + nodeH / 2 }); yStart += nodeH + nodeGap; }
+    }
+    return (
+      <div className="svc-chart-tile" style={{ padding: 16, overflowX: "scroll", overflowY: "auto", maxHeight: 600 }}>
+        <svg width={aW} height={aH} style={{ display: "block", minWidth: aW }}>
+          {Array.from({ length: numCols }, (_, d) => {
+            const cx = aPAD.left + d * aColW + aColW / 2;
+            return <g key={`col-bg-${d}`}><rect x={cx - aColW / 2 + 8} y={aPAD.top - 20} width={aColW - 16} height={aInnerH + 30} rx={8} fill="rgba(60,60,80,0.35)" stroke="rgba(255,255,255,0.06)" strokeWidth={1} /><text x={cx} y={aPAD.top - 6} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={12} fontWeight={700}>{DEPTH_LABELS[d] ?? `Level ${d + 1}`}</text></g>;
+          })}
+          <defs><marker id="svc-alluvial-arrow" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto"><polygon points="0 0, 6 2, 0 4" fill="rgba(180,180,200,0.5)" /></marker></defs>
+          {links.map((l, i) => {
+            const src = alluvialNodes.get(l.source); const tgt = alluvialNodes.get(l.target);
+            if (!src || !tgt) return null;
+            const x0 = src.x + src.w, y0 = src.cy, x1 = tgt.x, y1 = tgt.cy;
+            const cp = (x1 - x0) * 0.45;
+            const maxVal = links.length > 0 ? Math.max(...links.map(ll => ll.value)) : 1;
+            const thickness = Math.max(1, Math.min(4, (l.value / maxVal) * 4));
+            const edgeConnected = !hasLabelFocus || (connectedLabelSet.has(src.label) && connectedLabelSet.has(tgt.label) && (src.label === focusLabel || tgt.label === focusLabel));
+            const edgeOpacity = hasLabelFocus ? (edgeConnected ? 0.5 : (focusMode ? 0 : 0.06)) : 0.4;
+            return <path key={`al-${i}`} d={`M${x0},${y0} C${x0 + cp},${y0} ${x1 - cp},${y1} ${x1},${y1}`} fill="none" stroke={`rgba(180,180,200,${edgeOpacity})`} strokeWidth={thickness} markerEnd="url(#svc-alluvial-arrow)" style={{ transition: "stroke 0.2s" }} />;
+          })}
+          {Array.from(alluvialNodes.entries()).map(([id, n]) => {
+            const isExit = exitLabels.has(n.label);
+            const color = isExit ? RED : SVC_SANKEY_COLORS[n.depth % SVC_SANKEY_COLORS.length];
+            const isFocused = focusLabel === n.label;
+            const isConnected = !hasLabelFocus || connectedLabelSet.has(n.label);
+            const nodeOpacity = hasLabelFocus ? (isFocused ? 1 : isConnected ? 0.85 : (focusMode ? 0 : 0.15)) : 0.9;
+            const labelVis = hasLabelFocus ? (isConnected ? 1 : (focusMode ? 0 : 0.15)) : 1;
+            return (
+              <g key={id} style={{ cursor: "pointer", transition: "opacity 0.2s" }} onClick={(e) => { e.stopPropagation(); handleLabelClick(n.label); }}>
+                <rect x={n.x} y={n.y} width={n.w} height={n.h} rx={5} fill={color} fillOpacity={nodeOpacity} stroke={isFocused ? "#fff" : (isExit ? RED : "rgba(255,255,255,0.15)")} strokeWidth={isFocused ? 2.5 : 1}><title>{buildLabelTooltip(n.label)}</title></rect>
+                <text x={n.cx} y={n.y + n.h / 2 + 4} textAnchor="middle" fill="white" fontSize={10} fontWeight={600} opacity={labelVis}>{isExit ? "⛔ " : ""}{truncLabel(n.label, 16)} — {fmtCount(n.value)}</text>
+              </g>
+            );
+          })}
+        </svg>
+        {renderLabelPopup()}
+      </div>
+    );
+  };
+
+  // ---- State Machine ----
+  const renderStateMachine = () => {
+    const stateNodes = new Map<string, { label: string; value: number }>();
+    for (const n of nodes) { const ex = stateNodes.get(n.label); if (ex) ex.value = Math.max(ex.value, n.value); else stateNodes.set(n.label, { label: n.label, value: n.value }); }
+    const edgeMap = new Map<string, number>();
+    for (const l of links) { const src = nodes.find(n => n.id === l.source)!; const tgt = nodes.find(n => n.id === l.target)!; const key = `${src.label}|||${tgt.label}`; edgeMap.set(key, (edgeMap.get(key) ?? 0) + l.value); }
+    const smNodes = Array.from(stateNodes.values()).sort((a, b) => b.value - a.value).slice(0, 12);
+    const topEdges = Array.from(edgeMap.entries()).map(([k, v]) => { const [from, to] = k.split("|||"); return { from, to, value: v }; }).filter(e => smNodes.some(n => n.label === e.from) && smNodes.some(n => n.label === e.to)).sort((a, b) => b.value - a.value).slice(0, 20);
+    const smW = 960, smH = 500, nodeRectW = 110, nodeRectH = 44;
+    const smPositions = new Map<string, { x: number; y: number }>();
+    smNodes.forEach((n, i) => {
+      const cols = 3, row = Math.floor(i / cols), col = i % cols;
+      smPositions.set(n.label, { x: 120 + col * 260, y: 80 + row * 160 });
+    });
+    return (
+      <div className="svc-chart-tile" style={{ padding: 16, overflowX: "auto" }}>
+        <svg width={smW} height={smH} style={{ display: "block", margin: "0 auto" }}>
+          <defs><marker id="svc-sm-arrow" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0, 7 2.5, 0 5" fill="rgba(200,200,220,0.6)" /></marker></defs>
+          {topEdges.map((e, i) => {
+            const from = smPositions.get(e.from); const to = smPositions.get(e.to); if (!from || !to) return null;
+            const dx = to.x - from.x; const dy = to.y - from.y; const dist = Math.sqrt(dx * dx + dy * dy);
+            const ox = dist > 0 ? (dx / dist) * nodeRectW / 2 : 0; const oy = dist > 0 ? (dy / dist) * nodeRectH / 2 : 0;
+            const x1 = from.x + ox; const y1 = from.y + oy; const x2 = to.x - ox; const y2 = to.y - oy;
+            const midX = (x1 + x2) / 2 + (dy / dist) * 18; const midY = (y1 + y2) / 2 - (dx / dist) * 18;
+            const maxVal = topEdges[0]?.value ?? 1; const thickness = Math.max(1.5, (e.value / maxVal) * 5);
+            const edgeConnected = !hasLabelFocus || (connectedLabelSet.has(e.from) && connectedLabelSet.has(e.to) && (e.from === focusLabel || e.to === focusLabel));
+            const edgeOpacity = hasLabelFocus ? (edgeConnected ? 0.6 : (focusMode ? 0 : 0.06)) : 0.5;
+            return <g key={`sme-${i}`} style={{ transition: "opacity 0.2s" }}><path d={`M${x1},${y1} Q${midX},${midY} ${x2},${y2}`} fill="none" stroke={`rgba(200,200,220,${edgeOpacity})`} strokeWidth={thickness} markerEnd="url(#svc-sm-arrow)" />{(!hasLabelFocus || edgeConnected) && <text x={midX} y={midY - 2} textAnchor="middle" fill="rgba(255,255,255,0.8)" fontSize={9} fontWeight={700}>{fmtCount(e.value)}</text>}</g>;
+          })}
+          {smNodes.map((n, i) => {
+            const pos = smPositions.get(n.label); if (!pos) return null;
+            const isExit = exitLabels.has(n.label);
+            const color = isExit ? RED : SVC_SANKEY_COLORS[i % SVC_SANKEY_COLORS.length];
+            const isFocused = focusLabel === n.label;
+            const isConnected = !hasLabelFocus || connectedLabelSet.has(n.label);
+            const nodeOpacity = hasLabelFocus ? (isFocused ? 1 : isConnected ? 0.85 : (focusMode ? 0 : 0.15)) : 0.9;
+            const labelVis = hasLabelFocus ? (isConnected ? 1 : (focusMode ? 0 : 0.15)) : 1;
+            return <g key={`smn-${i}`} style={{ cursor: "pointer", transition: "opacity 0.2s" }} onClick={(e) => { e.stopPropagation(); handleLabelClick(n.label); }}><rect x={pos.x - nodeRectW / 2} y={pos.y - nodeRectH / 2} width={nodeRectW} height={nodeRectH} rx={6} fill={color} fillOpacity={nodeOpacity} stroke={isFocused ? "#fff" : "rgba(255,255,255,0.15)"} strokeWidth={isFocused ? 2.5 : 1}><title>{buildLabelTooltip(n.label)}</title></rect><text x={pos.x} y={pos.y - 4} textAnchor="middle" fill="white" fontSize={10} fontWeight={700} opacity={labelVis}>{isExit ? "⛔ " : ""}{truncLabel(n.label, 14)}</text><text x={pos.x} y={pos.y + 12} textAnchor="middle" fill="rgba(255,255,255,0.85)" fontSize={9} opacity={labelVis}>{fmtCount(n.value)} traces</text></g>;
+          })}
+        </svg>
+        {renderLabelPopup()}
+      </div>
+    );
+  };
+
+  // ---- Chord Diagram ----
+  const renderChordDiagram = () => {
+    const labelSet = new Set<string>();
+    for (const n of nodes) labelSet.add(n.label);
+    const labels = Array.from(labelSet).slice(0, 12);
+    const idx = new Map<string, number>();
+    labels.forEach((l, i) => idx.set(l, i));
+    const N = labels.length;
+    const matrix: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+    for (const l of links) {
+      const srcNode = nodes.find(n => n.id === l.source); const tgtNode = nodes.find(n => n.id === l.target);
+      if (!srcNode || !tgtNode) continue;
+      const si = idx.get(srcNode.label); const ti = idx.get(tgtNode.label);
+      if (si !== undefined && ti !== undefined) matrix[si][ti] += l.value;
+    }
+    const cW = 560, cH = 560, cx = cW / 2, cy = cH / 2, outerR = 220, innerR = 200, arcW = outerR - innerR;
+    const rowTotals = matrix.map(row => row.reduce((a, b) => a + b, 0));
+    const totalFlows = rowTotals.reduce((a, b) => a + b, 0);
+    const gap = 0.02;
+    const arcAngles: { start: number; end: number; label: string; total: number }[] = [];
+    let angle = -Math.PI / 2;
+    for (let i = 0; i < N; i++) {
+      const frac = totalFlows > 0 ? rowTotals[i] / totalFlows : 1 / N;
+      const span = frac * (2 * Math.PI - gap * N);
+      arcAngles.push({ start: angle, end: angle + span, label: labels[i], total: rowTotals[i] });
+      angle += span + gap;
+    }
+    return (
+      <div className="svc-chart-tile" style={{ padding: 16, overflowX: "auto" }}>
+        <svg width={cW} height={cH} style={{ display: "block", margin: "0 auto" }}>
+          {arcAngles.map((arc, i) => {
+            const color = SVC_SANKEY_COLORS[i % SVC_SANKEY_COLORS.length];
+            const isFocused = focusLabel === arc.label;
+            const isConnected = !hasLabelFocus || connectedLabelSet.has(arc.label);
+            const opacity = hasLabelFocus ? (isConnected ? 0.9 : (focusMode ? 0 : 0.15)) : 0.85;
+            const x1 = cx + innerR * Math.cos(arc.start), y1 = cy + innerR * Math.sin(arc.start);
+            const x2 = cx + outerR * Math.cos(arc.start), y2 = cy + outerR * Math.sin(arc.start);
+            const x3 = cx + outerR * Math.cos(arc.end), y3 = cy + outerR * Math.sin(arc.end);
+            const x4 = cx + innerR * Math.cos(arc.end), y4 = cy + innerR * Math.sin(arc.end);
+            const large = arc.end - arc.start > Math.PI ? 1 : 0;
+            const midAngle = (arc.start + arc.end) / 2;
+            const labelR = outerR + 18;
+            const lx = cx + labelR * Math.cos(midAngle), ly = cy + labelR * Math.sin(midAngle);
+            return (
+              <g key={`chord-arc-${i}`} style={{ cursor: "pointer", transition: "opacity 0.2s" }} onClick={() => handleLabelClick(arc.label)}>
+                <path d={`M${x1},${y1} L${x2},${y2} A${outerR},${outerR} 0 ${large},1 ${x3},${y3} L${x4},${y4} A${innerR},${innerR} 0 ${large},0 ${x1},${y1} Z`} fill={color} fillOpacity={opacity} stroke={isFocused ? "#fff" : "rgba(0,0,0,0.2)"} strokeWidth={isFocused ? 2 : 0.5}>
+                  <title>{`${arc.label}: ${fmtCount(arc.total)} traces`}</title>
+                </path>
+                {arcW > 6 && <text x={lx} y={ly} textAnchor={midAngle > Math.PI / 2 && midAngle < 3 * Math.PI / 2 ? "end" : "start"} fill="rgba(255,255,255,0.8)" fontSize={9} fontWeight={600} opacity={opacity}>{truncLabel(arc.label, 14)}</text>}
+              </g>
+            );
+          })}
+          {arcAngles.map((srcArc, si) =>
+            arcAngles.map((tgtArc, ti) => {
+              const val = matrix[si][ti];
+              if (val === 0 || si === ti) return null;
+              const maxVal = Math.max(...matrix.flat());
+              if (maxVal === 0) return null;
+              const frac = val / maxVal;
+              const srcMid = (srcArc.start + srcArc.end) / 2;
+              const tgtMid = (tgtArc.start + tgtArc.end) / 2;
+              const x1 = cx + innerR * Math.cos(srcMid), y1 = cy + innerR * Math.sin(srcMid);
+              const x2 = cx + innerR * Math.cos(tgtMid), y2 = cy + innerR * Math.sin(tgtMid);
+              const edgeConnected = !hasLabelFocus || (connectedLabelSet.has(srcArc.label) && connectedLabelSet.has(tgtArc.label) && (srcArc.label === focusLabel || tgtArc.label === focusLabel));
+              const edgeOpacity = hasLabelFocus ? (edgeConnected ? frac * 0.6 : (focusMode ? 0 : frac * 0.06)) : frac * 0.35;
+              return <path key={`chord-${si}-${ti}`} d={`M${x1},${y1} Q${cx},${cy} ${x2},${y2}`} fill="none" stroke={SVC_SANKEY_COLORS[si % SVC_SANKEY_COLORS.length]} strokeWidth={Math.max(1, frac * 6)} strokeOpacity={edgeOpacity} style={{ transition: "stroke-opacity 0.2s" }} />;
+            })
+          )}
+          <text x={cx} y={cy + 4} textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize={11}>{fmtCount(totalFlows)} traces</text>
+        </svg>
+        {renderLabelPopup()}
+      </div>
+    );
+  };
+
+  // ---- Transition Heatmap ----
+  const renderTransitionHeatmap = () => {
+    const labelSet = new Set<string>();
+    for (const n of nodes) labelSet.add(n.label);
+    const topLabels = Array.from(labelSet).slice(0, 12);
+    const N = topLabels.length;
+    const idx = new Map<string, number>();
+    topLabels.forEach((l, i) => idx.set(l, i));
+    const matrix: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+    for (const l of links) {
+      const srcNode = nodes.find(n => n.id === l.source); const tgtNode = nodes.find(n => n.id === l.target);
+      if (!srcNode || !tgtNode) continue;
+      const si = idx.get(srcNode.label); const ti = idx.get(tgtNode.label);
+      if (si !== undefined && ti !== undefined) matrix[si][ti] += l.value;
+    }
+    const maxVal = Math.max(...matrix.flat(), 1);
+    const cellSize = Math.min(44, Math.floor(480 / N));
+    const hmPad = { top: 100, left: 100, right: 20, bottom: 20 };
+    const hmW = hmPad.left + N * cellSize + hmPad.right;
+    const hmH = hmPad.top + N * cellSize + hmPad.bottom;
+    const [hmSelectedIdx, setHmSelectedIdx] = useState<number>(-1);
+    return (
+      <div className="svc-chart-tile" style={{ padding: 16, overflowX: "auto" }}>
+        <svg width={hmW} height={hmH} style={{ display: "block", margin: "0 auto" }} onClick={() => setHmSelectedIdx(-1)}>
+          {topLabels.map((label, i) => (
+            <g key={`hm-row-${i}`} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); setHmSelectedIdx(i === hmSelectedIdx ? -1 : i); }}>
+              <text x={hmPad.left - 6} y={hmPad.top + i * cellSize + cellSize / 2 + 4} textAnchor="end" fill={i === hmSelectedIdx ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)"} fontSize={9} fontWeight={i === hmSelectedIdx ? 700 : 400}>{truncLabel(label, 14)}</text>
+              <text x={hmPad.left + i * cellSize + cellSize / 2} y={hmPad.top - 6} textAnchor="middle" fill={i === hmSelectedIdx ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)"} fontSize={9} fontWeight={i === hmSelectedIdx ? 700 : 400} transform={`rotate(-40,${hmPad.left + i * cellSize + cellSize / 2},${hmPad.top - 6})`}>{truncLabel(label, 12)}</text>
+            </g>
+          ))}
+          {matrix.map((row, si) =>
+            row.map((val, ti) => {
+              const intensity = maxVal > 0 ? val / maxVal : 0;
+              const isSelected = hmSelectedIdx === si;
+              const alpha = isSelected ? Math.max(0.12, intensity * 0.9) : Math.max(0.04, intensity * 0.7);
+              const color = si === ti ? `rgba(128,128,128,${alpha * 0.5})` : `rgba(69,137,255,${alpha})`;
+              const x = hmPad.left + ti * cellSize, y = hmPad.top + si * cellSize;
+              return (
+                <g key={`hm-${si}-${ti}`} style={{ cursor: val > 0 ? "pointer" : "default" }}>
+                  <rect x={x} y={y} width={cellSize} height={cellSize} fill={color} stroke="rgba(255,255,255,0.06)" strokeWidth={0.5} />
+                  {val > 0 && cellSize > 20 && <text x={x + cellSize / 2} y={y + cellSize / 2 + 4} textAnchor="middle" fill="rgba(255,255,255,0.8)" fontSize={8}>{fmtCount(val)}</text>}
+                  {val > 0 && <title>{`${topLabels[si]} → ${topLabels[ti]}: ${fmtCount(val)} traces`}</title>}
+                </g>
+              );
+            })
+          )}
+          {hmSelectedIdx >= 0 && (
+            <text x={hmPad.left + 160} y={hmH - 8} fill="rgba(69,137,255,0.7)" fontSize={10} fontWeight={600}>Selected: {truncLabel(topLabels[hmSelectedIdx], 20)}</text>
+          )}
+        </svg>
+      </div>
+    );
+  };
+
+  // ---- Render active chart ----
+  const renderChart = () => {
+    switch (chartStyle) {
+      case "gradient": return renderClassicSankey(true);
+      case "directed": return renderDirectedFlowGraph();
+      case "alluvial": return renderAlluvial();
+      case "stateMachine": return renderStateMachine();
+      case "chord": return renderChordDiagram();
+      case "heatmap": return renderTransitionHeatmap();
+      case "classic":
+      default: return renderClassicSankey(false);
+    }
+  };
+
+  // ---- Chart header ----
+  const chartHeader = (
+    <>
+      <Flex alignItems="center" justifyContent="space-between">
+        <div className="svc-section-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <Heading level={6} style={{ margin: 0 }}>Service Flow Diagram</Heading>
+        </div>
+        <Flex alignItems="center" gap={8}>
+          <button
+            style={{ background: focusMode ? "rgba(69,137,255,0.25)" : "rgba(99,130,191,0.15)", border: focusMode ? "1px solid rgba(69,137,255,0.6)" : "1px solid rgba(99,130,191,0.3)", borderRadius: 6, padding: "4px 10px", fontSize: 12, color: focusMode ? BLUE : "rgba(128,128,128,0.8)", cursor: "pointer", fontWeight: focusMode ? 700 : 400 }}
+            onClick={() => setFocusMode(!focusMode)}>Focus: {focusMode ? "ON" : "OFF"}</button>
+          <Text style={{ fontSize: 13, opacity: 0.5 }}>Chart Style</Text>
+          <Select value={chartStyle} onChange={(val) => { if (val) onStyleChange(val as SvcSankeyStyle); }}>
+            <Select.Trigger style={{ minWidth: 170 }} />
+            <Select.Content>
+              {SVC_SANKEY_STYLE_OPTIONS.map(o => <Select.Option key={o.value} value={o.value}>{o.label}</Select.Option>)}
+            </Select.Content>
+          </Select>
+        </Flex>
+      </Flex>
+      <Text style={{ fontSize: 12, opacity: 0.5 }}>{SVC_SANKEY_STYLE_OPTIONS.find(o => o.value === chartStyle)?.label}: Service call flows by trace. Top {nodes.length} service nodes shown.{sankeyTlActive && tl.currentBucketKey ? ` · Time-Lapse bucket ${tl.currentBucketKey} (${tl.index + 1}/${tl.totalBuckets})` : ""}</Text>
+      <Flex gap={16} flexWrap="wrap">
+        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: "8px 16px", flex: "0 0 auto" }}>
+          <Text style={{ fontSize: 11, opacity: 0.6 }}>Total Traces</Text>
+          <Strong style={{ color: BLUE, fontSize: 20 }}>{formatCount(totalTraces)}</Strong>
+        </div>
+        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: "8px 16px", flex: "0 0 auto" }}>
+          <Text style={{ fontSize: 11, opacity: 0.6 }}>Unique Services</Text>
+          <Strong style={{ color: PURPLE, fontSize: 20 }}>{uniqueServices}</Strong>
+        </div>
+        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: "8px 16px", flex: "0 0 auto" }}>
+          <Text style={{ fontSize: 11, opacity: 0.6 }}>Flow Transitions</Text>
+          <Strong style={{ color: CYAN, fontSize: 20 }}>{links.length}</Strong>
+        </div>
+        <div className="svc-chart-tile" style={{ minHeight: "auto", padding: "8px 16px", flex: "0 0 auto" }}>
+          <Text style={{ fontSize: 11, opacity: 0.6 }}>Max Depth</Text>
+          <Strong style={{ color: GREEN, fontSize: 20 }}>{maxDepth + 1} levels</Strong>
+        </div>
+      </Flex>
+      <Flex gap={12} alignItems="center" style={{ padding: "4px 0", flexWrap: "wrap" }}>
+        <Flex gap={4} alignItems="center"><span style={{ width: 12, height: 12, borderRadius: 2, background: RED, display: "inline-block" }} /><Text style={{ fontSize: 11, opacity: 0.6 }}>Sink (low outbound)</Text></Flex>
+        {Array.from({ length: maxDepth + 1 }, (_, d) => (
+          <Flex key={d} gap={4} alignItems="center"><span style={{ width: 12, height: 12, borderRadius: 2, background: SVC_SANKEY_COLORS[d % SVC_SANKEY_COLORS.length], display: "inline-block" }} /><Text style={{ fontSize: 11, opacity: 0.6 }}>{DEPTH_LABELS[d] ?? `Level ${d + 1}`}</Text></Flex>
+        ))}
+      </Flex>
+    </>
+  );
+
+  // ---- Sub-tabs ----
+  const SUB_TABS = [
+    { key: "flow" as const, label: "Flow Chart", icon: "📊" },
+    { key: "callPatterns" as const, label: "Call Patterns", icon: "🔀" },
+  ];
+
+  const subTabBar = (
+    <Flex gap={4} flexWrap="wrap" style={{ padding: "4px 0" }}>
+      {SUB_TABS.map(t => (
+        <button key={t.key} onClick={() => setSvcSankeySubTab(t.key)} style={{
+          padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: svcSankeySubTab === t.key ? 700 : 400, cursor: "pointer",
+          background: svcSankeySubTab === t.key ? "rgba(69,137,255,0.15)" : "rgba(128,128,128,0.06)",
+          border: svcSankeySubTab === t.key ? "1px solid rgba(69,137,255,0.4)" : "1px solid rgba(128,128,128,0.15)",
+          color: svcSankeySubTab === t.key ? BLUE : "inherit", transition: "all 0.15s",
+        }}>{t.icon} {t.label}</button>
+      ))}
+    </Flex>
+  );
+
+  return (
+    <Flex flexDirection="column" gap={20} style={{ paddingTop: 16 }}>
+      {chartHeader}
+      {subTabBar}
+
+      {/* Flow Chart sub-tab */}
+      {svcSankeySubTab === "flow" && renderChart()}
+
+      {/* Call Patterns sub-tab */}
+      {svcSankeySubTab === "callPatterns" && (
+        <>
+          <div className="svc-section-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Heading level={6} style={{ margin: 0 }}>Top Service Call Patterns</Heading>
+          </div>
+          <Text style={{ fontSize: 12, opacity: 0.5 }}>Most frequent service call sequences observed in distributed traces.</Text>
+          <div className="svc-table-tile">
+            <DataTable
+              data={allRecords.slice(0, 50).map((r: any, i: number) => ({
+                "#": i + 1,
+                "Entry Service": String(r.s0 ?? ""),
+                "→ Level 2": String(r.s1 ?? ""),
+                "→ Level 3": r.s2 && r.s2 !== "(exit)" ? String(r.s2) : "—",
+                "→ Level 4": r.s3 && r.s3 !== "(exit)" ? String(r.s3) : "—",
+                Traces: Number(r.sessions ?? 0),
+              }))}
+              columns={[
+                { id: "rank", header: "#", accessor: "#", columnType: "number" as const },
+                { id: "entry", header: "Entry Service", accessor: "Entry Service", cell: ({ value }: any) => <Strong style={{ color: BLUE }}>{value}</Strong> },
+                { id: "l2", header: "→ Level 2", accessor: "→ Level 2", cell: ({ value }: any) => <Text style={{ color: CYAN }}>{value}</Text> },
+                { id: "l3", header: "→ Level 3", accessor: "→ Level 3" },
+                { id: "l4", header: "→ Level 4", accessor: "→ Level 4" },
+                { id: "traces", header: "Traces", accessor: "Traces", columnType: "number" as const, cell: ({ value }: any) => <Strong>{formatCount(value)}</Strong> },
+              ]}
+              sortable
+            >
+              <DataTable.Pagination defaultPageSize={25} />
+            </DataTable>
+          </div>
+        </>
+      )}
+    </Flex>
+  );
+}
+
 export const ServicesOverview = () => {
   const envUrl = getEnvironmentUrl().replace(/\/$/, "");
 
@@ -2343,6 +3695,38 @@ export const ServicesOverview = () => {
   const [depsImpactSubTab, setDepsImpactSubTab] = useState(0);
   const [flameGraphService, setFlameGraphService] = useState<string>("");
   const [marqueePaused, setMarqueePaused] = useState(true);
+  const tl = useTimelapse();
+  const [svcSankeyStyle, setSvcSankeyStyle] = useState<SvcSankeyStyle>("classic");
+  const [tlDiagPanel, setTlDiagPanel] = useState<{ pos: { x: number; y: number } } | null>(null);
+  const tlDiagDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const startTlDiagDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (!tlDiagPanel) return;
+    tlDiagDragRef.current = { startX: e.clientX, startY: e.clientY, origX: tlDiagPanel.pos.x, origY: tlDiagPanel.pos.y };
+    const onMove = (me: MouseEvent) => {
+      if (!tlDiagDragRef.current) return;
+      setTlDiagPanel({ pos: { x: tlDiagDragRef.current.origX + me.clientX - tlDiagDragRef.current.startX, y: tlDiagDragRef.current.origY + me.clientY - tlDiagDragRef.current.startY } });
+    };
+    const onUp = () => { tlDiagDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [tlDiagPanel]);
+
+  // Hotness Assist panel state
+  const [hotnessAssistOpen, setHotnessAssistOpen] = useState(false);
+  const [hotnessAssistPos, setHotnessAssistPos] = useState({ x: 160, y: 80 });
+  const hotnessAssistDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const startHotnessAssistDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    hotnessAssistDragRef.current = { startX: e.clientX, startY: e.clientY, origX: hotnessAssistPos.x, origY: hotnessAssistPos.y };
+    const onMove = (me: MouseEvent) => {
+      if (!hotnessAssistDragRef.current) return;
+      setHotnessAssistPos({ x: hotnessAssistDragRef.current.origX + me.clientX - hotnessAssistDragRef.current.startX, y: hotnessAssistDragRef.current.origY + me.clientY - hotnessAssistDragRef.current.startY });
+    };
+    const onUp = () => { hotnessAssistDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [hotnessAssistPos]);
 
   // Lazy-loading: track which tabs/sub-tabs have ever been activated.
   // Queries are gated on these sets so they fire once on first visit and
@@ -2432,7 +3816,16 @@ export const ServicesOverview = () => {
   const savedSubTabOrder = useUserAppState({ key: SUB_TAB_ORDER_STATE_KEY });
   const savedSubSubTabVisibility = useUserAppState({ key: SUB_SUB_TAB_STATE_KEY });
   const savedSubSubTabOrder = useUserAppState({ key: SUB_SUB_TAB_ORDER_STATE_KEY });
+  const savedSvcSankeyStyle = useUserAppState({ key: SVC_SANKEY_STYLE_STATE_KEY });
   const { execute: saveAppState } = useSetUserAppState();
+
+  React.useEffect(() => {
+    if (savedSvcSankeyStyle.data?.value) {
+      const v = savedSvcSankeyStyle.data.value as string;
+      const valid: SvcSankeyStyle[] = ["classic", "gradient", "directed", "alluvial", "stateMachine", "chord", "heatmap"];
+      if (valid.includes(v as SvcSankeyStyle)) setSvcSankeyStyle(v as SvcSankeyStyle);
+    }
+  }, [savedSvcSankeyStyle.data]);
 
   React.useEffect(() => {
     if (savedTabVisibility.data?.value) {
@@ -2902,6 +4295,184 @@ export const ServicesOverview = () => {
   const cloudRegionAzureFuncResult = useDql({ query: depsTabEver ? cloudRegionAzureFunctionQuery() : NOOP_QUERY }, refetchOpts);
   const cloudRegionContainerResult = useDql({ query: depsTabEver ? cloudRegionContainerQuery() : NOOP_QUERY }, refetchOpts);
   const cloudRegionContainerProcessResult = useDql({ query: depsTabEver ? cloudRegionContainerProcessQuery() : NOOP_QUERY }, refetchOpts);
+  const serviceFlowSankeyResult = useDql({ query: depsTabEver ? serviceFlowSankeyQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const serviceFlowSankeyTimelapseResult = useDql(
+    {
+      query: (tl.enabled && (depsTabEver || activeTabKey === "Dependencies & Impact"))
+        ? serviceFlowSankeyTimelapseQuery(tf, tl.bucket)
+        : NOOP_QUERY,
+      maxResultRecords: 200000,
+    },
+    refetchOpts
+  );
+
+  const tlProblemsResult = useDql({ query: tl.enabled ? tlProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
+  const tlProblems = React.useMemo(() => {
+    return (tlProblemsResult.data?.records ?? []).map((r: any) => {
+      const problemId = String(r.problem_id ?? "").trim();
+      const displayId = String(r.display_id ?? "").trim();
+      const title = String(r.title ?? displayId ?? problemId ?? "Problem").trim() || "Problem";
+      const startMs = Number(new Date(r.start).getTime());
+      const rawEnd = r.end;
+      const endMs = rawEnd == null ? null : Number(new Date(rawEnd).getTime());
+      if (!problemId || !Number.isFinite(startMs)) return null;
+      return { problemId, displayId, title, startMs, endMs: Number.isFinite(endMs as number) ? (endMs as number) : null };
+    }).filter((p): p is { problemId: string; displayId: string; title: string; startMs: number; endMs: number | null } => p !== null);
+  }, [tlProblemsResult.data]);
+
+  // Parse timelapse buckets at the top level so reportBuckets fires regardless of which sub-tab is active.
+  const svcSankeyTlBuckets = React.useMemo(() => {
+    const records = serviceFlowSankeyTimelapseResult.data?.records ?? [];
+    console.log("[svc-sankey-tl] records:", records.length,
+      "isLoading:", serviceFlowSankeyTimelapseResult.isLoading,
+      "isError:", (serviceFlowSankeyTimelapseResult as any).isError,
+      "first:", records[0] ? JSON.stringify(records[0]) : "none");
+    const m = new Map<string, any[]>();
+    records.forEach((r: any) => {
+      const b = String(r.bucket ?? "");
+      if (!b) return;
+      const arr = m.get(b) ?? [];
+      arr.push(r);
+      m.set(b, arr);
+    });
+    console.log("[svc-sankey-tl] unique buckets:", m.size, "keys:", Array.from(m.keys()).slice(0, 5));
+    return m;
+  }, [serviceFlowSankeyTimelapseResult.data, serviceFlowSankeyTimelapseResult.isLoading]);
+
+  const svcSankeyTlBucketList = React.useMemo(
+    () => Array.from(svcSankeyTlBuckets.keys()).sort(),
+    [svcSankeyTlBuckets]
+  );
+
+  React.useEffect(() => {
+    if (!tl.enabled) return;
+    const key = svcSankeyTlBucketList.length > 0 ? svcSankeyTlBucketList[Math.min(tl.index, svcSankeyTlBucketList.length - 1)] ?? "" : "";
+    tl.reportBuckets(svcSankeyTlBucketList.length, key);
+  }, [tl.enabled, svcSankeyTlBucketList, tl.index, tl]);
+
+  React.useEffect(() => {
+    if (!tl.enabled) return;
+    tl.reportLoading("svc-sankey", serviceFlowSankeyTimelapseResult.isLoading);
+    return () => tl.reportLoading("svc-sankey", false);
+  }, [tl.enabled, serviceFlowSankeyTimelapseResult.isLoading, tl]);
+
+  const svcSankeyTlSessionCounts = React.useMemo(() =>
+    svcSankeyTlBucketList.map(b => (svcSankeyTlBuckets.get(b) ?? []).reduce((a: number, r: any) => a + Number(r.sessions ?? 0), 0)),
+    [svcSankeyTlBucketList, svcSankeyTlBuckets]
+  );
+
+  React.useEffect(() => {
+    if (!tl.enabled || svcSankeyTlSessionCounts.length < 2) return;
+    const mean = svcSankeyTlSessionCounts.reduce((a, b) => a + b, 0) / svcSankeyTlSessionCounts.length;
+    const variance = svcSankeyTlSessionCounts.reduce((a, b) => a + (b - mean) ** 2, 0) / svcSankeyTlSessionCounts.length;
+    const std = Math.max(Math.sqrt(variance), 0.5);
+    tl.reportHotness(svcSankeyTlSessionCounts.map(v => Math.abs(v - mean) / std), "Service flow volume · trace Z-score");
+  }, [tl.enabled, svcSankeyTlSessionCounts, tl]);
+
+  React.useEffect(() => { if (!tl.enabled) setTlDiagPanel(null); }, [tl.enabled]);
+  React.useEffect(() => { if (!tl.enabled) setHotnessAssistOpen(false); }, [tl.enabled]);
+
+  // ---------------------------------------------------------------------------
+  // Hotness Assist — multi-signal timelapse infra metrics (always-on when TL enabled)
+  // Fires independently of the Sankey so hotness works on any tab.
+  // ---------------------------------------------------------------------------
+  const tlInfraMetricsResult = useDql(
+    { query: tl.enabled ? tlInfraMetricsQuery(tf, tl.bucket) : NOOP_QUERY, maxResultRecords: 10000 },
+    refetchOpts
+  );
+
+  React.useEffect(() => {
+    tl.reportLoading("infra-metrics", tl.enabled && tlInfraMetricsResult.isLoading);
+    return () => tl.reportLoading("infra-metrics", false);
+  }, [tl, tlInfraMetricsResult.isLoading]);
+
+  const tlInfraBuckets = React.useMemo<InfraBucketData[]>(() => {
+    const records = tlInfraMetricsResult.data?.records ?? [];
+    return records.map((r: any) => {
+      const bucket = String(r.bucket ?? "");
+      const bucketEpochMs = (() => {
+        try { return new Date(bucket.replace(" ", "T") + ":00Z").getTime(); } catch { return 0; }
+      })();
+      return {
+        bucket,
+        bucketEpochMs,
+        requests: Number(r.requests ?? 0),
+        errors: Number(r.errors ?? 0),
+        errorRate: Number(r.error_rate ?? 0),
+        avgLatencyMs: Number(r.avg_latency_ms ?? 0),
+        p90LatencyMs: Number(r.p90_latency_ms ?? 0),
+        problemCount: 0, // filled in below
+      };
+    }).filter(b => b.bucket).sort((a, b) => a.bucket.localeCompare(b.bucket));
+  }, [tlInfraMetricsResult.data]);
+
+  // Attach per-bucket problem count (problems opened in each bucket window)
+  const tlInfraProblemsOpened = React.useMemo(() =>
+    tlInfraBuckets.map(b => {
+      const toMs = b.bucketEpochMs + tl.bucketMs;
+      return tlProblems.filter(p => p.startMs >= b.bucketEpochMs && p.startMs < toMs).length;
+    }),
+    [tlInfraBuckets, tlProblems, tl.bucketMs]
+  );
+
+  // Enrich buckets with problem counts (for analysis fn)
+  const tlInfraBucketsEnriched = React.useMemo<InfraBucketData[]>(() =>
+    tlInfraBuckets.map((b, i) => ({ ...b, problemCount: tlInfraProblemsOpened[i] ?? 0 })),
+    [tlInfraBuckets, tlInfraProblemsOpened]
+  );
+
+  // Baselines: mean + std for each signal across all buckets
+  const tlInfraBaselines = React.useMemo<InfraBaselines | null>(() => {
+    if (tlInfraBucketsEnriched.length < 2) return null;
+    const mn = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const sd = (arr: number[], m: number) => Math.max(0.01, Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length));
+    const errRates = tlInfraBucketsEnriched.map(b => b.errorRate);
+    const p90s = tlInfraBucketsEnriched.map(b => b.p90LatencyMs);
+    const reqs = tlInfraBucketsEnriched.map(b => b.requests);
+    const probs = tlInfraProblemsOpened;
+    const meanErrRate = mn(errRates); const stdErrRate = sd(errRates, meanErrRate);
+    const meanP90 = mn(p90s); const stdP90 = sd(p90s, meanP90);
+    const meanReqs = mn(reqs); const stdReqs = sd(reqs, meanReqs);
+    const meanProbs = mn(probs); const stdProbs = sd(probs, meanProbs);
+    return { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs };
+  }, [tlInfraBucketsEnriched, tlInfraProblemsOpened]);
+
+  // Multi-signal hotness Z-score — overrides Sankey signal when infra data is ready
+  React.useEffect(() => {
+    if (!tl.enabled || tlInfraBucketsEnriched.length < 2 || !tlInfraBaselines) return;
+    const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs } = tlInfraBaselines;
+    const safeZ = (v: number, m: number, s: number) => s > 0 ? (v - m) / s : 0;
+    const hotnessArr = tlInfraBucketsEnriched.map((b, i) => {
+      const errZ = safeZ(b.errorRate, meanErrRate, stdErrRate);
+      const latZ = safeZ(b.p90LatencyMs, meanP90, stdP90);
+      const volZ = Math.abs(safeZ(b.requests, meanReqs, stdReqs));
+      const probZ = safeZ(tlInfraProblemsOpened[i] ?? 0, meanProbs, stdProbs);
+      return Math.max(0, errZ, latZ, volZ, probZ);
+    });
+    tl.reportHotness(hotnessArr, "Multi-signal: error rate · P90 latency · volume · problems");
+  }, [tl, tlInfraBucketsEnriched, tlInfraBaselines, tlInfraProblemsOpened]);
+
+  // Also report bucket count from infra metrics when sankey hasn't loaded yet
+  React.useEffect(() => {
+    if (!tl.enabled || tlInfraBucketsEnriched.length === 0) return;
+    if (svcSankeyTlBucketList.length > 0) return; // sankey takes priority for bucket count
+    const key = tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.bucket ?? "";
+    tl.reportBuckets(tlInfraBucketsEnriched.length, key);
+  }, [tl, tlInfraBucketsEnriched, svcSankeyTlBucketList.length]);
+
+  // Hotness Assist analysis — computed lazily when panel is open
+  const hotnessAssistData = React.useMemo<HotnessAssistInfraData | null>(() => {
+    if (!tl.enabled || !hotnessAssistOpen || tlInfraBucketsEnriched.length < 2 || !tlInfraBaselines || tl.hotness.length === 0) return null;
+    return analyzeInfraHotness(
+      tlInfraBucketsEnriched,
+      tl.hotness,
+      tlInfraBaselines,
+      tlProblems,
+      tl.bucket,
+      tl.bucketMs,
+    );
+  }, [tl.enabled, hotnessAssistOpen, tlInfraBucketsEnriched, tlInfraBaselines, tl.hotness, tlProblems, tl.bucket, tl.bucketMs]);
+
   const svcEntityTypesResult = useDql({ query: serviceEntityTypesQuery() }, refetchOpts);
   const closedProblemsResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const closedProblemsPrevResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
@@ -5033,6 +6604,18 @@ export const ServicesOverview = () => {
   // --- Column Definitions ---
   const problemsColumns = useMemo(
     () => [
+      {
+        id: "ID",
+        header: "Problem ID",
+        accessor: "event.id" as any,
+        cell: ({ value, rowData }: { value: string; rowData: any }) => {
+          const eventId = value || rowData["event.id"];
+          if (!eventId) return <span style={{ opacity: 0.4 }}>—</span>;
+          const shortId = String(eventId).split("_").pop()?.substring(0, 8) ?? String(eventId).substring(0, 8);
+          const url = `${envUrl}/ui/apps/dynatrace.davis.problems/problem/${eventId}?${tfParams(tfFrom, tfTo)}`;
+          return <a href={url} target="_blank" rel="noopener noreferrer" style={LINK_STYLE}>{shortId}</a>;
+        },
+      },
       {
         id: "Status",
         header: "Status",
@@ -7561,6 +9144,22 @@ export const ServicesOverview = () => {
               )}
             </Flex>
 
+            <label
+              style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", userSelect: "none" }}
+              title="Time-Lapse — watch service call flows evolve over time. Detect windows with abnormal traffic patterns."
+            >
+              <input
+                type="checkbox"
+                checked={tl.enabled}
+                onChange={(e) => tl.setEnabled(e.target.checked)}
+                style={{ cursor: "pointer" }}
+              />
+              <svg width="14" height="14" viewBox="0 0 16 16" style={{ opacity: tl.enabled ? 0.9 : 0.55 }}>
+                <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M8 4 L8 8 L10.5 9.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" fill="none" />
+              </svg>
+              <Strong style={{ fontSize: 12 }}>Time-Lapse</Strong>
+            </label>
             <AIInsightsButton active={aiOpen} onClick={() => setAiOpen(v => !v)} />
             <Button variant={explainMode ? "emphasized" : "default"} onClick={() => setExplainMode(v => !v)}>
               {explainMode ? "Explain: ON" : "Explain"}
@@ -7595,6 +9194,252 @@ export const ServicesOverview = () => {
           </div>
         </Flex>
       </div>
+
+      {/* Global Time-Lapse strip — only visible while TL is enabled */}
+      {tl.enabled && (
+        <div style={{ margin: "0 20px 12px 20px", padding: "8px 12px", background: "rgba(69,137,255,0.04)", border: "1px solid rgba(69,137,255,0.20)", borderRadius: 8 }}>
+          <Flex alignItems="center" gap={12} flexWrap="wrap">
+            <Flex alignItems="center" gap={6} style={{ opacity: 0.85 }}>
+              <svg width="14" height="14" viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M8 4 L8 8 L10.5 9.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" fill="none" />
+              </svg>
+              <Strong style={{ fontSize: 12 }}>Time-Lapse</Strong>
+            </Flex>
+            <Flex alignItems="center" gap={4}>
+              <span style={{ fontSize: 11, opacity: 0.65 }}>Bucket</span>
+              <select value={tl.bucket} onChange={(e) => tl.setBucket(e.target.value as TlBucket)} style={{ fontSize: 11, background: "#1a1e2e", color: "#e0e0e0", border: "1px solid rgba(128,128,128,0.3)", borderRadius: 4, padding: "3px 6px" }}>
+                {TL_BUCKETS.map(b => <option key={b.value} value={b.value} style={{ background: "#1a1e2e", color: "#e0e0e0" }}>{b.label}</option>)}
+              </select>
+            </Flex>
+            <Flex alignItems="center" gap={4}>
+              <span style={{ fontSize: 11, opacity: 0.65 }}>Speed</span>
+              <select value={tl.speedMs} onChange={(e) => tl.setSpeedMs(Number(e.target.value))} style={{ fontSize: 11, background: "#1a1e2e", color: "#e0e0e0", border: "1px solid rgba(128,128,128,0.3)", borderRadius: 4, padding: "3px 6px" }}>
+                {TL_SPEEDS.map(s => <option key={s.value} value={s.value} style={{ background: "#1a1e2e", color: "#e0e0e0" }}>{s.label}</option>)}
+              </select>
+            </Flex>
+            <button
+              onClick={() => {
+                if (tl.index >= tl.totalBuckets - 1) tl.setIndex(0);
+                tl.setPlaying(p => !p);
+              }}
+              disabled={tl.totalBuckets === 0}
+              style={{ fontSize: 11, background: tl.playing ? "rgba(255,61,154,0.15)" : "rgba(69,137,255,0.15)", color: "inherit", border: `1px solid ${tl.playing ? "rgba(255,61,154,0.45)" : "rgba(69,137,255,0.45)"}`, borderRadius: 4, padding: "3px 12px", cursor: tl.totalBuckets === 0 ? "not-allowed" : "pointer", fontWeight: 600, opacity: tl.totalBuckets === 0 ? 0.4 : 1 }}
+            >{tl.playing ? "⏸ Pause" : "▶ Play"}</button>
+            <button
+              onClick={() => { tl.setPlaying(false); tl.setIndex(0); }}
+              disabled={tl.totalBuckets === 0}
+              style={{ fontSize: 11, background: "rgba(128,128,128,0.08)", color: "inherit", border: "1px solid rgba(128,128,128,0.3)", borderRadius: 4, padding: "3px 10px", cursor: tl.totalBuckets === 0 ? "not-allowed" : "pointer", opacity: tl.totalBuckets === 0 ? 0.4 : 1 }}
+            >↺ Restart</button>
+            <div style={{ flex: 1, minWidth: 180, display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, tl.totalBuckets - 1)}
+                value={Math.min(tl.index, Math.max(0, tl.totalBuckets - 1))}
+                onChange={(e) => { tl.setPlaying(false); tl.setIndex(Number(e.target.value)); }}
+                disabled={tl.totalBuckets === 0}
+                style={{ flex: 1, accentColor: "#4589FF" }}
+              />
+              <span style={{ fontSize: 11, opacity: 0.7, fontFamily: "monospace", minWidth: 90, textAlign: "right" }}>
+                {tl.isLoading && tl.totalBuckets === 0
+                  ? <><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", border: "2px solid rgba(69,137,255,0.3)", borderTopColor: "#4589FF", verticalAlign: "middle", marginRight: 6, animation: "spin 1s linear infinite" }} /> Loading…</>
+                  : tl.totalBuckets === 0 ? "no data" : `${tl.index + 1} / ${tl.totalBuckets}`}
+              </span>
+            </div>
+            {tl.isLoading && tl.totalBuckets > 0 && (
+              <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", border: "2px solid rgba(69,137,255,0.3)", borderTopColor: "#4589FF", animation: "spin 1s linear infinite" }} title="Fetching bucketed data" />
+            )}
+            {tl.currentBucketKey && (
+              <span style={{ fontSize: 11, opacity: 0.55, fontFamily: "monospace" }}>{tl.currentBucketKey}</span>
+            )}
+          </Flex>
+          {tl.hotness.length > 0 && (() => {
+            const stripH = 26;
+            const maxHot = Math.max(0.5, ...tl.hotness);
+            const bars = tl.hotness;
+            const barCount = bars.length;
+            const cursorIdx = Math.min(tl.index, Math.max(0, barCount - 1));
+            return (
+              <div style={{ marginTop: 8, padding: "6px 4px 4px", borderTop: "1px solid rgba(69,137,255,0.15)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 10, opacity: 0.6, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" as const }}>
+                    Hotness · {tl.hotnessSource || "signal"}
+                  </span>
+                  {tlInfraBucketsEnriched.length >= 2 && (
+                    <HotnessAssistButton
+                      active={hotnessAssistOpen}
+                      onClick={() => setHotnessAssistOpen(v => !v)}
+                    />
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: stripH, cursor: "pointer" }}>
+                  {bars.map((v, i) => {
+                    const norm = Math.min(1, v / maxHot);
+                    const color = v >= 2.5 ? "#FF3D9A" : v >= 1.5 ? "#FF832B" : v >= 0.75 ? "#FFB800" : "#4589FF";
+                    const opacity = i === cursorIdx ? 1 : 0.65;
+                    const h = Math.max(2, norm * stripH);
+                    return (
+                      <div
+                        key={i}
+                        onClick={() => { tl.setPlaying(false); tl.setIndex(i); setTlDiagPanel(prev => ({ pos: prev?.pos ?? { x: 48, y: 260 } })); }}
+                        title={`bucket ${i + 1} · z=${v.toFixed(2)} · click to diagnose`}
+                        style={{ flex: 1, height: h, background: color, opacity, borderRadius: 1, transition: "opacity 0.15s", outline: i === cursorIdx ? "1px solid rgba(255,255,255,0.85)" : "none" }}
+                      />
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.4, marginTop: 2, textAlign: "right" }}>Click a bar to seek &amp; diagnose · drag panel to move</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ---- Timelapse diagnosis popup ---- */}
+      {tlDiagPanel && tl.enabled && svcSankeyTlBucketList.length > 0 && createPortal((() => {
+        const idx = Math.min(Math.max(tl.index, 0), svcSankeyTlBucketList.length - 1);
+        const bKey = svcSankeyTlBucketList[idx] ?? "";
+        const records: any[] = svcSankeyTlBuckets.get(bKey) ?? [];
+        const hotZ = tl.hotness[idx] ?? 0;
+        const TL_HOT_HIGH = "#FF3D9A"; const TL_HOT_WARM = "#FF832B"; const TL_HOT_ELEV = "#FFB800";
+        const hotColor = hotZ >= 2.5 ? TL_HOT_HIGH : hotZ >= 1.5 ? TL_HOT_WARM : hotZ >= 0.75 ? TL_HOT_ELEV : "#4589FF";
+
+        // Aggregate metrics for this bucket
+        const totalSessions = records.reduce((a: number, r: any) => a + Number(r.sessions ?? 0), 0);
+        const uniquePaths = records.length;
+        const uniqueServices = new Set<string>();
+        records.forEach((r: any) => { [r.s0, r.s1, r.s2, r.s3, r.s4].forEach((s: string) => { if (s && s !== "(exit)") uniqueServices.add(s); }); });
+
+        // Service frequency count across all paths (weighted by sessions)
+        const svcFreq = new Map<string, number>();
+        records.forEach((r: any) => {
+          const sess = Number(r.sessions ?? 0);
+          [r.s0, r.s1, r.s2, r.s3, r.s4].forEach((s: string) => { if (s && s !== "(exit)") svcFreq.set(s, (svcFreq.get(s) ?? 0) + sess); });
+        });
+        const hottestSvc = Array.from(svcFreq.entries()).sort((a, b) => b[1] - a[1])[0];
+
+        // Z-scores vs across-bucket mean/std
+        const mean = svcSankeyTlSessionCounts.length > 0
+          ? svcSankeyTlSessionCounts.reduce((a, b) => a + b, 0) / svcSankeyTlSessionCounts.length : 0;
+        const std = Math.max(0.5, Math.sqrt(svcSankeyTlSessionCounts.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, svcSankeyTlSessionCounts.length)));
+        const volZ = (totalSessions - mean) / std;
+
+        const driver = hotZ < 0.75 ? "Within normal range"
+          : volZ >= 2.5 ? "Traffic surge"
+          : volZ >= 1.5 ? "Traffic elevated"
+          : volZ <= -1.5 ? "Traffic drop"
+          : "Flow activity";
+        const driverColor = hotZ < 0.75 ? "#00A36C" : hotZ >= 2.5 ? TL_HOT_HIGH : hotZ >= 1.5 ? TL_HOT_WARM : TL_HOT_ELEV;
+
+        const fmtN = (n: number) => n >= 1000000 ? `${(n/1000000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n);
+        const zColor = (z: number, lowerIsBad = false) => {
+          const absZ = Math.abs(z); const isBad = lowerIsBad ? z < 0 : z > 0;
+          if (!isBad) return "#00A36C";
+          return absZ >= 2.5 ? TL_HOT_HIGH : absZ >= 1.5 ? TL_HOT_WARM : absZ >= 0.75 ? TL_HOT_ELEV : "#00A36C";
+        };
+
+        // Top 3 paths
+        const top3 = [...records].sort((a, b) => Number(b.sessions ?? 0) - Number(a.sessions ?? 0)).slice(0, 3);
+
+        return (
+          <div style={{ position: "fixed", left: tlDiagPanel.pos.x, top: tlDiagPanel.pos.y, width: 300, background: "var(--dt-colors-background-base-default,#0f1428)", border: "1px solid rgba(128,128,128,0.3)", borderRadius: 8, boxShadow: "0 8px 32px rgba(0,0,0,0.55)", zIndex: 600, userSelect: "none", fontSize: 12 }}>
+            <div onMouseDown={startTlDiagDrag} style={{ padding: "7px 10px", borderBottom: "1px solid rgba(128,128,128,0.2)", cursor: "grab", display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(128,128,128,0.07)", borderRadius: "8px 8px 0 0" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, opacity: 0.85 }}>Bucket {idx + 1} · Why is this hot?</span>
+              <button onClick={() => setTlDiagPanel(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", opacity: 0.5, fontSize: 15, padding: "0 2px", lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ padding: "7px 10px", borderBottom: "1px solid rgba(128,128,128,0.12)" }}>
+              <div style={{ fontSize: 10, opacity: 0.45, marginBottom: 3, fontFamily: "monospace" }}>{bKey}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: hotColor }}>Hotness Z = {hotZ.toFixed(2)}</span>
+                {driver && <span style={{ fontSize: 10, fontWeight: 600, color: driverColor, background: `${driverColor}18`, border: `1px solid ${driverColor}40`, borderRadius: 4, padding: "1px 6px" }}>{driver}</span>}
+              </div>
+            </div>
+            <div style={{ padding: "6px 0 4px" }}>
+              {[
+                { label: "Trace Volume", value: fmtN(totalSessions), z: volZ, desc: "total traces in bucket vs avg" },
+                { label: "Active Flows", value: String(uniquePaths), z: 0, desc: "unique service paths in bucket" },
+                { label: "Services Seen", value: String(uniqueServices.size), z: 0, desc: "distinct services in bucket" },
+              ].map(m => {
+                const col = zColor(m.z);
+                const barW = Math.min(100, Math.abs(m.z) / 3 * 100);
+                return (
+                  <div key={m.label} style={{ padding: "3px 10px 5px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>{m.label}</span>
+                      <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                        <span style={{ fontSize: 11, fontFamily: "monospace", opacity: 0.6 }}>{m.value}</span>
+                        {m.z !== 0 && <span style={{ fontSize: 11, fontWeight: 700, color: col, fontFamily: "monospace", minWidth: 54, textAlign: "right" }}>{m.z >= 0 ? "+" : ""}{m.z.toFixed(2)}z</span>}
+                      </div>
+                    </div>
+                    {m.z !== 0 && <div style={{ height: 3, background: "rgba(128,128,128,0.12)", borderRadius: 2 }}><div style={{ height: "100%", width: `${barW}%`, background: col, borderRadius: 2, transition: "width 0.2s" }} /></div>}
+                    <div style={{ fontSize: 9, opacity: 0.35, marginTop: 1 }}>{m.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+            {hottestSvc && (
+              <div style={{ padding: "6px 10px 8px", borderTop: "1px solid rgba(128,128,128,0.12)" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.7, marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: 0.4 }}>Hottest service</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: hotColor, wordBreak: "break-all" as const }}>{hottestSvc[0]}</div>
+                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{fmtN(hottestSvc[1])} traces</div>
+              </div>
+            )}
+            {top3.length > 0 && (
+              <div style={{ padding: "6px 10px 8px", borderTop: "1px solid rgba(128,128,128,0.12)" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.7, marginBottom: 5, textTransform: "uppercase" as const, letterSpacing: 0.4 }}>Top paths</div>
+                {top3.map((r: any, i: number) => {
+                  const path = [r.s0, r.s1, r.s2, r.s3, r.s4].filter((s: string) => s && s !== "(exit)").join(" → ");
+                  return (
+                    <div key={i} style={{ fontSize: 10, marginBottom: 4 }}>
+                      <span style={{ opacity: 0.75 }}>{path}</span>
+                      <span style={{ opacity: 0.45, marginLeft: 6 }}>({fmtN(Number(r.sessions ?? 0))})</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {(() => {
+              const fromMs = Date.parse(bKey.replace(" ", "T") + ":00Z");
+              const toMs = fromMs + tl.bucketMs;
+              const opened = Number.isFinite(fromMs)
+                ? tlProblems.filter(p => p.startMs >= fromMs && p.startMs < toMs)
+                : [];
+              if (opened.length === 0) return null;
+              return (
+                <div style={{ padding: "6px 10px 8px", borderTop: "1px solid rgba(128,128,128,0.12)" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.7, marginBottom: 6, textTransform: "uppercase" as const, letterSpacing: 0.4 }}>Problems opened in this bucket</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 180, overflowY: "auto" as const, paddingRight: 4 }}>
+                    {opened.map(p => {
+                      const label = p.displayId ? `${p.displayId} · ${p.title}` : p.title;
+                      const url = `${envUrl}/ui/apps/dynatrace.davis.problems/problem/${encodeURIComponent(p.problemId)}`;
+                      return (
+                        <a key={p.problemId} href={url} target="_blank" rel="noopener noreferrer"
+                          style={{ fontSize: 10, color: "#7FB1FF", textDecoration: "none", whiteSpace: "nowrap" as const }}
+                          title={label}>{label}</a>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+            <div style={{ padding: "5px 10px", borderTop: "1px solid rgba(128,128,128,0.12)", fontSize: 9, opacity: 0.35 }}>Drag header · panel tracks current bucket</div>
+          </div>
+        );
+      })(), document.body)}
+
+      {/* ---- Hotness Assist Panel ---- */}
+      {hotnessAssistOpen && hotnessAssistData && (
+        <HotnessAssistPanel
+          data={hotnessAssistData}
+          pos={hotnessAssistPos}
+          onClose={() => setHotnessAssistOpen(false)}
+          onDragStart={startHotnessAssistDrag}
+          hotness={tl.hotness}
+          currentIdx={tl.index}
+          bucketLabel={tl.bucket}
+        />
+      )}
 
       {/* ---- Settings Modal ---- */}
       <Modal
@@ -12014,6 +13859,19 @@ export const ServicesOverview = () => {
                   </div>
                 </>
               )}
+            </Flex>
+                </Tab>
+                <Tab title="Service Flow">
+            <Flex flexDirection="column" gap={16} paddingTop={16}>
+              <ServiceSankeyTab
+                data={serviceFlowSankeyResult}
+                isLoading={serviceFlowSankeyResult.isLoading}
+                chartStyle={svcSankeyStyle}
+                onStyleChange={(v) => { setSvcSankeyStyle(v); saveAppState({ key: SVC_SANKEY_STYLE_STATE_KEY, body: { value: v } }); }}
+                timelapseData={serviceFlowSankeyTimelapseResult}
+                tlBucketList={svcSankeyTlBucketList}
+                tlBuckets={svcSankeyTlBuckets}
+              />
             </Flex>
                 </Tab>
                 <Tab title="Blast Radius">

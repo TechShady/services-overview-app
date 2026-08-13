@@ -574,6 +574,84 @@
   animation: svc-ai-typewriter 0.3s ease forwards;
 }
 
+/* =========================================================================
+   HOTNESS ASSIST — flame button + floating draggable panel
+   ========================================================================= */
+.svc-ha-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 131, 43, 0.35);
+  background: rgba(255, 131, 43, 0.08);
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.svc-ha-btn:hover {
+  background: rgba(255, 131, 43, 0.18);
+  border-color: rgba(255, 131, 43, 0.55);
+}
+.svc-ha-btn.active {
+  background: rgba(255, 131, 43, 0.15);
+  border-color: rgba(255, 131, 43, 0.6);
+  box-shadow: 0 0 8px rgba(255, 131, 43, 0.2);
+}
+.svc-ha-btn svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.svc-ha-panel {
+  position: fixed;
+  width: 560px;
+  max-height: calc(100vh - 100px);
+  background: var(--dt-colors-background-base-default, #0f1428);
+  border: 1px solid rgba(255, 131, 43, 0.28);
+  border-radius: 12px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 131, 43, 0.08);
+  z-index: 601;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: svc-ha-slide-in 0.22s ease-out;
+}
+@keyframes svc-ha-slide-in {
+  from { opacity: 0; transform: translateY(-10px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.svc-ha-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 131, 43, 0.15);
+  background: rgba(255, 131, 43, 0.05);
+  cursor: grab;
+  flex-shrink: 0;
+  user-select: none;
+}
+.svc-ha-panel-header:active {
+  cursor: grabbing;
+}
+.svc-ha-panel-header svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.svc-ha-panel-body {
+  overflow-y: auto;
+  padding: 16px;
+  flex: 1;
+}
+
 /* Executive Summary bar */
 .svc-exec-summary {
   border: 1px solid rgba(69, 137, 255, 0.2);

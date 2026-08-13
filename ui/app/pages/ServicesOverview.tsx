@@ -4559,23 +4559,38 @@ export const ServicesOverview = () => {
   }, [tl, tlInfraMetricsResult.isLoading]);
 
   const tlInfraBuckets = React.useMemo<InfraBucketData[]>(() => {
+    // timeseries returns one row with array-valued metric fields
     const records = tlInfraMetricsResult.data?.records ?? [];
-    return records.map((r: any) => {
-      const bucket = String(r.bucket ?? "");
-      const bucketEpochMs = (() => {
-        try { return new Date(bucket.replace(" ", "T") + ":00Z").getTime(); } catch { return 0; }
-      })();
+    if (records.length === 0) return [];
+    const row = records[0] as any;
+    const tf = row.timeframe as { start: string; end: string } | undefined;
+    if (!tf?.start) return [];
+    const reqArr = (row.requests ?? []) as (number | null)[];
+    const errArr = (row.errors ?? []) as (number | null)[];
+    const p90Arr = (row.p90_us ?? []) as (number | null)[];
+    const avgArr = (row.avg_us ?? []) as (number | null)[];
+    const n = reqArr.length;
+    if (n === 0) return [];
+    const startMs = new Date(tf.start).getTime();
+    const endMs = new Date(tf.end).getTime();
+    const intervalMs = (endMs - startMs) / n;
+    return Array.from({ length: n }, (_, i) => {
+      const bucketEpochMs = startMs + i * intervalMs;
+      const d = new Date(bucketEpochMs);
+      const bucket = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+      const requests = reqArr[i] ?? 0;
+      const errors = errArr[i] ?? 0;
       return {
         bucket,
         bucketEpochMs,
-        requests: Number(r.requests ?? 0),
-        errors: Number(r.errors ?? 0),
-        errorRate: Number(r.error_rate ?? 0),
-        avgLatencyMs: Number(r.avg_latency_ms ?? 0),
-        p90LatencyMs: Number(r.p90_latency_ms ?? 0),
+        requests,
+        errors,
+        errorRate: requests > 0 ? errors / requests * 100 : 0,
+        avgLatencyMs: (avgArr[i] ?? 0) / 1000,
+        p90LatencyMs: (p90Arr[i] ?? 0) / 1000,
         problemCount: 0, // filled in below
       };
-    }).filter(b => b.bucket).sort((a, b) => a.bucket.localeCompare(b.bucket));
+    });
   }, [tlInfraMetricsResult.data]);
 
   // Attach per-bucket problem count (problems opened in each bucket window)

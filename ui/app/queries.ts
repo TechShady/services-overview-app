@@ -1492,24 +1492,14 @@ export function serviceFlowSankeyTimelapseQuery(tf: TF, bucket: string): string 
 
 // ---------------------------------------------------------------------------
 // Infrastructure Timelapse Metrics — multi-signal hotness for Hotness Assist
-// Per-bucket: error rate, P90 latency, request volume (spans-based)
+// Uses timeseries metrics (pre-aggregated) for fast response vs span scanning.
+// Returns one row with array-valued fields; parsed per-bucket client-side.
 // ---------------------------------------------------------------------------
 export function tlInfraMetricsQuery(tf: TF, bucket: string): string {
-  return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
-| filter isNotNull(dt.entity.service)
-| fieldsAdd
-    span_ts = coalesce(start_time, timestamp),
-    is_error = toLong(if(error == true, 1, else: 0)),
-    dur_ms = duration / 1000000
-| fieldsAdd bucket_ts = bin(span_ts, ${bucket})
-| fieldsAdd bucket = formatTimestamp(bucket_ts, format: "yyyy-MM-dd HH:mm")
-| summarize
-    requests = count(),
-    errors = sum(is_error),
-    avg_latency_ms = avg(dur_ms),
-    p90_latency_ms = percentile(dur_ms, 90)
-  by: {bucket}
-| fieldsAdd error_rate = if(requests > 0, errors / requests * 100.0, else: 0.0)
-| fields bucket, requests, errors, error_rate, avg_latency_ms, p90_latency_ms
-| sort bucket asc`;
+  return `timeseries {
+  requests = sum(dt.service.request.count, default:0),
+  errors = sum(dt.service.request.failure_count, default:0),
+  p90_us = percentile(dt.service.request.response_time, 90),
+  avg_us = avg(dt.service.request.response_time)
+}, ${tfClause(tf)}, interval:${bucket}`;
 }

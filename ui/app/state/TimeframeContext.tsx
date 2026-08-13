@@ -24,9 +24,9 @@ export interface AppTimeframe {
   raw: Timeframe | null;
 }
 
-const DEFAULT_FROM = "now()-7d";
+const DEFAULT_FROM = "now()-24h";
 const DEFAULT_TO = "now()";
-const DEFAULT_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_DURATION_MS = 24 * 60 * 60 * 1000;
 
 const computeDefault = (): AppTimeframe => {
   const nowMs = Date.now();

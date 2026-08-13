@@ -652,6 +652,26 @@
   flex: 1;
 }
 
+.svc-ha-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid rgba(69, 137, 255, 0.35);
+  border-radius: 5px;
+  background: rgba(69, 137, 255, 0.08);
+  color: #4589FF;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.svc-ha-export-btn:hover {
+  background: rgba(69, 137, 255, 0.16);
+  border-color: rgba(69, 137, 255, 0.55);
+}
+
 /* Executive Summary bar */
 .svc-exec-summary {
   border: 1px solid rgba(69, 137, 255, 0.2);

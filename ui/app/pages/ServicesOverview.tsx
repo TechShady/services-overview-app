@@ -1402,6 +1402,175 @@ function HotnessAssistPanel({
     { label: "Hotness Z", best: b === w ? "—" : data.bestZ.toFixed(2), worst: worstZ.toFixed(2), gap: `+${(worstZ - data.bestZ).toFixed(2)}`, bad: worstZ > 1.5 },
   ];
 
+  // ---------------------------------------------------------------------------
+  // PDF Export — generates a self-contained HTML report, opens in new tab
+  // ---------------------------------------------------------------------------
+  const generateHotnessReportHtml = () => {
+    const maxZ = Math.max(0.5, ...hotness);
+    const svgW = 860; const svgH = 80; const barCount = hotness.length;
+    const barW = barCount > 0 ? (svgW - 20) / barCount : 1;
+    const barsHtml = hotness.map((v, i) => {
+      const norm = Math.min(1, v / maxZ);
+      const hh = Math.max(3, norm * (svgH - 16));
+      const col = v >= 2.5 ? "#FF3D9A" : v >= 1.5 ? "#FF832B" : v >= 0.75 ? "#FFB800" : "#4589FF";
+      const x = 10 + i * barW;
+      const y = svgH - 8 - hh;
+      const isWorst = i === data.worstIdx; const isBest = i === data.bestIdx;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(barW - 1).toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}" rx="1" opacity="${i === currentIdx ? "1" : "0.75"}"/>`
+        + (isWorst ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#FF3D9A" font-size="9" font-weight="700">▼</text>` : "")
+        + (isBest ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#00A36C" font-size="9" font-weight="700">▲</text>` : "");
+    }).join("");
+    const threshLines = [{ z: 0.75, col: "#FFB800" }, { z: 1.5, col: "#FF832B" }, { z: 2.5, col: "#FF3D9A" }].map(({ z, col }) => {
+      const y = (svgH - 8 - Math.min(1, z / maxZ) * (svgH - 16)).toFixed(1);
+      return `<line x1="10" y1="${y}" x2="${svgW - 10}" y2="${y}" stroke="${col}" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>`;
+    }).join("");
+    const timelineSvg = `<svg width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg"><rect width="${svgW}" height="${svgH}" fill="#0a0e1f" rx="4"/>${threshLines}${barsHtml}</svg>`;
+
+    const metricTableRow = (label: string, best: string, worst: string, gap: string, bad: boolean) =>
+      `<tr><td>${label}</td><td style="color:#00A36C;font-family:monospace">${best}</td><td style="color:${bad ? "#FF832B" : "#e0e0e0"};font-family:monospace">${worst}</td><td style="color:${bad ? "#FF832B" : "#e0e0e0"};font-family:monospace;font-weight:700">${gap}</td></tr>`;
+
+    const insightsHtml = data.insights.map(ins => {
+      const bg = ins.severity === "critical" ? "rgba(194,25,48,0.1)" : ins.severity === "warning" ? "rgba(255,131,43,0.08)" : ins.severity === "good" ? "rgba(13,156,41,0.08)" : "rgba(69,137,255,0.08)";
+      const border = ins.severity === "critical" ? "#C21930" : ins.severity === "warning" ? "#FF832B" : ins.severity === "good" ? "#0D9C29" : "#4589FF";
+      return `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-radius:6px;background:${bg};border-left:3px solid ${border};margin-bottom:6px"><span style="font-size:15px;flex-shrink:0">${ins.icon}</span><span style="font-size:13px;line-height:1.5">${ins.text}</span></div>`;
+    }).join("");
+
+    const recsHtml = data.recommendations.map(rec => {
+      const bCol = rec.impact === "high" ? "#C21930" : rec.impact === "medium" ? "#FF832B" : "#6b7280";
+      const bBg = rec.impact === "high" ? "rgba(194,25,48,0.12)" : rec.impact === "medium" ? "rgba(255,131,43,0.12)" : "rgba(128,128,128,0.12)";
+      return `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,0.05);border:1px solid rgba(128,128,128,0.12);margin-bottom:5px"><span style="font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;text-transform:uppercase;white-space:nowrap;flex-shrink:0;background:${bBg};color:${bCol}">${rec.impact}</span><span style="font-size:13px;line-height:1.5">${rec.text}</span></div>`;
+    }).join("");
+
+    const problemsHtml = data.activeProblemsAtWorst.length > 0
+      ? data.activeProblemsAtWorst.slice(0, 8).map(p => `<div style="display:flex;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(255,61,154,0.07);border:1px solid rgba(255,61,154,0.15);margin-bottom:4px"><span>🚨</span><span style="color:#FF3D9A;font-family:monospace;font-weight:700;flex-shrink:0">${p.displayId}</span><span style="font-size:12px;opacity:0.8">${p.title}</span></div>`).join("")
+      : `<div style="opacity:0.5;font-size:13px">No Davis problems were active during the hottest bucket.</div>`;
+
+    const zRows = [
+      { label: "Error Rate", z: data.worstZScores.errZ },
+      { label: "P90 Latency", z: data.worstZScores.latZ },
+      { label: "Request Volume", z: data.worstZScores.volZ },
+      { label: "Problem Activity", z: data.worstZScores.probZ },
+    ].map(({ label, z }) => {
+      const col = Math.abs(z) >= 2.5 ? "#FF3D9A" : Math.abs(z) >= 1.5 ? "#FF832B" : Math.abs(z) >= 0.75 ? "#FFB800" : "#00A36C";
+      const barPct = Math.min(100, Math.abs(z) / 3 * 100).toFixed(1);
+      return `<tr><td>${label}</td><td style="color:${col};font-family:monospace;font-weight:700">${z >= 0 ? "+" : ""}${z.toFixed(2)}z</td><td style="width:200px"><div style="height:6px;background:rgba(128,128,128,0.15);border-radius:3px"><div style="height:100%;width:${barPct}%;background:${col};border-radius:3px"></div></div></td></tr>`;
+    }).join("");
+
+    const generatedAt = new Date().toLocaleString();
+
+    return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hotness Assist Report — Services Overview</title>
+<style>
+  @media print { body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } @page { margin: 0.6in; size: A4; } .no-print { display: none !important; } }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #e0e0e0; background: #0f1428; margin: 0 auto; padding: 32px; max-width: 900px; line-height: 1.5; }
+  h2 { color: #FF832B; margin: 28px 0 10px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; opacity: 0.8; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 6px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.5; border-bottom: 1px solid rgba(128,128,128,0.2); }
+  td { padding: 6px 10px; border-bottom: 1px solid rgba(128,128,128,0.08); font-size: 13px; }
+  .toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: rgba(255,131,43,0.08); border: 1px solid rgba(255,131,43,0.25); border-radius: 8px; margin-bottom: 28px; }
+  .print-btn { padding: 8px 20px; background: #FF832B; border: none; border-radius: 6px; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
+  .kpi-tile { padding: 14px; border-radius: 8px; background: rgba(128,128,128,0.07); border: 1px solid rgba(128,128,128,0.15); text-align: center; }
+  .kpi-val { font-size: 22px; font-weight: 700; font-family: monospace; }
+  .kpi-lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.6; margin-top: 4px; }
+  .kpi-sub { font-size: 10px; opacity: 0.4; margin-top: 2px; }
+  .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .card { padding: 14px 16px; border-radius: 8px; }
+  .card-worst { background: rgba(255,61,154,0.07); border: 1px solid rgba(255,61,154,0.2); }
+  .card-best { background: rgba(13,156,41,0.06); border: 1px solid rgba(13,156,41,0.2); }
+  .card-title { font-size: 12px; font-weight: 700; margin-bottom: 10px; }
+  .card-ts { font-size: 10px; opacity: 0.4; font-family: monospace; margin-bottom: 10px; }
+  .z-badge { display: inline-block; margin-top: 10px; padding: 4px 10px; border-radius: 5px; font-size: 11px; font-weight: 700; text-align: center; width: calc(100% - 20px); }
+  .driver-badge { display: inline-block; margin-bottom: 6px; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+  .footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid rgba(128,128,128,0.15); font-size: 11px; opacity: 0.35; }
+</style></head>
+<body>
+<div class="toolbar no-print">
+  <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
+  <span style="font-size:12px;opacity:0.6">Use your browser's print dialog → Save as PDF for best results.</span>
+</div>
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid rgba(255,131,43,0.2)">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C12 2 7 8 7 13a5 5 0 0010 0c0-2.5-1.5-4.5-3-6 0 2-1 3.5-2 4.5C11 10 12 7.5 12 2z" fill="#FF832B"/></svg>
+  <div>
+    <div style="font-size:20px;font-weight:700">Hotness Assist Report</div>
+    <div style="font-size:12px;opacity:0.5">Services Overview · Generated ${generatedAt}</div>
+  </div>
+</div>
+
+<h2>Analysis Summary</h2>
+<div style="padding:14px 16px;border-radius:8px;background:rgba(255,131,43,0.05);border:1px solid rgba(255,131,43,0.15);font-size:14px;line-height:1.7;margin-bottom:20px">${data.summary}</div>
+
+<h2>Key Metrics</h2>
+<div class="kpi-grid" style="margin-bottom:20px">
+  <div class="kpi-tile"><div class="kpi-val" style="color:${data.hotBuckets > 0 ? "#FFB800" : "#00A36C"}">${data.hotBuckets}</div><div class="kpi-lbl">Hot Buckets</div><div class="kpi-sub">of ${data.totalBuckets} total</div></div>
+  <div class="kpi-tile"><div class="kpi-val" style="color:${data.criticalBuckets > 0 ? "#FF3D9A" : "#00A36C"}">${data.criticalBuckets}</div><div class="kpi-lbl">Critical Spikes</div><div class="kpi-sub">Z ≥ 2.5</div></div>
+  <div class="kpi-tile"><div class="kpi-val" style="color:${w.errorRate > data.baselines.meanErrRate * 1.5 + 1 ? "#FF832B" : "#e0e0e0"}">${w.errorRate.toFixed(1)}%</div><div class="kpi-lbl">Peak Error Rate</div><div class="kpi-sub">avg ${data.baselines.meanErrRate.toFixed(1)}%</div></div>
+  <div class="kpi-tile"><div class="kpi-val" style="color:${w.p90LatencyMs > data.baselines.meanP90 * 1.5 + 50 ? "#FF832B" : "#e0e0e0"}">${w.p90LatencyMs.toFixed(0)}ms</div><div class="kpi-lbl">Peak P90</div><div class="kpi-sub">avg ${data.baselines.meanP90.toFixed(0)}ms</div></div>
+</div>
+
+<h2>Hotness Timeline (${bucketLabel} buckets)</h2>
+<div style="margin-bottom:20px;background:rgba(128,128,128,0.05);padding:8px;border-radius:6px">${timelineSvg}
+<div style="display:flex;gap:12px;margin-top:4px;font-size:10px;opacity:0.5"><span>▼ worst · ▲ best</span><span style="margin-left:auto"><span style="color:#4589FF">■</span> normal <span style="color:#FFB800">■</span> elevated <span style="color:#FF832B">■</span> hot <span style="color:#FF3D9A">■</span> critical</span></div></div>
+
+<h2>Worst vs Best Bucket</h2>
+<div class="card-grid" style="margin-bottom:20px">
+  <div class="card card-worst">
+    <div class="card-title" style="color:${data.worstDriverColor}">🔥 Bucket ${data.worstIdx + 1} — <span class="driver-badge" style="background:${data.worstDriverColor}22;color:${data.worstDriverColor}">${data.worstDriver}</span></div>
+    <div class="card-ts">${w.bucket}</div>
+    <table><tbody>
+      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${w.errorRate.toFixed(1)}%</td></tr>
+      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${w.p90LatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${w.avgLatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(w.requests)}</td></tr>
+      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${w.problemCount}</td></tr>
+    </tbody></table>
+    <div class="z-badge" style="background:${data.worstDriverColor}18;color:${data.worstDriverColor}">Hotness Z = ${data.worstZ.toFixed(2)}</div>
+  </div>
+  <div class="card card-best">
+    <div class="card-title" style="color:#00A36C">✅ Bucket ${data.bestIdx + 1} — Best Window</div>
+    <div class="card-ts">${b.bucket}</div>
+    <table><tbody>
+      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.errorRate.toFixed(1)}%</td></tr>
+      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.p90LatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.avgLatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(b.requests)}</td></tr>
+      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${b.problemCount}</td></tr>
+    </tbody></table>
+    <div class="z-badge" style="background:rgba(0,163,108,0.1);color:#00A36C">Hotness Z = ${data.bestZ.toFixed(2)}</div>
+  </div>
+</div>
+
+<h2>Signal Z-Scores at Peak (Bucket ${data.worstIdx + 1})</h2>
+<table style="margin-bottom:20px"><thead><tr><th>Signal</th><th>Z-Score</th><th>Intensity</th></tr></thead><tbody>${zRows}</tbody></table>
+
+<h2>Best vs Worst Delta</h2>
+<table style="margin-bottom:20px">
+  <thead><tr><th>Metric</th><th>Best</th><th>Worst</th><th>Gap</th></tr></thead>
+  <tbody>
+    ${deltaRows.map(r => metricTableRow(r.label, r.best, r.worst, r.gap, r.bad)).join("")}
+  </tbody>
+</table>
+
+<h2>Active Problems at Peak</h2>
+<div style="margin-bottom:20px">${problemsHtml}</div>
+
+<h2>Infrastructure Insights</h2>
+<div style="margin-bottom:20px">${insightsHtml}</div>
+
+<h2>Recommended Actions</h2>
+<div style="margin-bottom:20px">${recsHtml}</div>
+
+<div class="footer">Hotness Assist · Services Overview · Rule-based analysis from span-derived error rate, P90 latency, request volume, and Davis problem signals. Generated ${generatedAt}.</div>
+</body></html>`;
+  };
+
+  const handleExportPdf = () => {
+    const html = generateHotnessReportHtml();
+    const win = window.open("", "_blank");
+    if (win) { win.document.write(html); win.document.close(); }
+  };
+
   return createPortal(
     <div
       className="svc-ha-panel"
@@ -1421,6 +1590,9 @@ function HotnessAssistPanel({
             {data.totalBuckets} × {bucketLabel}
           </span>
         </div>
+        <button className="svc-ha-export-btn" onMouseDown={e => e.stopPropagation()} onClick={handleExportPdf} title="Export PDF report">
+          ⬇ PDF
+        </button>
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16, opacity: 0.45, padding: "2px 6px", lineHeight: 1 }}>✕</button>
       </div>
 
@@ -9266,7 +9438,7 @@ export const ServicesOverview = () => {
                   <span style={{ fontSize: 10, opacity: 0.6, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" as const }}>
                     Hotness · {tl.hotnessSource || "signal"}
                   </span>
-                  {tlInfraBucketsEnriched.length >= 2 && (
+                  {tl.hotness.length >= 2 && (
                     <HotnessAssistButton
                       active={hotnessAssistOpen}
                       onClick={() => setHotnessAssistOpen(v => !v)}
@@ -9429,16 +9601,31 @@ export const ServicesOverview = () => {
       })(), document.body)}
 
       {/* ---- Hotness Assist Panel ---- */}
-      {hotnessAssistOpen && hotnessAssistData && (
-        <HotnessAssistPanel
-          data={hotnessAssistData}
-          pos={hotnessAssistPos}
-          onClose={() => setHotnessAssistOpen(false)}
-          onDragStart={startHotnessAssistDrag}
-          hotness={tl.hotness}
-          currentIdx={tl.index}
-          bucketLabel={tl.bucket}
-        />
+      {hotnessAssistOpen && tl.enabled && (
+        hotnessAssistData ? (
+          <HotnessAssistPanel
+            data={hotnessAssistData}
+            pos={hotnessAssistPos}
+            onClose={() => setHotnessAssistOpen(false)}
+            onDragStart={startHotnessAssistDrag}
+            hotness={tl.hotness}
+            currentIdx={tl.index}
+            bucketLabel={tl.bucket}
+          />
+        ) : createPortal(
+          <div className="svc-ha-panel" style={{ left: hotnessAssistPos.x, top: hotnessAssistPos.y, width: 400 }}>
+            <div className="svc-ha-panel-header" onMouseDown={startHotnessAssistDrag}>
+              <FlameIcon />
+              <span style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>Hotness Assist</span>
+              <button onClick={() => setHotnessAssistOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16, opacity: 0.45, padding: "2px 6px" }}>✕</button>
+            </div>
+            <div style={{ padding: 20, display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ display: "inline-block", width: 16, height: 16, borderRadius: "50%", border: "2px solid rgba(255,131,43,0.3)", borderTopColor: "#FF832B", animation: "spin 1s linear infinite", flexShrink: 0 }} />
+              <span style={{ fontSize: 13, opacity: 0.7 }}>Analyzing infrastructure signals — loading span data for {tl.bucket} buckets…</span>
+            </div>
+          </div>,
+          document.body
+        )
       )}
 
       {/* ---- Settings Modal ---- */}

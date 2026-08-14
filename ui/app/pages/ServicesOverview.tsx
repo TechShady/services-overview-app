@@ -1419,6 +1419,8 @@ function HotnessAssistPanel({
     { label: "P90 Latency", best: `${b.p90LatencyMs.toFixed(0)}ms`, worst: `${w.p90LatencyMs.toFixed(0)}ms`, gap: `+${(w.p90LatencyMs - b.p90LatencyMs).toFixed(0)}ms`, bad: w.p90LatencyMs > b.p90LatencyMs * 1.1 + 20 },
     { label: "Avg Latency", best: `${b.avgLatencyMs.toFixed(0)}ms`, worst: `${w.avgLatencyMs.toFixed(0)}ms`, gap: `+${(w.avgLatencyMs - b.avgLatencyMs).toFixed(0)}ms`, bad: w.avgLatencyMs > b.avgLatencyMs * 1.1 + 10 },
     { label: "Requests", best: haFmtN(b.requests), worst: haFmtN(w.requests), gap: `${((w.requests - b.requests) / Math.max(1, b.requests) * 100).toFixed(0)}%`, bad: false },
+    ...(w.cpuPct > 0 || b.cpuPct > 0 ? [{ label: "CPU", best: `${b.cpuPct.toFixed(1)}%`, worst: `${w.cpuPct.toFixed(1)}%`, gap: `+${(w.cpuPct - b.cpuPct).toFixed(1)}pp`, bad: w.cpuPct > b.cpuPct + 5 }] : []),
+    ...(w.memPct > 0 || b.memPct > 0 ? [{ label: "Memory", best: `${b.memPct.toFixed(1)}%`, worst: `${w.memPct.toFixed(1)}%`, gap: `+${(w.memPct - b.memPct).toFixed(1)}pp`, bad: w.memPct > b.memPct + 5 }] : []),
     { label: "Hotness Z", best: b === w ? "—" : data.bestZ.toFixed(2), worst: worstZ.toFixed(2), gap: `+${(worstZ - data.bestZ).toFixed(2)}`, bad: worstZ > 1.5 },
   ];
 
@@ -1546,6 +1548,8 @@ function HotnessAssistPanel({
       <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${w.avgLatencyMs.toFixed(0)}ms</td></tr>
       <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(w.requests)}</td></tr>
       <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${w.problemCount}</td></tr>
+      ${w.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700">${w.cpuPct.toFixed(1)}%</td></tr>` : ""}
+      ${w.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700">${w.memPct.toFixed(1)}%</td></tr>` : ""}
     </tbody></table>
     <div class="z-badge" style="background:${data.worstDriverColor}18;color:${data.worstDriverColor}">Hotness Z = ${data.worstZ.toFixed(2)}</div>
   </div>
@@ -1558,6 +1562,8 @@ function HotnessAssistPanel({
       <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.avgLatencyMs.toFixed(0)}ms</td></tr>
       <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(b.requests)}</td></tr>
       <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${b.problemCount}</td></tr>
+      ${b.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.cpuPct.toFixed(1)}%</td></tr>` : ""}
+      ${b.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.memPct.toFixed(1)}%</td></tr>` : ""}
     </tbody></table>
     <div class="z-badge" style="background:rgba(0,163,108,0.1);color:#00A36C">Hotness Z = ${data.bestZ.toFixed(2)}</div>
   </div>
@@ -1711,6 +1717,8 @@ function HotnessAssistPanel({
                   {metricRow("Avg Latency", `${w.avgLatencyMs.toFixed(0)}ms`)}
                   {metricRow("Requests", haFmtN(w.requests))}
                   {metricRow("Problems", String(w.problemCount))}
+                  {w.cpuPct > 0 && metricRow("CPU", `${w.cpuPct.toFixed(1)}%`)}
+                  {w.memPct > 0 && metricRow("Memory", `${w.memPct.toFixed(1)}%`)}
                   <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: `${data.worstDriverColor}15`, fontSize: 10, fontWeight: 700, color: data.worstDriverColor, textAlign: "center" as const }}>
                     Hotness Z = {data.worstZ.toFixed(2)}
                   </div>
@@ -1725,6 +1733,8 @@ function HotnessAssistPanel({
                   {metricRow("Avg Latency", `${b.avgLatencyMs.toFixed(0)}ms`)}
                   {metricRow("Requests", haFmtN(b.requests))}
                   {metricRow("Problems", String(b.problemCount))}
+                  {b.cpuPct > 0 && metricRow("CPU", `${b.cpuPct.toFixed(1)}%`)}
+                  {b.memPct > 0 && metricRow("Memory", `${b.memPct.toFixed(1)}%`)}
                   <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(0,163,108,0.1)", fontSize: 10, fontWeight: 700, color: "#00A36C", textAlign: "center" as const }}>
                     Hotness Z = {data.bestZ.toFixed(2)}
                   </div>

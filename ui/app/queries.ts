@@ -1508,6 +1508,6 @@ export function tlInfraMetricsQuery(tf: TF, bucket: string): string {
 export function tlInfraHostMetricsQuery(tf: TF, bucket: string): string {
   return `timeseries {
   cpu_pct = avg(dt.host.cpu.usage, default:0),
-  mem_pct = avg(dt.host.mem.usage, default:0)
+  mem_pct = avg(dt.host.memory.usage, default:0)
 }, ${tfClause(tf)}, interval:${bucket}`;
 }

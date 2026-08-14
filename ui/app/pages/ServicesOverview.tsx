@@ -141,6 +141,7 @@ import {
   serviceFlowSankeyTimelapseQuery,
   tlProblemsQuery,
   tlInfraMetricsQuery,
+  tlInfraHostMetricsQuery,
 } from "../queries";
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1153,8 @@ interface InfraBucketData {
   avgLatencyMs: number;
   p90LatencyMs: number;
   problemCount: number;
+  cpuPct: number;
+  memPct: number;
 }
 
 interface InfraBaselines {
@@ -1159,6 +1162,8 @@ interface InfraBaselines {
   meanP90: number; stdP90: number;
   meanReqs: number; stdReqs: number;
   meanProbs: number; stdProbs: number;
+  meanCpu: number; stdCpu: number;
+  meanMem: number; stdMem: number;
 }
 
 interface HotnessAssistInfraData {
@@ -1175,7 +1180,7 @@ interface HotnessAssistInfraData {
   worstDriver: string;
   worstDriverColor: string;
   baselines: InfraBaselines;
-  worstZScores: { errZ: number; latZ: number; volZ: number; probZ: number };
+  worstZScores: { errZ: number; latZ: number; volZ: number; probZ: number; cpuZ: number; memZ: number };
   summary: string;
   insights: InsightItem[];
   recommendations: RecommendationItem[];
@@ -1206,17 +1211,22 @@ function analyzeInfraHotness(
   const worstZ = hotness[worstIdx] ?? 0;
   const bestZ = hotness[bestIdx] ?? 0;
 
-  const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs } = baselines;
+  const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs, meanCpu, stdCpu, meanMem, stdMem } = baselines;
 
   const safeZ = (v: number, mean: number, std: number) => std > 0 ? (v - mean) / std : 0;
   const errZ = safeZ(worstBucket.errorRate, meanErrRate, stdErrRate);
   const latZ = safeZ(worstBucket.p90LatencyMs, meanP90, stdP90);
   const volZ = safeZ(worstBucket.requests, meanReqs, stdReqs);
   const probZ = safeZ(worstBucket.problemCount, meanProbs, stdProbs);
+  const cpuZ = safeZ(worstBucket.cpuPct, meanCpu, stdCpu);
+  const memZ = safeZ(worstBucket.memPct, meanMem, stdMem);
 
   let worstDriver = "Mixed signals";
   let worstDriverColor = "#FFB800";
-  if (probZ >= 2.5 && errZ >= 1.5) { worstDriver = "Problem storm"; worstDriverColor = "#FF3D9A"; }
+  if (cpuZ >= 2.5 && memZ >= 2.5) { worstDriver = "Resource exhaustion (CPU+Mem)"; worstDriverColor = "#FF3D9A"; }
+  else if (cpuZ >= 2.5) { worstDriver = "CPU saturation"; worstDriverColor = "#FF832B"; }
+  else if (memZ >= 2.5) { worstDriver = "Memory pressure"; worstDriverColor = "#FF832B"; }
+  else if (probZ >= 2.5 && errZ >= 1.5) { worstDriver = "Problem storm"; worstDriverColor = "#FF3D9A"; }
   else if (probZ >= 1.5) { worstDriver = "Active incident"; worstDriverColor = "#FF3D9A"; }
   else if (errZ >= 2.5 && latZ >= 1.5) { worstDriver = "Cascading failure"; worstDriverColor = "#FF3D9A"; }
   else if (errZ >= 2.5) { worstDriver = "Error storm"; worstDriverColor = "#FF832B"; }
@@ -1287,6 +1297,14 @@ function analyzeInfraHotness(
     recommendations.push({ impact: "high", text: `Check process CPU and memory metrics in Metrics > Process Metrics for the period around bucket ${worstIdx + 1}. Look for GC pause time spikes, memory working set growth, or CPU time that exceeds the allocated limits.` });
   }
 
+  // Actual CPU/memory signals (when data available)
+  if (cpuZ >= 2.0 || memZ >= 2.0) {
+    const cpuMsg = cpuZ >= 2.0 ? `CPU spiked to ${worstBucket.cpuPct.toFixed(1)}% avg (Z=${cpuZ.toFixed(2)})` : "";
+    const memMsg = memZ >= 2.0 ? `Memory rose to ${worstBucket.memPct.toFixed(1)}% avg (Z=${memZ.toFixed(2)})` : "";
+    insights.push({ severity: "warning", icon: "🖥️", text: `Infrastructure pressure confirmed at peak: ${[cpuMsg, memMsg].filter(Boolean).join("; ")}. Resource saturation likely caused the observed latency regression.` });
+    recommendations.push({ impact: "high", text: `Verify host and pod resource limits: CPU at ${worstBucket.cpuPct.toFixed(1)}% and memory at ${worstBucket.memPct.toFixed(1)}% are near saturation. Check Metrics > Process Metrics and Capacity & Sizing > Right-Sizing to identify under-provisioned workloads that need vertical scaling.` });
+  }
+
   // Cascading failure
   if (errZ >= 1.5 && latZ >= 1.5) {
     insights.push({ severity: "critical", icon: "⛓️", text: `Error rate and latency co-elevated (errZ=${errZ.toFixed(2)}, latZ=${latZ.toFixed(2)}) — cascading failure signature. Slow upstream dependencies cause timeout errors that propagate through the call chain.` });
@@ -1347,7 +1365,7 @@ function analyzeInfraHotness(
     worstDriver,
     worstDriverColor,
     baselines,
-    worstZScores: { errZ, latZ, volZ, probZ },
+    worstZScores: { errZ, latZ, volZ, probZ, cpuZ, memZ },
     summary,
     insights,
     recommendations,
@@ -1392,6 +1410,8 @@ function HotnessAssistPanel({
     { label: "Critical Spikes", value: String(data.criticalBuckets), sub: "Z ≥ 2.5", color: data.criticalBuckets > 0 ? TL_HOT_HIGH : "#00A36C" },
     { label: "Peak Error Rate", value: `${w.errorRate.toFixed(1)}%`, sub: `avg ${data.baselines.meanErrRate.toFixed(1)}%`, color: w.errorRate > data.baselines.meanErrRate * 1.5 + 1 ? TL_HOT_WARM : "#e0e0e0" },
     { label: "Peak P90", value: `${w.p90LatencyMs.toFixed(0)}ms`, sub: `avg ${data.baselines.meanP90.toFixed(0)}ms`, color: w.p90LatencyMs > data.baselines.meanP90 * 1.5 + 50 ? TL_HOT_WARM : "#e0e0e0" },
+    { label: "Peak CPU", value: `${w.cpuPct.toFixed(1)}%`, sub: `avg ${data.baselines.meanCpu.toFixed(1)}%`, color: w.cpuPct > data.baselines.meanCpu * 1.5 + 10 ? TL_HOT_WARM : "#e0e0e0" },
+    { label: "Peak Mem", value: `${w.memPct.toFixed(1)}%`, sub: `avg ${data.baselines.meanMem.toFixed(1)}%`, color: w.memPct > data.baselines.meanMem * 1.3 + 10 ? TL_HOT_WARM : "#e0e0e0" },
   ];
 
   const deltaRows = [
@@ -1450,6 +1470,8 @@ function HotnessAssistPanel({
       { label: "P90 Latency", z: data.worstZScores.latZ },
       { label: "Request Volume", z: data.worstZScores.volZ },
       { label: "Problem Activity", z: data.worstZScores.probZ },
+      { label: "CPU Utilization", z: data.worstZScores.cpuZ },
+      { label: "Memory Utilization", z: data.worstZScores.memZ },
     ].map(({ label, z }) => {
       const col = Math.abs(z) >= 2.5 ? "#FF3D9A" : Math.abs(z) >= 1.5 ? "#FF832B" : Math.abs(z) >= 0.75 ? "#FFB800" : "#00A36C";
       const barPct = Math.min(100, Math.abs(z) / 3 * 100).toFixed(1);
@@ -1715,12 +1737,14 @@ function HotnessAssistPanel({
         {/* Z-score breakdown for worst bucket */}
         {(() => {
           blockOffset += 500;
-          const { errZ, latZ, volZ, probZ } = data.worstZScores;
+          const { errZ, latZ, volZ, probZ, cpuZ, memZ } = data.worstZScores;
           const zRows = [
             { label: "Error Rate", z: errZ, desc: "error rate vs average" },
             { label: "P90 Latency", z: latZ, desc: "latency vs average" },
             { label: "Request Volume", z: volZ, desc: "request count deviation" },
             { label: "Problem Activity", z: probZ, desc: "Davis problems opened" },
+            { label: "CPU Utilization", z: cpuZ, desc: "host CPU% vs average" },
+            { label: "Memory Utilization", z: memZ, desc: "host memory% vs average" },
           ];
           return (
             <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
@@ -4558,6 +4582,15 @@ export const ServicesOverview = () => {
     return () => tl.reportLoading("infra-metrics", false);
   }, [tl, tlInfraMetricsResult.isLoading]);
 
+  const tlInfraHostMetricsResult = useDql(
+    { query: tl.enabled ? tlInfraHostMetricsQuery(tf, tl.bucket) : NOOP_QUERY, maxResultRecords: 10000 },
+    refetchOpts
+  );
+  React.useEffect(() => {
+    tl.reportLoading("infra-host-metrics", tl.enabled && tlInfraHostMetricsResult.isLoading);
+    return () => tl.reportLoading("infra-host-metrics", false);
+  }, [tl, tlInfraHostMetricsResult.isLoading]);
+
   const tlInfraBuckets = React.useMemo<InfraBucketData[]>(() => {
     // timeseries returns one row with array-valued metric fields
     const records = tlInfraMetricsResult.data?.records ?? [];
@@ -4589,9 +4622,23 @@ export const ServicesOverview = () => {
         avgLatencyMs: (avgArr[i] ?? 0) / 1000,
         p90LatencyMs: (p90Arr[i] ?? 0) / 1000,
         problemCount: 0, // filled in below
+        cpuPct: 0,
+        memPct: 0,
       };
     });
   }, [tlInfraMetricsResult.data]);
+
+  const tlHostBuckets = React.useMemo<{ cpuPct: number; memPct: number }[]>(() => {
+    const records = tlInfraHostMetricsResult.data?.records ?? [];
+    if (records.length === 0) return [];
+    const row = records[0] as any;
+    const cpuArr = (row.cpu_pct ?? []) as (number | null)[];
+    const memArr = (row.mem_pct ?? []) as (number | null)[];
+    return Array.from({ length: cpuArr.length }, (_, i) => ({
+      cpuPct: cpuArr[i] ?? 0,
+      memPct: memArr[i] ?? 0,
+    }));
+  }, [tlInfraHostMetricsResult.data]);
 
   // Attach per-bucket problem count (problems opened in each bucket window)
   const tlInfraProblemsOpened = React.useMemo(() =>
@@ -4602,10 +4649,15 @@ export const ServicesOverview = () => {
     [tlInfraBuckets, tlProblems, tl.bucketMs]
   );
 
-  // Enrich buckets with problem counts (for analysis fn)
+  // Enrich buckets with problem counts and host CPU/memory (for analysis fn)
   const tlInfraBucketsEnriched = React.useMemo<InfraBucketData[]>(() =>
-    tlInfraBuckets.map((b, i) => ({ ...b, problemCount: tlInfraProblemsOpened[i] ?? 0 })),
-    [tlInfraBuckets, tlInfraProblemsOpened]
+    tlInfraBuckets.map((b, i) => ({
+      ...b,
+      problemCount: tlInfraProblemsOpened[i] ?? 0,
+      cpuPct: tlHostBuckets[i]?.cpuPct ?? 0,
+      memPct: tlHostBuckets[i]?.memPct ?? 0,
+    })),
+    [tlInfraBuckets, tlInfraProblemsOpened, tlHostBuckets]
   );
 
   // Baselines: mean + std for each signal across all buckets
@@ -4617,24 +4669,30 @@ export const ServicesOverview = () => {
     const p90s = tlInfraBucketsEnriched.map(b => b.p90LatencyMs);
     const reqs = tlInfraBucketsEnriched.map(b => b.requests);
     const probs = tlInfraProblemsOpened;
+    const cpus = tlInfraBucketsEnriched.map(b => b.cpuPct);
+    const mems = tlInfraBucketsEnriched.map(b => b.memPct);
     const meanErrRate = mn(errRates); const stdErrRate = sd(errRates, meanErrRate);
     const meanP90 = mn(p90s); const stdP90 = sd(p90s, meanP90);
     const meanReqs = mn(reqs); const stdReqs = sd(reqs, meanReqs);
     const meanProbs = mn(probs); const stdProbs = sd(probs, meanProbs);
-    return { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs };
+    const meanCpu = mn(cpus); const stdCpu = sd(cpus, meanCpu);
+    const meanMem = mn(mems); const stdMem = sd(mems, meanMem);
+    return { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs, meanCpu, stdCpu, meanMem, stdMem };
   }, [tlInfraBucketsEnriched, tlInfraProblemsOpened]);
 
   // Multi-signal hotness Z-score — overrides Sankey signal when infra data is ready
   React.useEffect(() => {
     if (!tl.enabled || tlInfraBucketsEnriched.length < 2 || !tlInfraBaselines) return;
-    const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs } = tlInfraBaselines;
+    const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs, meanCpu, stdCpu, meanMem, stdMem } = tlInfraBaselines;
     const safeZ = (v: number, m: number, s: number) => s > 0 ? (v - m) / s : 0;
     const hotnessArr = tlInfraBucketsEnriched.map((b, i) => {
       const errZ = safeZ(b.errorRate, meanErrRate, stdErrRate);
       const latZ = safeZ(b.p90LatencyMs, meanP90, stdP90);
       const volZ = Math.abs(safeZ(b.requests, meanReqs, stdReqs));
       const probZ = safeZ(tlInfraProblemsOpened[i] ?? 0, meanProbs, stdProbs);
-      return Math.max(0, errZ, latZ, volZ, probZ);
+      const cpuZ = safeZ(b.cpuPct, meanCpu ?? 0, stdCpu ?? 0.01);
+      const memZ = safeZ(b.memPct, meanMem ?? 0, stdMem ?? 0.01);
+      return Math.max(0, errZ, latZ, volZ, probZ, cpuZ, memZ);
     });
     tl.reportHotness(hotnessArr, "Multi-signal: error rate · P90 latency · volume · problems");
   }, [tl, tlInfraBucketsEnriched, tlInfraBaselines, tlInfraProblemsOpened]);
@@ -10719,6 +10777,9 @@ export const ServicesOverview = () => {
 
               {/* KPI Marquee — all 8 metrics, scrolling */}
               {(() => {
+                const tlKpiBucket = tl.enabled && tlInfraBucketsEnriched.length > 0
+                  ? tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]
+                  : null;
                 const allCards = ALL_KPI_OPTIONS.map(opt => {
                   const kpiId = opt.id;
                   let value: string = "—";
@@ -10729,7 +10790,7 @@ export const ServicesOverview = () => {
                   let higherIsBetter = false;
                   switch (kpiId) {
                     case "totalRequests":
-                      rawValue = overviewKpis.totalRequests; value = formatCount(rawValue);
+                      rawValue = tlKpiBucket ? tlKpiBucket.requests : overviewKpis.totalRequests; value = formatCount(rawValue);
                       prevRawValue = overviewKpisPrev?.totalRequests; sparkline = fleetSparklines.totalRequests;
                       color = "#4589FF"; higherIsBetter = true; break;
                     case "totalFailures":
@@ -10737,19 +10798,19 @@ export const ServicesOverview = () => {
                       color = rawValue > 0 ? RED : GREEN;
                       prevRawValue = overviewKpisPrev?.totalFailures; sparkline = fleetSparklines.totalFailures; break;
                     case "avgLatency":
-                      rawValue = overviewKpis.avgLatency; value = formatDuration(rawValue);
+                      rawValue = tlKpiBucket ? tlKpiBucket.avgLatencyMs * 1000 : overviewKpis.avgLatency; value = formatDuration(rawValue);
                       color = rawValue / 1000 >= 500 ? RED : rawValue / 1000 >= 100 ? YELLOW : GREEN;
                       prevRawValue = overviewKpisPrev?.avgLatency; sparkline = fleetSparklines.avgLatency; break;
                     case "avgP90":
-                      rawValue = overviewKpis.avgP90; value = formatDuration(rawValue);
+                      rawValue = tlKpiBucket ? tlKpiBucket.p90LatencyMs * 1000 : overviewKpis.avgP90; value = formatDuration(rawValue);
                       color = rawValue / 1000 >= 500 ? RED : rawValue / 1000 >= 100 ? YELLOW : GREEN;
                       prevRawValue = overviewKpisPrev?.avgP90; sparkline = fleetSparklines.avgP90; break;
                     case "errorRate":
-                      rawValue = overviewKpis.errorRate; value = rawValue.toFixed(2) + "%";
+                      rawValue = tlKpiBucket ? tlKpiBucket.errorRate : overviewKpis.errorRate; value = rawValue.toFixed(2) + "%";
                       color = rawValue >= 5 ? RED : rawValue >= 1 ? YELLOW : GREEN;
                       prevRawValue = overviewKpisPrev?.errorRate; sparkline = fleetSparklines.errorRate; break;
                     case "activeProblems":
-                      rawValue = overviewKpis.activeProblems; value = String(rawValue);
+                      rawValue = tlKpiBucket ? tlKpiBucket.problemCount : overviewKpis.activeProblems; value = String(rawValue);
                       color = rawValue > 0 ? RED : GREEN;
                       prevRawValue = overviewKpisPrev?.activeProblems ?? null; sparkline = activeProblemsSparkline; break;
                     case "affectedServices":
@@ -10764,6 +10825,13 @@ export const ServicesOverview = () => {
                   return { kpiId, opt, value, color, rawValue, prevRawValue, sparkline, higherIsBetter };
                 });
                 return (
+                  <>
+                  {tl.enabled && tlKpiBucket && (
+                    <div style={{ fontSize: 11, opacity: 0.7, padding: "4px 12px", background: "rgba(255,61,154,0.08)", borderRadius: 6, border: "1px solid rgba(255,61,154,0.3)", display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱ Timelapse</span>
+                      Showing bucket {tl.index + 1}/{tl.totalBuckets}: {tlKpiBucket.bucket}
+                    </div>
+                  )}
                   <div className={`svc-kpi-marquee${marqueePaused ? " paused" : ""}`}>
                     <button
                       type="button"
@@ -10791,6 +10859,7 @@ export const ServicesOverview = () => {
                       ))}
                     </div>
                   </div>
+                  </>
                 );
               })()}
 
@@ -11515,6 +11584,17 @@ export const ServicesOverview = () => {
                 <Tab title="SLO & Error Budget">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title={`SLO: ${sloTarget}% — Error Budget Analysis`} />
+              {tl.enabled && tlInfraBucketsEnriched.length > 0 && (() => {
+                const bkt = tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)];
+                return (
+                  <div style={{ fontSize: 11, padding: "4px 10px", background: "rgba(255,61,154,0.08)", borderRadius: 6, border: "1px solid rgba(255,61,154,0.25)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱ Timelapse</span>
+                    Bucket {tl.index + 1}/{tl.totalBuckets}: {bkt.bucket}
+                    {" · "}Error rate: {bkt.errorRate.toFixed(2)}%
+                    {" · "}SLO target: {sloTarget}% — budget status may differ from live view
+                  </div>
+                );
+              })()}
               <Flex gap={16} flexWrap="wrap">
                 <KpiCard label="Services at Risk" value={sloData.filter((s) => s.Status !== "OK").length} rawValue={sloData.filter((s) => s.Status !== "OK").length} color={RED} prevRawValue={prevSloStatusCounts?.slo.atRisk ?? null} sparkline={sloBreachesSparkline} />
                 <KpiCard label="Budget Exhausted" value={sloData.filter((s) => s.Status === "EXHAUSTED").length} rawValue={sloData.filter((s) => s.Status === "EXHAUSTED").length} color={RED} prevRawValue={prevSloStatusCounts?.slo.exhausted ?? null} sparkline={sloBreachesSparkline} />
@@ -12031,6 +12111,18 @@ export const ServicesOverview = () => {
                 <Tab title="Anomaly Detection">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Anomaly Detection — Current vs Baseline" />
+              {tl.enabled && tlInfraBucketsEnriched.length > 0 && (() => {
+                const bkt = tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)];
+                return (
+                  <div style={{ fontSize: 11, padding: "4px 10px", background: "rgba(255,61,154,0.08)", borderRadius: 6, border: "1px solid rgba(255,61,154,0.25)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱ Timelapse</span>
+                    Bucket {tl.index + 1}/{tl.totalBuckets}: {bkt.bucket}
+                    {" · "}{bkt.errorRate.toFixed(2)}% error rate
+                    {" · "}{bkt.p90LatencyMs.toFixed(0)}ms P90
+                    {" · "}{bkt.problemCount} problem(s) opened
+                  </div>
+                );
+              })()}
               <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 12 }}>
                 <div className="chart-description">
                   Compares current period metrics against a 4× baseline. Flags services with latency change &gt;50%, error rate change &gt;100%, or error rate &gt;5%.
@@ -13440,31 +13532,36 @@ export const ServicesOverview = () => {
                     {Array.from({ length: 24 }, (_, h) => (
                       <div key={h} style={{ fontSize: 9, textAlign: "center", opacity: 0.5 }}>{h}</div>
                     ))}
-                    {heatmapGridData.cells.slice(0, 168).map((cell: any, i: number) => {
-                      const dev = cell.deviation ?? 0;
-                      const v = cell.value;
-                      // Match honeycomb colour scheme: green/yellow/red
-                      // Error rate: same absolute thresholds as honeycomb
-                      // Latency: map deviation to same colours
-                      let bg: string;
-                      if (heatmapMetric === "errorRate") {
-                        bg = v < 0.5 ? `${GREEN}cc` : v < 2 ? `${YELLOW}ee` : RED;
-                      } else {
-                        bg = dev <= 0 ? `${GREEN}66` : dev < 1 ? `${GREEN}cc` : dev < 2 ? `${YELLOW}ee` : RED;
-                      }
-                      const entityId = svcEntityMap.get(cell.service);
-                      const drillUrl = entityId
-                        ? `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(entityId)}&${tfParams(tfFrom, tfTo)}`
-                        : null;
-                      return (
-                        <div key={i}
-                          title={`${cell.service} | ${cell.day} ${cell.hour}:00 | ${heatmapMetric === "errorRate" ? cell.value.toFixed(2) + "%" : Math.round(cell.value) + "ms"} | ${dev.toFixed(1)} std dev${drillUrl ? " — click to drill" : ""}`}
-                          onClick={drillUrl ? () => window.open(drillUrl, "_blank", "noopener,noreferrer") : undefined}
-                          style={{ width: "100%", aspectRatio: "1", background: bg, borderRadius: 2, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", cursor: drillUrl ? "pointer" : "default" }}>
-                          {cell.isAnomaly && <span style={{ fontSize: 8, color: "#fff", fontWeight: 700 }}>&#9650;</span>}
-                        </div>
-                      );
-                    })}
+                    {(() => {
+                      const tlHeatmapHour = tl.enabled && tlInfraBucketsEnriched.length > 0
+                        ? new Date(tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)].bucketEpochMs).getUTCHours()
+                        : -1;
+                      return heatmapGridData.cells.slice(0, 168).map((cell: any, i: number) => {
+                        const dev = cell.deviation ?? 0;
+                        const v = cell.value;
+                        // Match honeycomb colour scheme: green/yellow/red
+                        // Error rate: same absolute thresholds as honeycomb
+                        // Latency: map deviation to same colours
+                        let bg: string;
+                        if (heatmapMetric === "errorRate") {
+                          bg = v < 0.5 ? `${GREEN}cc` : v < 2 ? `${YELLOW}ee` : RED;
+                        } else {
+                          bg = dev <= 0 ? `${GREEN}66` : dev < 1 ? `${GREEN}cc` : dev < 2 ? `${YELLOW}ee` : RED;
+                        }
+                        const entityId = svcEntityMap.get(cell.service);
+                        const drillUrl = entityId
+                          ? `${envUrl}/ui/apps/dynatrace.distributedtracing/explorer?filter=dt.entity.service+%3D+${encodeURIComponent(entityId)}&${tfParams(tfFrom, tfTo)}`
+                          : null;
+                        return (
+                          <div key={i}
+                            title={`${cell.service} | ${cell.day} ${cell.hour}:00 | ${heatmapMetric === "errorRate" ? cell.value.toFixed(2) + "%" : Math.round(cell.value) + "ms"} | ${dev.toFixed(1)} std dev${drillUrl ? " — click to drill" : ""}`}
+                            onClick={drillUrl ? () => window.open(drillUrl, "_blank", "noopener,noreferrer") : undefined}
+                            style={{ width: "100%", aspectRatio: "1", background: bg, borderRadius: 2, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", cursor: drillUrl ? "pointer" : "default", outline: tlHeatmapHour >= 0 && cell.hour === tlHeatmapHour ? "2px solid rgba(255,61,154,0.8)" : undefined, outlineOffset: -1, zIndex: tlHeatmapHour >= 0 && cell.hour === tlHeatmapHour ? 2 : undefined }}>
+                            {cell.isAnomaly && <span style={{ fontSize: 8, color: "#fff", fontWeight: 700 }}>&#9650;</span>}
+                          </div>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
               )}
@@ -13982,6 +14079,14 @@ export const ServicesOverview = () => {
                   </div>
                 </Flex>
               </Flex>
+              {tl.enabled && tlInfraBucketsEnriched.length > 0 && (
+                <div style={{ fontSize: 11, padding: "4px 10px", background: "rgba(255,61,154,0.08)", borderRadius: 6, border: "1px solid rgba(255,61,154,0.25)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱</span>
+                  Bucket {tl.index + 1}/{tl.totalBuckets}: {tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.bucket ?? ""}
+                  {" · "}{tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.errorRate.toFixed(1)}% err
+                  {" · "}{tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.p90LatencyMs.toFixed(0)}ms P90
+                </div>
+              )}
               {dependenciesResult.isLoading ? <LoadingState /> : dependenciesData.length === 0 ? (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 32, textAlign: "center" }}>
                   <Strong>No service dependencies found</Strong>
@@ -14079,6 +14184,13 @@ export const ServicesOverview = () => {
                 <Tab title="Blast Radius">
             <Flex flexDirection="column" gap={16} paddingTop={16}>
               <SectionHeader title="Blast Radius Simulator" />
+              {tl.enabled && tlInfraBucketsEnriched.length > 0 && (
+                <div style={{ fontSize: 11, padding: "4px 10px", background: "rgba(255,61,154,0.08)", borderRadius: 6, border: "1px solid rgba(255,61,154,0.25)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱</span>
+                  Timelapse bucket {tl.index + 1}/{tl.totalBuckets}: {tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.bucket ?? ""}
+                  {" — "}{tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)]?.problemCount ?? 0} problem(s) opened
+                </div>
+              )}
               {/* Mode toggle: Services vs Hosts vs K8s Workloads vs K8s Clusters */}
               <Flex gap={0}>
                 {getVisibleSubSubTabs("Blast Radius").map((label, idx, arr) => {
@@ -16091,6 +16203,24 @@ export const ServicesOverview = () => {
                   <KpiCard label="Root Cause Groups" value={timelineGrouped.length} rawValue={timelineGrouped.length} color={ORANGE} />
                 )}
               </Flex>
+              {tl.enabled && tlInfraBucketsEnriched.length > 0 && (() => {
+                const bkt = tlInfraBucketsEnriched[Math.min(tl.index, tlInfraBucketsEnriched.length - 1)];
+                const fromMs = bkt.bucketEpochMs;
+                const toMs = fromMs + tl.bucketMs;
+                const bucketEvents = timelineData.filter(e => {
+                  const ts = e.Time ? new Date(e.Time).getTime() : 0;
+                  return ts >= fromMs && ts < toMs;
+                });
+                if (bucketEvents.length === 0) return null;
+                return (
+                  <div style={{ padding: "8px 12px", background: "rgba(255,61,154,0.08)", border: "1px solid rgba(255,61,154,0.3)", borderRadius: 6, fontSize: 12 }}>
+                    <span style={{ color: "#FF3D9A", fontWeight: 700 }}>⏱ Bucket {tl.index + 1} ({bkt.bucket})</span>
+                    {" — "}{bucketEvents.length} event{bucketEvents.length !== 1 ? "s" : ""} in this window:{" "}
+                    {bucketEvents.slice(0, 3).map((e, i) => <span key={i} style={{ opacity: 0.8 }}>{i > 0 ? ", " : ""}{e.Description?.slice(0, 40)}</span>)}
+                    {bucketEvents.length > 3 && <span style={{ opacity: 0.6 }}> +{bucketEvents.length - 3} more</span>}
+                  </div>
+                );
+              })()}
               {/* Grouped view */}
               {timelineGrouped && timelineGrouped.length > 0 && (
                 <div className="svc-chart-tile" style={{ minHeight: "auto", padding: 16 }}>

@@ -63,6 +63,10 @@ export function useTimelapse(): TimelapseState {
   return v;
 }
 
+export function useTimelapseOptional(): TimelapseState | null {
+  return useContext(TimelapseCtx);
+}
+
 export const TimelapseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [enabled, setEnabled] = useState(false);
   const [bucket, setBucket] = useState<TlBucket>("1h");

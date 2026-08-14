@@ -1503,3 +1503,11 @@ export function tlInfraMetricsQuery(tf: TF, bucket: string): string {
   avg_us = avg(dt.service.request.response_time)
 }, ${tfClause(tf)}, interval:${bucket}`;
 }
+
+// Host-level CPU + memory utilization — feeds into Hotness Assist infra signals
+export function tlInfraHostMetricsQuery(tf: TF, bucket: string): string {
+  return `timeseries {
+  cpu_pct = avg(dt.host.cpu.usage, default:0),
+  mem_pct = avg(dt.host.mem.usage, default:0)
+}, ${tfClause(tf)}, interval:${bucket}`;
+}

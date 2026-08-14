@@ -3,7 +3,7 @@
   "environmentUrl": "https://guu84124.apps.dynatrace.com",
   "app": {
     "name": "Services Overview",
-    "version": "0.38.99",
+    "version": "0.39.0",
     "description": "Not an official Dynatrace app https://github.com/TechShady/services-overview-app",
     "id": "my.services.overview.app",
     "scopes": [

@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useTimelapseOptional } from "../TimelapseContext";
 import { useUserAppState, useSetUserAppState } from "@dynatrace-sdk/react-hooks";
 import { Text } from "@dynatrace/strato-components/typography";
 import { Button } from "@dynatrace/strato-components/buttons";
@@ -118,6 +119,14 @@ export function AnnotationStrip({ fromMs, toMs, context }: AnnotationStripProps)
   const rangeMs = Math.max(toMs - fromMs, 1);
   const visible = annotations.filter((a) => a.timestampMs >= fromMs && a.timestampMs <= toMs);
 
+  const tl = useTimelapseOptional();
+  const tlCursorLeft = tl?.enabled && tl.totalBuckets > 0
+    ? (tl.index / tl.totalBuckets) * 100
+    : -1;
+  const tlCursorWidth = tl?.enabled && tl.totalBuckets > 0
+    ? (1 / tl.totalBuckets) * 100
+    : 0;
+
   return (
     <>
       <div
@@ -142,6 +151,22 @@ export function AnnotationStrip({ fromMs, toMs, context }: AnnotationStripProps)
             pointerEvents: "none",
           }}
         />
+        {/* Timelapse cursor band */}
+        {tlCursorLeft >= 0 && (
+          <div
+            style={{
+              position: "absolute",
+              left: `${tlCursorLeft}%`,
+              width: `${Math.max(tlCursorWidth, 0.5)}%`,
+              top: 0,
+              height: 18,
+              background: "rgba(255,61,154,0.18)",
+              borderLeft: "2px solid rgba(255,61,154,0.7)",
+              pointerEvents: "none",
+              zIndex: 1,
+            }}
+          />
+        )}
         {visible.map((ann) => {
           const pct = ((ann.timestampMs - fromMs) / rangeMs) * 100;
           const clamped = Math.min(Math.max(pct, 0), 97);

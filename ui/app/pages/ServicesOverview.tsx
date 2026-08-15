@@ -3924,6 +3924,187 @@ function ServiceSankeyTab({
   );
 }
 
+// ===========================================================================
+// Incident Radar — animated sonar popup
+// ===========================================================================
+function IncidentRadarModal({ svc, dependenciesData, svcDetailsData, onClose }: {
+  svc: any; dependenciesData: any[]; svcDetailsData: any[]; onClose: () => void;
+}) {
+  const sweepRef = useRef(0);
+  const [sweepDeg, setSweepDeg] = useState(0);
+  const frameRef = useRef<number>(0);
+
+  const calleeMap = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    dependenciesData.forEach((d: any) => {
+      if (!d.Caller || !d.Callee) return;
+      if (!m.has(d.Caller)) m.set(d.Caller, new Set());
+      m.get(d.Caller)!.add(d.Callee);
+    });
+    return m;
+  }, [dependenciesData]);
+
+  const { nodePositions, maxDepth } = useMemo(() => {
+    const visited = new Map<string, number>();
+    visited.set(svc.Service, 0);
+    const queue: { name: string; depth: number }[] = [{ name: svc.Service, depth: 0 }];
+    let md = 0;
+    while (queue.length) {
+      const { name, depth } = queue.shift()!;
+      if (depth >= 5) continue;
+      (calleeMap.get(name) ?? new Set()).forEach(callee => {
+        if (visited.has(callee)) return;
+        visited.set(callee, depth + 1);
+        md = Math.max(md, depth + 1);
+        queue.push({ name: callee, depth: depth + 1 });
+      });
+    }
+    const byDepth = new Map<number, string[]>();
+    visited.forEach((d, name) => { if (d === 0) return; if (!byDepth.has(d)) byDepth.set(d, []); byDepth.get(d)!.push(name); });
+    const CX = 280, CY = 280, maxR = 220;
+    const positions: { name: string; depth: number; x: number; y: number; angleDeg: number }[] = [];
+    byDepth.forEach((names, depth) => {
+      const ringR = (depth / Math.max(md, 1)) * maxR;
+      const count = Math.min(names.length, 14);
+      for (let i = 0; i < count; i++) {
+        const angleDeg = (i / count) * 360 - 90;
+        const angleRad = (angleDeg * Math.PI) / 180;
+        positions.push({ name: names[i], depth, x: CX + ringR * Math.cos(angleRad), y: CY + ringR * Math.sin(angleRad), angleDeg: ((angleDeg + 360) % 360) });
+      }
+    });
+    return { nodePositions: positions, maxDepth: md };
+  }, [svc.Service, calleeMap]);
+
+  useEffect(() => {
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = now - last; last = now;
+      sweepRef.current = (sweepRef.current + dt * 0.036) % 360;
+      setSweepDeg(sweepRef.current);
+      frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  const RADAR_GREEN = "#00FF41";
+  const CX = 280, CY = 280, maxR = 220;
+  const sweepRad = ((sweepDeg - 90) * Math.PI) / 180;
+  const TRAIL_DEG = 28;
+  const trailRad = ((sweepDeg - TRAIL_DEG - 90) * Math.PI) / 180;
+  const sweepX = CX + (maxR + 6) * Math.cos(sweepRad);
+  const sweepY = CY + (maxR + 6) * Math.sin(sweepRad);
+  const trailX = CX + (maxR + 6) * Math.cos(trailRad);
+  const trailY = CY + (maxR + 6) * Math.sin(trailRad);
+  const isLit = (angleDeg: number) => ((angleDeg - sweepDeg + 360) % 360) < TRAIL_DEG;
+
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.80)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "rgba(2,8,2,0.99)", border: `1px solid ${RADAR_GREEN}44`, borderRadius: 16, padding: "20px 24px", width: 640, maxWidth: "95vw", boxShadow: `0 0 60px ${RADAR_GREEN}18, 0 0 120px rgba(0,0,0,0.8)` }} onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: RADAR_GREEN, letterSpacing: 4, textTransform: "uppercase", marginBottom: 3, fontFamily: "monospace" }}>◉ INCIDENT RADAR — BLAST ANALYSIS</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#fff" }}>{svc.Service}</div>
+            <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>SCORE <strong style={{ color: (svc.score ?? 0) > 20 ? RED : ORANGE }}>{(svc.score ?? 0).toFixed(1)}</strong></span>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>FAILURE <strong style={{ color: RED }}>{(svc.FailureRate ?? 0).toFixed(2)}%</strong></span>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>DOWNSTREAM <strong style={{ color: ORANGE }}>{svc.totalImpact ?? 0}</strong></span>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>DEPTH <strong style={{ color: YELLOW }}>{svc.maxDepth ?? 0}</strong></span>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${RADAR_GREEN}44`, color: RADAR_GREEN, cursor: "pointer", borderRadius: 6, padding: "4px 12px", fontSize: 12, fontFamily: "monospace" }}>✕ CLOSE</button>
+        </div>
+
+        {/* Radar SVG */}
+        <svg width={560} height={560} style={{ display: "block", margin: "0 auto" }}>
+          <defs>
+            <radialGradient id="ir-origin-glow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor={RED} stopOpacity={0.55} />
+              <stop offset="100%" stopColor={RED} stopOpacity={0} />
+            </radialGradient>
+          </defs>
+
+          {/* Radar face */}
+          <circle cx={CX} cy={CY} r={maxR + 24} fill="rgba(0,4,0,0.97)" stroke={`${RADAR_GREEN}20`} strokeWidth={1.5} />
+
+          {/* Depth rings */}
+          {Array.from({ length: Math.max(maxDepth, 1) }, (_, d) => {
+            const r = ((d + 1) / Math.max(maxDepth, 1)) * maxR;
+            return (
+              <g key={d}>
+                <circle cx={CX} cy={CY} r={r} fill="none" stroke={RADAR_GREEN} strokeOpacity={0.12} strokeWidth={1} strokeDasharray="4 4" />
+                <text x={CX + 4} y={CY - r + 12} fill={RADAR_GREEN} fillOpacity={0.28} fontSize={7.5} fontFamily="monospace">D{d + 1}</text>
+              </g>
+            );
+          })}
+
+          {/* Crosshairs */}
+          <line x1={CX - maxR - 20} y1={CY} x2={CX + maxR + 20} y2={CY} stroke={RADAR_GREEN} strokeOpacity={0.09} strokeWidth={0.8} />
+          <line x1={CX} y1={CY - maxR - 20} x2={CX} y2={CY + maxR + 20} stroke={RADAR_GREEN} strokeOpacity={0.09} strokeWidth={0.8} />
+          <line x1={CX - maxR * 0.707} y1={CY - maxR * 0.707} x2={CX + maxR * 0.707} y2={CY + maxR * 0.707} stroke={RADAR_GREEN} strokeOpacity={0.05} strokeWidth={0.8} />
+          <line x1={CX + maxR * 0.707} y1={CY - maxR * 0.707} x2={CX - maxR * 0.707} y2={CY + maxR * 0.707} stroke={RADAR_GREEN} strokeOpacity={0.05} strokeWidth={0.8} />
+
+          {/* Sweep trail wedge */}
+          <path d={`M ${CX} ${CY} L ${trailX} ${trailY} A ${maxR + 6} ${maxR + 6} 0 0 1 ${sweepX} ${sweepY} Z`} fill={`${RADAR_GREEN}18`} />
+          {/* Sweep line */}
+          <line x1={CX} y1={CY} x2={sweepX} y2={sweepY} stroke={RADAR_GREEN} strokeWidth={1.5} strokeOpacity={0.88} />
+          <circle cx={sweepX} cy={sweepY} r={4} fill={RADAR_GREEN} fillOpacity={0.55} />
+
+          {/* Service nodes */}
+          {nodePositions.map(({ name, depth, x, y, angleDeg }) => {
+            const svcData = svcDetailsData.find((s: any) => s.Service === name);
+            const isHot = (svcData?.FailureRate ?? 0) >= 2 || svcData?.Status === "PROBLEM";
+            const lit = isLit(angleDeg);
+            const nodeClr = isHot ? ORANGE : RADAR_GREEN;
+            const label = name.length > 16 ? name.slice(0, 15) + "…" : name;
+            return (
+              <g key={name}>
+                <line x1={CX} y1={CY} x2={x} y2={y} stroke={nodeClr} strokeOpacity={lit ? 0.28 : 0.05} strokeWidth={0.8} />
+                {isHot && <circle cx={x} cy={y} r={11} fill="none" stroke={ORANGE} strokeOpacity={lit ? 0.8 : 0.22} strokeWidth={1.5} />}
+                <circle cx={x} cy={y} r={5} fill={nodeClr} fillOpacity={lit ? 0.95 : 0.32} />
+                {lit && <circle cx={x} cy={y} r={2.5} fill="#fff" fillOpacity={0.9} />}
+                {(lit || isHot) && (
+                  <text x={x + 8} y={y + 4} fontSize={8} fill={nodeClr} fillOpacity={lit ? 1 : 0.6} fontFamily="monospace" fontWeight={lit ? "700" : "400"}>{label}</text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Origin */}
+          <circle cx={CX} cy={CY} r={22} fill="none" stroke={RED} strokeOpacity={0.35} strokeWidth={1.5} strokeDasharray="3 3" />
+          <circle cx={CX} cy={CY} r={13} fill="url(#ir-origin-glow)" />
+          <circle cx={CX} cy={CY} r={7} fill={RED} fillOpacity={0.9} />
+          <circle cx={CX} cy={CY} r={3} fill="#fff" />
+          <text x={CX} y={CY + 32} textAnchor="middle" fontSize={8} fill={RED} fontWeight="700" fontFamily="monospace">ORIGIN</text>
+          <text x={CX} y={CY + 43} textAnchor="middle" fontSize={7.5} fill="rgba(255,255,255,0.38)" fontFamily="monospace">{svc.Service.length > 22 ? svc.Service.slice(0, 20) + "…" : svc.Service}</text>
+
+          {/* Outer bezel */}
+          <circle cx={CX} cy={CY} r={maxR + 22} fill="none" stroke={RADAR_GREEN} strokeOpacity={0.25} strokeWidth={1.5} />
+
+          {/* HUD readouts */}
+          <text x={12} y={16} fontSize={7.5} fill={RADAR_GREEN} fillOpacity={0.42} fontFamily="monospace">SCANNING...</text>
+          <text x={548} y={16} textAnchor="end" fontSize={7.5} fill={RADAR_GREEN} fillOpacity={0.42} fontFamily="monospace">{nodePositions.length} CONTACTS</text>
+          <text x={12} y={549} fontSize={7.5} fill={RADAR_GREEN} fillOpacity={0.42} fontFamily="monospace">BLAST SCORE: {(svc.score ?? 0).toFixed(1)}</text>
+          <text x={548} y={549} textAnchor="end" fontSize={7.5} fill={RADAR_GREEN} fillOpacity={0.42} fontFamily="monospace">MAX DEPTH: {maxDepth}</text>
+        </svg>
+
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 20, justifyContent: "center", marginTop: 10 }}>
+          {([["#fff", "Origin (blast source"], [RADAR_GREEN, "Healthy downstream"], [ORANGE, "Also elevated"]] as [string, string][]).map(([clr, label]) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: clr }} />
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>{label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 export const ServicesOverview = () => {
   const envUrl = getEnvironmentUrl().replace(/\/$/, "");
 
@@ -4072,6 +4253,7 @@ export const ServicesOverview = () => {
 
   // Forecast modal state
   const [forecastModal, setForecastModal] = useState<{ label: string; sparkline: number[]; color?: string } | null>(null);
+  const [radarSvc, setRadarSvc] = useState<any | null>(null);
   const openForecast = useCallback((label: string, sparkline: number[], color?: string) => {
     if (sparkline && sparkline.length > 1) setForecastModal({ label, sparkline, color });
   }, []);
@@ -17971,6 +18153,7 @@ export const ServicesOverview = () => {
                                 }},
                                 { id: "maxDepth", header: "Cascade Depth", accessor: "maxDepth", columnType: "number" as const },
                                 { id: "score", header: "Blast Score", accessor: "score", columnType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: Number(value) > 20 ? RED : Number(value) > 10 ? ORANGE : YELLOW }}>{Number(value).toFixed(1)}</Strong> },
+                                { id: "radar", header: "", accessor: "Service", cell: ({ value }: any) => <button onClick={() => setRadarSvc(impactData.find((d: any) => d.Service === value))} style={{ background: "rgba(0,255,65,0.08)", border: "1px solid rgba(0,255,65,0.35)", color: "#00FF41", cursor: "pointer", borderRadius: 4, padding: "3px 10px", fontSize: 10, fontWeight: 700, fontFamily: "monospace", letterSpacing: 1 }}>◉ RADAR</button> },
                               ]}
                               sortable
                             />
@@ -18021,6 +18204,11 @@ export const ServicesOverview = () => {
         </AIInsightsContext.Provider>
         </AnnotationProvider>
       </Flex>
+
+      {/* ---- Incident Radar Modal ---- */}
+      {radarSvc && (
+        <IncidentRadarModal svc={radarSvc} dependenciesData={dependenciesData} svcDetailsData={svcDetailsData} onClose={() => setRadarSvc(null)} />
+      )}
 
       {/* ---- Forecast Modal ---- */}
       {forecastModal && (

@@ -194,6 +194,7 @@ const TAB_KEYS = [
   "Incident Command",
   "Failure Patterns",
   "Team Reliability",
+  "Incident Radar",
 ] as const;
 
 const APP_VERSION = appConfig.app.version;
@@ -227,12 +228,12 @@ const SO_PERSONAS: PersonaDef[] = [
 
 const SO_PERSONA_TABS: Record<string, Partial<Record<TabKey, boolean>>> = {
   all:       {},
-  developer: { "Overview": true, "Summary Details": false, "Metrics": true, "Reliability": false, "Quality": false, "Performance": true, "Dependencies & Impact": true, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": true, "Team Reliability": false },
-  sre:       { "Overview": true, "Summary Details": false, "Metrics": false, "Reliability": true, "Quality": false, "Performance": true, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": true, "Cloud Waste": false, "Incident Command": true, "Failure Patterns": true, "Team Reliability": true },
-  manager:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": true, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": true },
-  executive: { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
-  product:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
-  finops:    { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": true, "Cloud Waste": true, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
+  developer: { "Overview": true, "Summary Details": false, "Metrics": true, "Reliability": false, "Quality": false, "Performance": true, "Dependencies & Impact": true, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": true, "Team Reliability": false, "Incident Radar": true },
+  sre:       { "Overview": true, "Summary Details": false, "Metrics": false, "Reliability": true, "Quality": false, "Performance": true, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": true, "Cloud Waste": false, "Incident Command": true, "Failure Patterns": true, "Team Reliability": true, "Incident Radar": true },
+  manager:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": true, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": true, "Incident Radar": true },
+  executive: { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false, "Incident Radar": true },
+  product:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false, "Incident Radar": false },
+  finops:    { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": true, "Cloud Waste": true, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false, "Incident Radar": false },
 };
 
 function getSoTabVisibility(personaId: string): Record<TabKey, boolean> {
@@ -17902,6 +17903,116 @@ export const ServicesOverview = () => {
             </Flex>
           </Tab>);
 
+
+              case "Incident Radar": {
+                const hotSvcs = svcDetailsData.filter((s: any) => s.Status === "PROBLEM" || (s.FailureRate ?? 0) >= 2);
+                const calleeMap2 = new Map<string, Set<string>>();
+                dependenciesData.forEach((d: any) => {
+                  if (!d.Caller || !d.Callee) return;
+                  if (!calleeMap2.has(d.Caller)) calleeMap2.set(d.Caller, new Set());
+                  calleeMap2.get(d.Caller)!.add(d.Callee);
+                });
+                const getDownstream = (svc: string) => {
+                  const visited = new Set<string>([svc]);
+                  const queue: Array<{ name: string; depth: number }> = [{ name: svc, depth: 0 }];
+                  const direct: string[] = [];
+                  let maxDepth = 0;
+                  while (queue.length) {
+                    const { name, depth } = queue.shift()!;
+                    (calleeMap2.get(name) ?? new Set()).forEach(callee => {
+                      if (visited.has(callee)) return;
+                      visited.add(callee);
+                      if (depth === 0) direct.push(callee);
+                      maxDepth = Math.max(maxDepth, depth + 1);
+                      queue.push({ name: callee, depth: depth + 1 });
+                    });
+                  }
+                  return { direct, all: [...visited].filter(s => s !== svc), maxDepth };
+                };
+                const impactData = hotSvcs.map((s: any) => {
+                  const { direct, all, maxDepth } = getDownstream(s.Service);
+                  const score = (s.FailureRate ?? 0) * 2 + all.length * 3 + direct.length + maxDepth * 0.5;
+                  return { ...s, directImpact: direct.length, totalImpact: all.length, maxDepth, score };
+                }).sort((a: any, b: any) => b.score - a.score);
+                const totalAtRisk = [...new Set(hotSvcs.flatMap((s: any) => getDownstream(s.Service).all))].length;
+                const maxImpact = (impactData[0] as any)?.totalImpact ?? 0;
+                const topSvc = impactData[0] as any;
+                return (
+                  <Tab key={tabId} title="Incident Radar">
+                    <Flex flexDirection="column" gap={16} paddingTop={16}>
+                      {aiPanel}
+                      <SectionHeader title="Active Incident Overview" />
+                      <Flex gap={16} flexWrap="wrap">
+                        <KpiCard label="Hot Services" value={hotSvcs.length} rawValue={hotSvcs.length} color={hotSvcs.length > 0 ? RED : GREEN} />
+                        <KpiCard label="At-Risk Downstream" value={totalAtRisk} rawValue={totalAtRisk} color={totalAtRisk > 3 ? ORANGE : YELLOW} />
+                        <KpiCard label="Fleet Total" value={svcDetailsData.length} rawValue={svcDetailsData.length} color={BLUE} />
+                        <KpiCard label="Blast Coverage" value={svcDetailsData.length > 0 ? `${((totalAtRisk / svcDetailsData.length) * 100).toFixed(0)}%` : "—"} rawValue={(totalAtRisk / Math.max(1, svcDetailsData.length)) * 100} color={totalAtRisk > svcDetailsData.length * 0.3 ? RED : YELLOW} />
+                        <KpiCard label="Max Cascade Depth" value={topSvc?.maxDepth ?? 0} rawValue={topSvc?.maxDepth ?? 0} color={ORANGE} />
+                      </Flex>
+                      {hotSvcs.length === 0 ? (
+                        <div className="svc-table-tile" style={{ padding: 32, textAlign: "center", opacity: 0.55 }}>
+                          <div style={{ fontSize: 28, marginBottom: 8 }}>✅</div>
+                          <span>No services in PROBLEM state or above 2% failure rate.</span>
+                        </div>
+                      ) : (
+                        <>
+                          <SectionHeader title="Ranked by Blast Radius Score" />
+                          <div className="svc-table-tile">
+                            <DataTable
+                              data={impactData}
+                              columns={[
+                                { id: "Service", header: "Service", accessor: "Service" },
+                                { id: "Status", header: "Status", accessor: "Status", cell: ({ value }: any) => <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, background: value === "PROBLEM" ? RED : ORANGE, color: "#fff", fontSize: 11, fontWeight: 700 }}>{value}</span> },
+                                { id: "FailureRate", header: "Failure %", accessor: "FailureRate", columnType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: Number(value) > 5 ? RED : Number(value) > 2 ? ORANGE : YELLOW }}>{Number(value).toFixed(2)}%</Strong> },
+                                { id: "directImpact", header: "Direct Callees", accessor: "directImpact", columnType: "number" as const },
+                                { id: "totalImpact", header: "Total Downstream", accessor: "totalImpact", columnType: "number" as const, cell: ({ value }: any) => {
+                                  const pct = maxImpact > 0 ? (Number(value) / maxImpact) * 100 : 0;
+                                  return <Flex gap={6} alignItems="center"><div style={{ width: 60, height: 6, background: "rgba(255,255,255,0.1)", borderRadius: 3, overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: pct > 60 ? RED : pct > 30 ? ORANGE : YELLOW, borderRadius: 3 }} /></div><span style={{ fontSize: 12 }}>{value}</span></Flex>;
+                                }},
+                                { id: "maxDepth", header: "Cascade Depth", accessor: "maxDepth", columnType: "number" as const },
+                                { id: "score", header: "Blast Score", accessor: "score", columnType: "number" as const, cell: ({ value }: any) => <Strong style={{ color: Number(value) > 20 ? RED : Number(value) > 10 ? ORANGE : YELLOW }}>{Number(value).toFixed(1)}</Strong> },
+                              ]}
+                              sortable
+                            />
+                          </div>
+                          {topSvc && (
+                            <>
+                              <SectionHeader title={`Cascade Map — ${topSvc.Service}`} />
+                              <div className="svc-table-tile" style={{ padding: 16, overflowX: "auto" }}>
+                                <svg width={Math.max(500, topSvc.directImpact * 44 + 200)} height={Math.max(80, topSvc.directImpact * 40 + 40)} style={{ display: "block" }}>
+                                  {(() => {
+                                    const callees = [...(calleeMap2.get(topSvc.Service) ?? new Set())].slice(0, 10);
+                                    const originY = Math.max(24, (callees.length * 40) / 2);
+                                    return (
+                                      <>
+                                        <rect x={8} y={originY - 14} width={150} height={28} rx={4} fill={RED} opacity={0.9} />
+                                        <text x={83} y={originY + 5} textAnchor="middle" fontSize={11} fontWeight="bold" fill="#fff">{topSvc.Service.length > 18 ? topSvc.Service.slice(0, 16) + "…" : topSvc.Service}</text>
+                                        {callees.map((callee, ci) => {
+                                          const cy = ci * 40 + 24;
+                                          const svcData = svcDetailsData.find((s: any) => s.Service === callee) as any;
+                                          const isHot = (svcData?.FailureRate ?? 0) >= 2 || svcData?.Status === "PROBLEM";
+                                          return (
+                                            <g key={callee}>
+                                              <line x1={158} y1={originY} x2={190} y2={cy} stroke="rgba(255,255,255,0.2)" strokeWidth={1.5} />
+                                              <rect x={190} y={cy - 13} width={138} height={26} rx={4} fill={isHot ? "rgba(255,140,66,0.3)" : "rgba(255,255,255,0.07)"} stroke={isHot ? ORANGE : "rgba(255,255,255,0.15)"} />
+                                              <text x={259} y={cy + 4} textAnchor="middle" fontSize={10} fill={isHot ? ORANGE : "rgba(255,255,255,0.75)"}>{callee.length > 18 ? callee.slice(0, 16) + "…" : callee}</text>
+                                            </g>
+                                          );
+                                        })}
+                                        {topSvc.directImpact > 10 && <text x={8} y={callees.length * 40 + 40} fontSize={10} fill="rgba(255,255,255,0.35)">+{topSvc.directImpact - 10} more direct callees not shown</text>}
+                                      </>
+                                    );
+                                  })()}
+                                </svg>
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </Flex>
+                  </Tab>
+                );
+              }
 
               default: return null;
             }

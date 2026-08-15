@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 
 // ─── Linear regression forecast ───
-function linearForecast(data: number[], forecastBuckets: number): number[] {
+export function linearForecast(data: number[], forecastBuckets: number): number[] {
   const n = data.length;
   if (n < 2) return new Array(forecastBuckets).fill(data[0] ?? 0);
   let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
@@ -21,7 +21,7 @@ function linearForecast(data: number[], forecastBuckets: number): number[] {
 }
 
 // ─── Holt-Winters (double exponential smoothing) ───
-function holtWintersForecast(data: number[], forecastBuckets: number, alpha = 0.3, beta = 0.1): number[] {
+export function holtWintersForecast(data: number[], forecastBuckets: number, alpha = 0.3, beta = 0.1): number[] {
   const n = data.length;
   if (n < 2) return new Array(forecastBuckets).fill(data[0] ?? 0);
   let level = data[0];
@@ -39,7 +39,7 @@ function holtWintersForecast(data: number[], forecastBuckets: number, alpha = 0.
 }
 
 // ─── Triple Exponential Smoothing (Holt-Winters Seasonal / Additive) ───
-function tripleExpSmoothingForecast(
+export function tripleExpSmoothingForecast(
   data: number[],
   forecastBuckets: number,
   seasonLength?: number,
@@ -84,7 +84,7 @@ function tripleExpSmoothingForecast(
 }
 
 // ─── Prophet-style forecast (piecewise linear trend + Fourier seasonality) ───
-function prophetForecast(data: number[], forecastBuckets: number): number[] {
+export function prophetForecast(data: number[], forecastBuckets: number): number[] {
   const n = data.length;
   if (n < 4) return linearForecast(data, forecastBuckets);
 
@@ -175,7 +175,7 @@ function fitFourierSeasonality(detrended: number[], totalLength: number): number
 }
 
 // ─── ARIMA(p, d, q) forecast ───
-function arimaForecast(data: number[], forecastBuckets: number, p = 5, d = 1, q = 2): number[] {
+export function arimaForecast(data: number[], forecastBuckets: number, p = 5, d = 1, q = 2): number[] {
   const n = data.length;
   if (n < p + d + 2) return linearForecast(data, forecastBuckets);
 
@@ -244,7 +244,7 @@ function arimaForecast(data: number[], forecastBuckets: number, p = 5, d = 1, q 
 }
 
 // ─── SARIMA(p, d, q)(P, D, Q, m) forecast ───
-function sarimaForecast(
+export function sarimaForecast(
   data: number[],
   forecastBuckets: number,
   p = 3, d = 1, q = 1,
@@ -502,7 +502,7 @@ function fitSeasonalMA(residuals: number[], order: number, season: number): numb
 }
 
 // ─── Confidence band (based on historical std dev) ───
-function confidenceBand(data: number[], forecast: number[]): { upper: number[]; lower: number[] } {
+export function confidenceBand(data: number[], forecast: number[]): { upper: number[]; lower: number[] } {
   const n = data.length;
   if (n < 2) return { upper: forecast, lower: forecast };
   const mean = data.reduce((a, b) => a + b, 0) / n;
@@ -525,7 +525,7 @@ export interface ForecastModalProps {
   onClose: () => void;
 }
 
-type ForecastMethod = "linear" | "holt-winters" | "triple-exp" | "prophet" | "arima" | "sarima";
+export type ForecastMethod = "linear" | "holt-winters" | "triple-exp" | "prophet" | "arima" | "sarima";
 
 function formatAxisValue(v: number): string {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;

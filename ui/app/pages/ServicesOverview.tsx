@@ -21,6 +21,7 @@ import { SettingIcon, HelpIcon, MaximizeIcon, MinimizeIcon, CompareIcon, XmarkIc
 import { useDql, useUserAppState, useSetUserAppState } from "@dynatrace-sdk/react-hooks";
 import { getEnvironmentUrl } from "@dynatrace-sdk/app-environment";
 import { documentsClient } from "@dynatrace-sdk/client-document";
+import { queryExecutionClient } from "@dynatrace-sdk/client-query";
 import appConfig from "../../../app.config.json";
 import { ServiceTopology } from "../components/ServiceTopology";
 import { BlastRadiusGraph } from "../components/BlastRadiusGraph";
@@ -37,6 +38,9 @@ import type { TF } from "../state/TimeframeContext";
 import { useTimelapse, TL_BUCKETS, TL_SPEEDS, TlBucket } from "../TimelapseContext";
 import { KpiCard, ForecastProvider } from "../components/KpiCard";
 import { ForecastModal } from "../components/ForecastModal";
+import { HotnessForecastPanel } from "../components/HotnessForecastPanel";
+import { PersonaPickerModal } from "../components/PersonaPickerModal";
+import type { PersonaDef } from "../components/PersonaPickerModal";
 import { CorrelationsContext, CorrelationsPanel } from "../components/CorrelationsPanel";
 import type { MetricEntry } from "../components/CorrelationsPanel";
 import { AnnotationProvider, AnnotationStrip } from "../components/AnnotationLayer";
@@ -193,9 +197,54 @@ const TAB_KEYS = [
 ] as const;
 
 const APP_VERSION = appConfig.app.version;
+
+async function runDqlQuery(query: string): Promise<any[]> {
+  const start = await queryExecutionClient.queryExecute({ body: { query, requestTimeoutMilliseconds: 60000, maxResultRecords: 10000 } });
+  if (start.state === "SUCCEEDED") return (start.result?.records ?? []) as any[];
+  const token = start.requestToken;
+  if (!token) return [];
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    const poll = await queryExecutionClient.queryPoll({ requestToken: token });
+    if (poll.state === "SUCCEEDED") return (poll.result?.records ?? []) as any[];
+    if (poll.state === "FAILED" || poll.state === "CANCELLED") return [];
+  }
+  return [];
+}
 type TabKey = typeof TAB_KEYS[number];
 const DEFAULT_TAB_VISIBILITY: Record<TabKey, boolean> =
   Object.fromEntries(TAB_KEYS.map(k => [k, true])) as Record<TabKey, boolean>;
+
+const SO_PERSONAS: PersonaDef[] = [
+  { id: "all",       label: "All",            icon: "👥", description: "Full access — every tab enabled",           tabSummary: "All tabs are visible." },
+  { id: "developer", label: "Developer",       icon: "💻", description: "Service metrics, performance & traces",    tabSummary: "Overview · Metrics · Performance · Dependencies & Impact · Detection & Analysis · Incidents & Changes · Failure Patterns" },
+  { id: "sre",       label: "SRE",             icon: "🔧", description: "Reliability, capacity & incident ops",    tabSummary: "Overview · Reliability · Performance · Detection & Analysis · Capacity & Sizing · Incidents & Changes · Incident Command · Team Reliability · Failure Patterns" },
+  { id: "manager",   label: "Manager",         icon: "📊", description: "Health, quality & team performance",      tabSummary: "Overview · Summary Details · Reliability · Quality · Team Reliability · Incidents & Changes" },
+  { id: "executive", label: "Executive",       icon: "🏢", description: "High-level service health overview",      tabSummary: "Overview · Summary Details" },
+  { id: "product",   label: "Product Manager", icon: "🎯", description: "Service quality & user-facing health",    tabSummary: "Overview · Summary Details · Quality" },
+  { id: "finops",    label: "FinOps",          icon: "💰", description: "Capacity, cloud waste & cost sizing",     tabSummary: "Overview · Summary Details · Capacity & Sizing · Cloud Waste" },
+];
+
+const SO_PERSONA_TABS: Record<string, Partial<Record<TabKey, boolean>>> = {
+  all:       {},
+  developer: { "Overview": true, "Summary Details": false, "Metrics": true, "Reliability": false, "Quality": false, "Performance": true, "Dependencies & Impact": true, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": true, "Team Reliability": false },
+  sre:       { "Overview": true, "Summary Details": false, "Metrics": false, "Reliability": true, "Quality": false, "Performance": true, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": true, "Capacity & Sizing": true, "Cloud Waste": false, "Incident Command": true, "Failure Patterns": true, "Team Reliability": true },
+  manager:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": true, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": true, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": true },
+  executive: { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
+  product:   { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": true, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": false, "Cloud Waste": false, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
+  finops:    { "Overview": true, "Summary Details": true, "Metrics": false, "Reliability": false, "Quality": false, "Performance": false, "Dependencies & Impact": false, "Incidents & Changes": false, "Detection & Analysis": false, "Capacity & Sizing": true, "Cloud Waste": true, "Incident Command": false, "Failure Patterns": false, "Team Reliability": false },
+};
+
+function getSoTabVisibility(personaId: string): Record<TabKey, boolean> {
+  if (personaId === "all") return { ...DEFAULT_TAB_VISIBILITY };
+  const partial = SO_PERSONA_TABS[personaId] ?? {};
+  return Object.fromEntries(TAB_KEYS.map(k => [k, partial[k] ?? false])) as Record<TabKey, boolean>;
+}
+
+const SO_WHATS_NEW = [
+  "📈 Predictive Hotness Forecasting — forecast future service stress with 6 AI-powered models",
+  "🎭 Persona Presets — role-based tab layouts; select your role to see only the tabs that matter to you",
+];
 const TAB_STATE_KEY = "svc-tab-visibility";
 const TAB_ORDER_STATE_KEY = "svc-tab-order";
 const DEFAULT_TAB_ORDER: TabKey[] = [...TAB_KEYS];
@@ -3934,6 +3983,22 @@ export const ServicesOverview = () => {
     window.addEventListener("mouseup", onUp);
   }, [hotnessAssistPos]);
 
+  // Hotness Forecast panel state
+  const [hotnessForecastOpen, setHotnessForecastOpen] = useState(false);
+  const [hotnessForecastPos, setHotnessForecastPos] = useState({ x: 200, y: 120 });
+  const hotnessForecastDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const startHotnessForecastDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    hotnessForecastDragRef.current = { startX: e.clientX, startY: e.clientY, origX: hotnessForecastPos.x, origY: hotnessForecastPos.y };
+    const onMove = (me: MouseEvent) => {
+      if (!hotnessForecastDragRef.current) return;
+      setHotnessForecastPos({ x: hotnessForecastDragRef.current.origX + me.clientX - hotnessForecastDragRef.current.startX, y: hotnessForecastDragRef.current.origY + me.clientY - hotnessForecastDragRef.current.startY });
+    };
+    const onUp = () => { hotnessForecastDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [hotnessForecastPos]);
+
   // Lazy-loading: track which tabs/sub-tabs have ever been activated.
   // Queries are gated on these sets so they fire once on first visit and
   // then keep their data alive (no NOOP swap on navigate-away).
@@ -4577,6 +4642,7 @@ export const ServicesOverview = () => {
 
   React.useEffect(() => { if (!tl.enabled) setTlDiagPanel(null); }, [tl.enabled]);
   React.useEffect(() => { if (!tl.enabled) setHotnessAssistOpen(false); }, [tl.enabled]);
+  React.useEffect(() => { if (!tl.enabled) setHotnessForecastOpen(false); }, [tl.enabled]);
 
   // ---------------------------------------------------------------------------
   // Hotness Assist — multi-signal timelapse infra metrics (always-on when TL enabled)
@@ -4727,6 +4793,30 @@ export const ServicesOverview = () => {
       tl.bucketMs,
     );
   }, [tl.enabled, hotnessAssistOpen, tlInfraBucketsEnriched, tlInfraBaselines, tl.hotness, tlProblems, tl.bucket, tl.bucketMs]);
+
+  const getHotnessForecastData = useCallback(async (days: number): Promise<number[]> => {
+    try {
+      const q = `timeseries {
+  requests = sum(dt.service.request.count, default:0),
+  errors = sum(dt.service.request.failure_count, default:0),
+  p90_us = percentile(dt.service.request.response_time, 90)
+}, from: now()-${days}d, interval:1d`;
+      const recs = await runDqlQuery(q);
+      if (!recs.length) return [];
+      const row = recs[0] as any;
+      const reqs: number[] = (row.requests ?? []).map(Number);
+      const errs: number[] = (row.errors ?? []).map(Number);
+      const p90s: number[] = (row.p90_us ?? []).map((v: number) => v / 1000);
+      const n = Math.min(reqs.length, errs.length, p90s.length);
+      if (n < 2) return [];
+      const errRates = reqs.slice(0, n).map((r, i) => r > 0 ? errs[i] / r * 100 : 0);
+      const mn = (a: number[]) => a.reduce((x, y) => x + y, 0) / Math.max(a.length, 1);
+      const sd = (a: number[], m: number) => Math.sqrt(a.reduce((x, v) => x + (v - m) ** 2, 0) / Math.max(a.length, 1)) || 1;
+      const eM = mn(errRates), eS = sd(errRates, eM);
+      const pM = mn(p90s.slice(0, n)), pS = sd(p90s.slice(0, n), pM);
+      return Array.from({ length: n }, (_, i) => Math.max(0, (errRates[i] - eM) / eS, (p90s[i] - pM) / pS));
+    } catch { return []; }
+  }, []);
 
   const svcEntityTypesResult = useDql({ query: serviceEntityTypesQuery() }, refetchOpts);
   const closedProblemsResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(tf) : NOOP_QUERY }, refetchOpts);
@@ -9527,6 +9617,19 @@ export const ServicesOverview = () => {
                       onClick={() => setHotnessAssistOpen(v => !v)}
                     />
                   )}
+                  {tl.hotness.length > 0 && (
+                    <button
+                      onClick={() => setHotnessForecastOpen(v => !v)}
+                      title="Hotness Forecast"
+                      style={{
+                        fontSize: 11, padding: "2px 8px", borderRadius: 5, cursor: "pointer",
+                        background: hotnessForecastOpen ? "rgba(69,137,255,0.25)" : "rgba(255,255,255,0.07)",
+                        color: hotnessForecastOpen ? "#4589FF" : "rgba(255,255,255,0.6)",
+                        border: `1px solid ${hotnessForecastOpen ? "rgba(69,137,255,0.5)" : "rgba(255,255,255,0.15)"}`,
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                      }}
+                    >📈 Forecast</button>
+                  )}
                 </div>
                 <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: stripH, cursor: "pointer" }}>
                   {bars.map((v, i) => {
@@ -9711,6 +9814,33 @@ export const ServicesOverview = () => {
         )
       )}
 
+      {hotnessForecastOpen && tl.hotness.length > 0 && (
+        <HotnessForecastPanel
+          hotness={tl.hotness}
+          bucketMs={tl.bucketMs}
+          pos={hotnessForecastPos}
+          onClose={() => setHotnessForecastOpen(false)}
+          onDragStart={startHotnessForecastDrag}
+          getRequeryData={getHotnessForecastData}
+        />
+      )}
+
+      <PersonaPickerModal
+        appName="Services Overview"
+        appVersion={APP_VERSION}
+        appDesc="Unified view of service health, infrastructure reliability, and performance across your entire service topology."
+        repoUrl="https://github.com/TechShady/services-overview-app"
+        whatsNew={SO_WHATS_NEW}
+        statePrefix="svc"
+        personas={SO_PERSONAS}
+        defaultPersonaId="all"
+        onApply={(personaId) => {
+          const vis = getSoTabVisibility(personaId);
+          setTabVisibility(vis);
+          saveAppState({ key: TAB_STATE_KEY, body: { value: JSON.stringify(vis) } });
+        }}
+      />
+
       {/* ---- Settings Modal ---- */}
       <Modal
         title="Settings"
@@ -9767,6 +9897,29 @@ export const ServicesOverview = () => {
             />
           </Flex>
           <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", marginTop: 8, paddingTop: 12 }}>
+            <Strong style={{ marginBottom: 4, display: "block" }}>Role Preset</Strong>
+            <Text style={{ marginBottom: 10, opacity: 0.6, fontSize: 12, display: "block" }}>Apply a preset to quickly show only the tabs relevant to your role. You can still adjust tabs individually below.</Text>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {SO_PERSONAS.map(p => (
+                <button
+                  key={p.id}
+                  title={p.tabSummary}
+                  onClick={() => {
+                    const vis = getSoTabVisibility(p.id);
+                    setTabVisibility(vis);
+                    saveAppState({ key: TAB_STATE_KEY, body: { value: JSON.stringify(vis) } });
+                  }}
+                  style={{
+                    fontSize: 12, padding: "5px 12px", borderRadius: 20, cursor: "pointer",
+                    background: "rgba(69,137,255,0.1)", color: "#a8c4ff",
+                    border: "1px solid rgba(69,137,255,0.3)",
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                  }}
+                >
+                  <span>{p.icon}</span> {p.label}
+                </button>
+              ))}
+            </div>
             <Strong style={{ marginBottom: 4, display: "block" }}>Tab Order &amp; Visibility</Strong>
             <Text style={{ marginBottom: 12, opacity: 0.6, fontSize: 12, display: "block" }}>
               Drag to reorder tabs and toggle visibility. Sub-tabs are shown indented below their parent. Changes are saved per user and persist across sessions.

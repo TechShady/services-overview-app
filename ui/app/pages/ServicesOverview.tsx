@@ -3264,6 +3264,8 @@ function ServiceSankeyTab({
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [focusLabel, setFocusLabel] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
+  const [expandPath, setExpandPath] = useState(false);
+  React.useEffect(() => { if (!focusNodeId) setExpandPath(false); }, [focusNodeId]);
 
   const tl = useTimelapse();
   const sankeyTlActive = tl.enabled && svcSankeySubTab === "flow";
@@ -3289,11 +3291,31 @@ function ServiceSankeyTab({
     if (!focusNodeId) return { connectedNodes: new Set<string>(), connectedLinks: new Set<number>() };
     const cn = new Set<string>([focusNodeId]);
     const cl = new Set<number>();
-    links.forEach((l, i) => {
-      if (l.source === focusNodeId || l.target === focusNodeId) { cl.add(i); cn.add(l.source); cn.add(l.target); }
-    });
+    if (!expandPath) {
+      links.forEach((l, i) => {
+        if (l.source === focusNodeId || l.target === focusNodeId) { cl.add(i); cn.add(l.source); cn.add(l.target); }
+      });
+    } else {
+      // Fan back: BFS upstream (follow links backwards to find all ancestors)
+      const upQ = [focusNodeId];
+      while (upQ.length) {
+        const cur = upQ.shift()!;
+        links.forEach((l, i) => {
+          if (l.target === cur && !cn.has(l.source)) { cn.add(l.source); cl.add(i); upQ.push(l.source); }
+        });
+      }
+      // Fan forward: BFS downstream (follow links forwards to find all descendants)
+      const downVisited = new Set<string>([focusNodeId]);
+      const downQ = [focusNodeId];
+      while (downQ.length) {
+        const cur = downQ.shift()!;
+        links.forEach((l, i) => {
+          if (l.source === cur && !downVisited.has(l.target)) { downVisited.add(l.target); cn.add(l.target); cl.add(i); downQ.push(l.target); }
+        });
+      }
+    }
     return { connectedNodes: cn, connectedLinks: cl };
-  }, [focusNodeId, links]);
+  }, [focusNodeId, links, expandPath]);
 
   const connectedLabelSet = useMemo(() => {
     if (!focusLabel) return new Set<string>();
@@ -3490,6 +3512,10 @@ function ServiceSankeyTab({
           <Flex alignItems="center" gap={8} style={{ marginBottom: 8 }}>
             <Strong style={{ fontSize: 13 }}>{focusNode.label}</Strong>
             <Text style={{ fontSize: 12, opacity: 0.5 }}>{fmtCount(focusNode.value)} traces</Text>
+            <button
+              onClick={() => setExpandPath(p => !p)}
+              style={{ background: expandPath ? "rgba(69,137,255,0.18)" : "none", border: `1px solid ${expandPath ? BLUE : "rgba(255,255,255,0.2)"}`, borderRadius: 4, color: expandPath ? BLUE : "rgba(255,255,255,0.6)", cursor: "pointer", padding: "2px 10px", fontSize: 12, fontWeight: expandPath ? 700 : 400, transition: "all 0.15s" }}
+            >⛓ {expandPath ? "Full Path" : "Expand Path"}</button>
             <button onClick={() => setFocusNodeId(null)} style={{ marginLeft: "auto", background: "none", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 4, color: "rgba(255,255,255,0.6)", cursor: "pointer", padding: "2px 8px", fontSize: 12 }}>Clear</button>
           </Flex>
           {focusInbound.length > 0 && <div style={{ marginBottom: 6 }}><Text style={{ fontSize: 12, opacity: 0.5 }}>Called by:</Text><Flex gap={6} flexWrap="wrap" style={{ marginTop: 2 }}>{focusInbound.sort((a, b) => b.value - a.value).slice(0, 6).map((l, i) => { const src = nodes.find(n => n.id === l.source)!; return <span key={i} style={{ fontSize: 12, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.06)" }}>{truncLabel(src.label, 30)} <Strong style={{ color: CYAN }}>{fmtCount(l.value)}</Strong></span>; })}</Flex></div>}

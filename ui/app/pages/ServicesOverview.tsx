@@ -4724,6 +4724,7 @@ export const ServicesOverview = () => {
   const depsTabEver = visitedTabs.has("Dependencies & Impact");
   const reliabilityTabEver = visitedTabs.has("Reliability");
   const detectionTabEver = visitedTabs.has("Detection & Analysis");
+  const incidentRadarTabEver = visitedTabs.has("Incident Radar");
   const performanceTabEver = visitedTabs.has("Performance");
   const perfApdexEver = performanceTabEver && visitedPerformanceSubTabs.has(1);
 
@@ -4731,8 +4732,8 @@ export const ServicesOverview = () => {
   const deploymentsPrevResult = useDql({ query: incidentsTabEver ? deploymentEventsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
   const changeImpactResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(tf) : NOOP_QUERY }, refetchOpts);
   const changeImpactPrevResult = useDql({ query: incidentsTabEver ? changeImpactMetricsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
-  // Also trigger topology fetch when Detection & Analysis is visited so Anti-Patterns doesn't need deps tab first
-  const dependenciesResult = useDql({ query: (depsTabEver || detectionTabEver) ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
+  // Also trigger topology fetch when Detection & Analysis or Incident Radar is visited so they don't need deps tab first
+  const dependenciesResult = useDql({ query: (depsTabEver || detectionTabEver || incidentRadarTabEver) ? serviceDependenciesQuery() : NOOP_QUERY }, refetchOpts);
   // N+1 and circular dep queries fire on Detection & Analysis visit (not deps tab)
   const n1QueryResult = useDql({ query: detectionTabEver ? n1QueryPatternQuery(tf) : NOOP_QUERY }, refetchOpts);
   const circularDepSpanResult = useDql({ query: detectionTabEver ? circularDependencySpanQuery(tf) : NOOP_QUERY }, refetchOpts);

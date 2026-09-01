@@ -45,6 +45,7 @@ import { CorrelationsContext, CorrelationsPanel } from "../components/Correlatio
 import type { MetricEntry } from "../components/CorrelationsPanel";
 import { AnnotationProvider, AnnotationStrip } from "../components/AnnotationLayer";
 import {
+  serviceListQuery,
   servicesHealthQuery,
   problemsQuery,
   serviceDetailsQuery,
@@ -4145,6 +4146,12 @@ export const ServicesOverview = () => {
   const serviceLinkCell = useMemo(() => makeServiceLinkCell(envUrl, tfFrom, tfTo), [envUrl, tfFrom, tfTo]);
   const smartscapeLinkCell = useMemo(() => makeSmartscapeLinkCell(envUrl, tfFrom, tfTo), [envUrl, tfFrom, tfTo]);
   const servicesLinkCell = useMemo(() => makeServicesLinkCell(envUrl, tfFrom, tfTo), [envUrl, tfFrom, tfTo]);
+  // Service filter state
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [svcFilterOpen, setSvcFilterOpen] = useState(false);
+  const [svcFilterSearch, setSvcFilterSearch] = useState("");
+  const svcFilterRef = useRef<HTMLDivElement>(null);
+
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
@@ -4592,6 +4599,41 @@ export const ServicesOverview = () => {
     setEditingRunbook(null);
   };
 
+  // ─── Service list — always-on lightweight fetch for the filter dropdown ───
+  const serviceListResult = useDql({ query: serviceListQuery() });
+  const allServiceNames = useMemo<string[]>(() => {
+    const rec = serviceListResult.data?.records?.[0];
+    return (rec?.["distinctServiceNames"] as string[]) ?? [];
+  }, [serviceListResult.data]);
+
+  // Gate — nothing service-related loads until at least one service is selected
+  const servicesSelected = selectedServices.length > 0;
+
+  // Wildcard search helper: "*" becomes ".*", search is case-insensitive
+  const svcSearchRegex = useMemo(() => {
+    if (!svcFilterSearch) return null;
+    try {
+      const pattern = svcFilterSearch.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+      return new RegExp(pattern, "i");
+    } catch { return null; }
+  }, [svcFilterSearch]);
+  const filteredServiceNames = useMemo(() =>
+    svcSearchRegex ? allServiceNames.filter(n => svcSearchRegex.test(n)) : allServiceNames,
+    [allServiceNames, svcSearchRegex]
+  );
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!svcFilterOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (svcFilterRef.current && !svcFilterRef.current.contains(e.target as Node)) {
+        setSvcFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [svcFilterOpen]);
+
   // ─── Metric-Stream: auto-refresh queries on interval ───
   const [refreshIntervalMs, setRefreshIntervalMs] = useState<number>(0);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
@@ -4602,7 +4644,7 @@ export const ServicesOverview = () => {
   // --- Queries ---
 
   // Overview: Services Health
-  const healthResult = useDql({ query: visitedTabs.has("Overview") ? servicesHealthQuery(problemsLookbackHours) : NOOP_QUERY }, refetchOpts);
+  const healthResult = useDql({ query: servicesSelected && visitedTabs.has("Overview") ? servicesHealthQuery(problemsLookbackHours, selectedServices) : NOOP_QUERY }, refetchOpts);
   const honeycombData: HoneycombTileNumericData[] = useMemo(() => {
     if (!healthResult.data?.records) return [];
     return healthResult.data.records.map((r) => ({
@@ -4612,7 +4654,7 @@ export const ServicesOverview = () => {
   }, [healthResult.data]);
 
   // Overview: Problems
-  const problemsResult = useDql({ query: visitedTabs.has("Overview") ? problemsQuery() : NOOP_QUERY }, refetchOpts);
+  const problemsResult = useDql({ query: servicesSelected && visitedTabs.has("Overview") ? problemsQuery() : NOOP_QUERY }, refetchOpts);
   const problemsData = useMemo(() => {
     if (!problemsResult.data?.records) return [];
     return problemsResult.data.records.map((r) => ({
@@ -4629,7 +4671,7 @@ export const ServicesOverview = () => {
 
   // Service Details
   const svcDetailsResult = useDql({
-    query: serviceDetailsQuery(topN, problemsLookbackHours, tf),
+    query: servicesSelected ? serviceDetailsQuery(topN, problemsLookbackHours, tf, selectedServices) : NOOP_QUERY,
   }, refetchOpts);
   const svcDetailsData = useMemo(() => {
     if (!svcDetailsResult.data?.records) return [];
@@ -4650,9 +4692,9 @@ export const ServicesOverview = () => {
     }));
   }, [svcDetailsResult.data]);
 
-  // Previous-period Service Details (always-on — drives KPI trend arrows)
-  const svcDetailsPrevResult = useDql({ query: serviceDetailsQuery(topN, problemsLookbackHours, prevTf) }, refetchOpts);
-  const problemsPrevSummaryResult = useDql({ query: problemsPrevSummaryQuery(prevTf) }, refetchOpts);
+  // Previous-period Service Details — gated same as current period
+  const svcDetailsPrevResult = useDql({ query: servicesSelected ? serviceDetailsQuery(topN, problemsLookbackHours, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const problemsPrevSummaryResult = useDql({ query: servicesSelected ? problemsPrevSummaryQuery(prevTf) : NOOP_QUERY }, refetchOpts);
   const svcDetailsPrevData = useMemo(() => {
     if (!svcDetailsPrevResult.data?.records) return [];
     return svcDetailsPrevResult.data.records.map((r) => ({
@@ -4685,10 +4727,12 @@ export const ServicesOverview = () => {
 
   // Request Details — lazy: Summary Details > Request Details sub-tab (index 1)
   //  OR Performance > Endpoint Heatmap sub-tab (index 0) which reuses the same data.
+  //  OR Capacity & Sizing (What-If sub-tab uses reqDetailsData for Top Endpoints by Impact).
   const summaryRequestDetailsEver = visitedTabs.has("Summary Details") && visitedSummarySubTabs.has(1);
   const endpointHeatmapEver = visitedTabs.has("Performance") && visitedPerformanceSubTabs.has(0);
+  const capacityReqDetailsEver = visitedTabs.has("Capacity & Sizing");
   const reqDetailsResult = useDql({
-    query: (summaryRequestDetailsEver || endpointHeatmapEver) ? requestDetailsQuery(topN, tf) : NOOP_QUERY,
+    query: servicesSelected && (summaryRequestDetailsEver || endpointHeatmapEver || capacityReqDetailsEver) ? requestDetailsQuery(topN, tf, selectedServices) : NOOP_QUERY,
   }, refetchOpts);
   const reqDetailsData = useMemo(() => {
     if (!reqDetailsResult.data?.records) return [];
@@ -4708,16 +4752,17 @@ export const ServicesOverview = () => {
     }));
   }, [reqDetailsResult.data]);
 
-  // Service metric charts — lazy: Metrics tab
+  // Service metric charts — lazy: Metrics tab, or Capacity & Sizing (Traffic Patterns sub-tab uses reqTotalResult for hourly volume analysis).
   const metricsTabEver = visitedTabs.has("Metrics");
-  const reqTotalResult = useDql({ query: metricsTabEver ? requestsTotalQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const latP50Result = useDql({ query: metricsTabEver ? latencyP50Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const latP90Result = useDql({ query: metricsTabEver ? latencyP90Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const failedReqResult = useDql({ query: metricsTabEver ? failedRequestsQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const failRateResult = useDql({ query: metricsTabEver ? failureRateQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const http5xxResult = useDql({ query: metricsTabEver ? http5xxQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const http4xxResult = useDql({ query: metricsTabEver ? http4xxQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const statusCodeResult = useDql({ query: metricsTabEver ? requestsByStatusCodeQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const reqTotalEver = metricsTabEver || visitedTabs.has("Capacity & Sizing");
+  const reqTotalResult = useDql({ query: servicesSelected && reqTotalEver ? requestsTotalQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const latP50Result = useDql({ query: servicesSelected && metricsTabEver ? latencyP50Query(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const latP90Result = useDql({ query: servicesSelected && metricsTabEver ? latencyP90Query(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const failedReqResult = useDql({ query: servicesSelected && metricsTabEver ? failedRequestsQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const failRateResult = useDql({ query: servicesSelected && metricsTabEver ? failureRateQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const http5xxResult = useDql({ query: servicesSelected && metricsTabEver ? http5xxQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const http4xxResult = useDql({ query: servicesSelected && metricsTabEver ? http4xxQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const statusCodeResult = useDql({ query: servicesSelected && metricsTabEver ? requestsByStatusCodeQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
 
   // Process metric charts — lazy: Metrics tab
   const procCpuResult = useDql({ query: metricsTabEver ? processCpuQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
@@ -5034,7 +5079,7 @@ export const ServicesOverview = () => {
   const closedProblemsPrevResult = useDql({ query: reliabilityTabEver ? closedProblemsQuery(prevTf) : NOOP_QUERY }, refetchOpts);
   const anomalyCurrentResult = useDql({ query: detectionTabEver ? anomalyCurrentQuery(tf) : NOOP_QUERY }, refetchOpts);
   const anomalyBaselineResult = useDql({ query: detectionTabEver ? anomalyBaselineQuery(prevTf) : NOOP_QUERY }, refetchOpts);
-  const apdexResult = useDql({ query: perfApdexEver ? apdexQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
+  const apdexResult = useDql({ query: servicesSelected && perfApdexEver ? apdexQuery(tf, apdexT, selectedServices) : NOOP_QUERY }, refetchOpts);
 
   // Flame Graph — fires once sub-tab 2 has been visited and a service is selected
   const flameGraphResult = useDql({
@@ -5073,8 +5118,8 @@ export const ServicesOverview = () => {
 
   // Service Metrics — Percentile comparison mode (P75, P99 timeseries)
   const [percentileMode, setPercentileMode] = useState(false);
-  const latP75Result = useDql({ query: metricsTabEver && percentileMode ? latencyP75Query(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
-  const latP99TsResult = useDql({ query: metricsTabEver && percentileMode ? latencyP99TimeseriesQuery(chartTopN, tf) : NOOP_QUERY }, refetchOpts);
+  const latP75Result = useDql({ query: servicesSelected && metricsTabEver && percentileMode ? latencyP75Query(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const latP99TsResult = useDql({ query: servicesSelected && metricsTabEver && percentileMode ? latencyP99TimeseriesQuery(chartTopN, tf, selectedServices) : NOOP_QUERY }, refetchOpts);
   const [forecastMode, setForecastMode] = useState(false);
   const [forecastMetric, setForecastMetric] = useState<string>("requests");
 
@@ -5170,8 +5215,8 @@ export const ServicesOverview = () => {
   const changeImpactDetailedResult = useDql({ query: incidentsTabEver ? changeImpactDetailedQuery(tf) : NOOP_QUERY }, refetchOpts);
 
   // ─── Batch 5: Apdex — geo + cohort segmentation — lazy: Performance > Apdex (sub-tab 1) ───
-  const apdexGeoResult = useDql({ query: perfApdexEver ? apdexGeoQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
-  const apdexCohortResult = useDql({ query: perfApdexEver ? apdexCohortQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
+  const apdexGeoResult = useDql({ query: servicesSelected && perfApdexEver ? apdexGeoQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
+  const apdexCohortResult = useDql({ query: servicesSelected && perfApdexEver ? apdexCohortQuery(tf, apdexT) : NOOP_QUERY }, refetchOpts);
 
   // ─── Batch 6: Baselines — export, per-environment, violation streaks ───
   const [baselineEnvironment, setBaselineEnvironment] = useState<string>("prod");
@@ -5273,7 +5318,7 @@ export const ServicesOverview = () => {
   }, [ownershipResult.data]);
 
   // Request P99 baseline — lazy: Summary Details > Request Details (sub-tab 1)
-  const reqBaselineResult = useDql({ query: summaryRequestDetailsEver ? requestBaselineQuery(topN, prevTf) : NOOP_QUERY }, refetchOpts);
+  const reqBaselineResult = useDql({ query: servicesSelected && summaryRequestDetailsEver ? requestBaselineQuery(topN, prevTf) : NOOP_QUERY }, refetchOpts);
   const reqBaselineMap = useMemo(() => {
     const m = new Map<string, number>();
     reqBaselineResult.data?.records?.forEach((r: any) => {
@@ -5286,7 +5331,7 @@ export const ServicesOverview = () => {
   }, [reqBaselineResult.data]);
 
   // Request error category breakdown — lazy: Summary Details > Request Details (sub-tab 1)
-  const reqErrorBreakdownResult = useDql({ query: summaryRequestDetailsEver ? requestErrorBreakdownQuery(topN, tf) : NOOP_QUERY }, refetchOpts);
+  const reqErrorBreakdownResult = useDql({ query: servicesSelected && summaryRequestDetailsEver ? requestErrorBreakdownQuery(topN, tf) : NOOP_QUERY }, refetchOpts);
   const reqErrorBreakdownMap = useMemo(() => {
     const m = new Map<string, { "4xx": number; "5xx": number; timeout: number; other: number }>();
     reqErrorBreakdownResult.data?.records?.forEach((r: any) => {
@@ -5309,23 +5354,23 @@ export const ServicesOverview = () => {
   const metricsCompare = compareMode && metricsTabEver;
   const apdexCompare = compareMode && perfApdexEver;
   const scorecardCompare = compareMode && visitedTabs.has("Quality");
-  const reqTotalPrev = useDql({ query: metricsCompare ? requestsTotalPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const reqTotalPrevAlways = useDql({ query: metricsTabEver ? requestsTotalPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const latP50Prev = useDql({ query: metricsCompare ? latencyP50PrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const latP90Prev = useDql({ query: metricsCompare ? latencyP90PrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const failedReqPrev = useDql({ query: metricsCompare ? failedRequestsPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const failRatePrev = useDql({ query: metricsCompare ? failureRatePrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const http5xxPrev = useDql({ query: metricsCompare ? http5xxPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const http4xxPrev = useDql({ query: metricsCompare ? http4xxPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const statusCodePrev = useDql({ query: metricsCompare ? requestsByStatusCodePrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
+  const reqTotalPrev = useDql({ query: servicesSelected && metricsCompare ? requestsTotalPrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const reqTotalPrevAlways = useDql({ query: servicesSelected && reqTotalEver ? requestsTotalPrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const latP50Prev = useDql({ query: servicesSelected && metricsCompare ? latencyP50PrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const latP90Prev = useDql({ query: servicesSelected && metricsCompare ? latencyP90PrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const failedReqPrev = useDql({ query: servicesSelected && metricsCompare ? failedRequestsPrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const failRatePrev = useDql({ query: servicesSelected && metricsCompare ? failureRatePrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const http5xxPrev = useDql({ query: servicesSelected && metricsCompare ? http5xxPrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const http4xxPrev = useDql({ query: servicesSelected && metricsCompare ? http4xxPrevQuery(chartTopN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const statusCodePrev = useDql({ query: servicesSelected && metricsCompare ? requestsByStatusCodePrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const procCpuPrev = useDql({ query: metricsCompare ? processCpuPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const procMemPctPrev = useDql({ query: metricsCompare ? processMemoryPercentPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const procMemUsedPrev = useDql({ query: metricsCompare ? processMemoryUsedPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const procGcPrev = useDql({ query: metricsCompare ? processGcTimePrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const k8sCpuPrev = useDql({ query: metricsCompare ? k8sCpuPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
   const k8sMemPrev = useDql({ query: metricsCompare ? k8sMemoryPrevQuery(chartTopN, prevTf) : NOOP_QUERY }, refetchOpts);
-  const apdexPrevResult = useDql({ query: apdexCompare ? apdexPrevQuery(prevTf, apdexT) : NOOP_QUERY }, refetchOpts);
-  const scorecardPrevResult = useDql({ query: scorecardCompare ? scorecardPrevQuery(topN, prevTf) : NOOP_QUERY }, refetchOpts);
+  const apdexPrevResult = useDql({ query: servicesSelected && apdexCompare ? apdexPrevQuery(prevTf, apdexT, selectedServices) : NOOP_QUERY }, refetchOpts);
+  const scorecardPrevResult = useDql({ query: servicesSelected && scorecardCompare ? scorecardPrevQuery(topN, prevTf, selectedServices) : NOOP_QUERY }, refetchOpts);
 
   // Convert timeseries data for charts using Strato's built-in converter
   const toTs = (result: { data?: { records?: any; types?: any } | null }) =>
@@ -9663,6 +9708,106 @@ export const ServicesOverview = () => {
 
           {/* Right: Timeframe + controls */}
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {/* Service filter dropdown */}
+            <div ref={svcFilterRef} style={{ position: "relative" }}>
+              <Flex alignItems="center" gap={6}>
+                <Strong style={{ fontSize: 12 }}>Services</Strong>
+                <button
+                  onClick={() => setSvcFilterOpen(v => !v)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "4px 10px", borderRadius: 4, cursor: "pointer",
+                    border: "1px solid rgba(128,128,128,0.35)",
+                    background: servicesSelected ? "rgba(69,137,255,0.12)" : "transparent",
+                    color: "inherit", fontSize: 12, minWidth: 160,
+                    outline: svcFilterOpen ? "1px solid #4589FF" : "none",
+                  }}
+                >
+                  {servicesSelected
+                    ? <span style={{ color: "#4589FF", fontWeight: 600 }}>{selectedServices.length} selected</span>
+                    : <span style={{ opacity: 0.5 }}>Select services…</span>
+                  }
+                  <svg width="10" height="6" viewBox="0 0 10 6" style={{ marginLeft: "auto", opacity: 0.5, transform: svcFilterOpen ? "rotate(180deg)" : "none" }}>
+                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </Flex>
+              {svcFilterOpen && (
+                <div style={{
+                  position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+                  width: 320, background: "var(--dt-color-background-container, #1e2235)",
+                  border: "1px solid rgba(128,128,128,0.25)", borderRadius: 6,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)", overflow: "hidden",
+                }}>
+                  {/* Search */}
+                  <div style={{ padding: "8px 10px", borderBottom: "1px solid rgba(128,128,128,0.15)" }}>
+                    <input
+                      autoFocus
+                      placeholder="Filter services (wildcards: *)"
+                      value={svcFilterSearch}
+                      onChange={e => setSvcFilterSearch(e.target.value)}
+                      style={{
+                        width: "100%", boxSizing: "border-box",
+                        padding: "5px 8px", borderRadius: 4, fontSize: 12,
+                        border: "1px solid rgba(128,128,128,0.3)",
+                        background: "rgba(255,255,255,0.05)", color: "inherit",
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                  {/* Actions */}
+                  <div style={{ display: "flex", gap: 6, padding: "6px 10px", borderBottom: "1px solid rgba(128,128,128,0.15)" }}>
+                    <button
+                      onClick={() => setSelectedServices(filteredServiceNames)}
+                      style={{ flex: 1, fontSize: 11, padding: "3px 0", borderRadius: 3, border: "1px solid rgba(128,128,128,0.3)", background: "transparent", color: "inherit", cursor: "pointer" }}
+                    >
+                      Select all ({filteredServiceNames.length})
+                    </button>
+                    <button
+                      onClick={() => setSelectedServices([])}
+                      style={{ flex: 1, fontSize: 11, padding: "3px 0", borderRadius: 3, border: "1px solid rgba(128,128,128,0.3)", background: "transparent", color: "inherit", cursor: "pointer" }}
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                  {/* List */}
+                  <div style={{ maxHeight: 280, overflowY: "auto", padding: "4px 0" }}>
+                    {serviceListResult.isLoading ? (
+                      <div style={{ padding: "12px 10px", opacity: 0.5, fontSize: 12 }}>Loading services…</div>
+                    ) : filteredServiceNames.length === 0 ? (
+                      <div style={{ padding: "12px 10px", opacity: 0.5, fontSize: 12 }}>No matching services</div>
+                    ) : filteredServiceNames.map(name => {
+                      const checked = selectedServices.includes(name);
+                      return (
+                        <label key={name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}
+                          onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                          onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              setSelectedServices(prev =>
+                                checked ? prev.filter(n => n !== name) : [...prev, name]
+                              )
+                            }
+                            style={{ cursor: "pointer" }}
+                          />
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {/* Footer */}
+                  {selectedServices.length > 0 && (
+                    <div style={{ padding: "6px 10px", borderTop: "1px solid rgba(128,128,128,0.15)", fontSize: 11, opacity: 0.6 }}>
+                      {selectedServices.length} service{selectedServices.length !== 1 ? "s" : ""} selected
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Timeframe selector */}
             <Flex alignItems="center" gap={6}>
               <Strong style={{ fontSize: 12 }}>Timeframe</Strong>
@@ -11091,6 +11236,25 @@ export const ServicesOverview = () => {
 
       {/* ---- Main Content ---- */}
       <Flex flexDirection="column" padding={16} gap={16}>
+        {!servicesSelected ? (
+          <div style={{
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            minHeight: 320, gap: 16, opacity: 0.7,
+          }}>
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none" style={{ opacity: 0.4 }}>
+              <rect x="6" y="14" width="36" height="6" rx="3" fill="currentColor" />
+              <rect x="6" y="24" width="36" height="6" rx="3" fill="currentColor" />
+              <rect x="6" y="34" width="24" height="6" rx="3" fill="currentColor" />
+            </svg>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Select services to load data</div>
+              <div style={{ fontSize: 13, opacity: 0.65 }}>
+                Use the <strong>Services</strong> filter above to choose one or more services.<br />
+                Wildcard search is supported — try <code>*api*</code> or <code>checkout*</code>.
+              </div>
+            </div>
+          </div>
+        ) : (
         <AnnotationProvider>
         <AIInsightsContext.Provider value={{ open: aiOpen, close: () => setAiOpen(false) }}>
         <Tabs selectedIndex={activeTabIndex} onChange={(idx) => setActiveTabIndex(idx)}>
@@ -18235,6 +18399,7 @@ export const ServicesOverview = () => {
         </Tabs>
         </AIInsightsContext.Provider>
         </AnnotationProvider>
+        )}
       </Flex>
 
       {/* ---- Incident Radar Modal ---- */}

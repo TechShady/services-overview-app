@@ -13,6 +13,28 @@ import type { TF } from "./state/TimeframeContext";
 export type { TF } from "./state/TimeframeContext";
 
 // ---------------------------------------------------------------------------
+// Service name filter helpers — produce DQL filter lines for selected services
+// ---------------------------------------------------------------------------
+function svcNamesInList(names: string[]): string {
+  return names.map(n => `"${n.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(", ");
+}
+/** Filter on `service.name` field (used after timeseries + fieldsAdd service.name) */
+function svcNameFilter(names: string[]): string {
+  if (!names.length) return "";
+  return `\n| filter in(\`service.name\`, array(${svcNamesInList(names)}))`;
+}
+/** Filter on `entity.name` field (used in fetch dt.entity.service queries) */
+function svcEntityNameFilter(names: string[]): string {
+  if (!names.length) return "";
+  return `\n| filter in(entity.name, array(${svcNamesInList(names)}))`;
+}
+/** Filter on computed `Service` field (used after fieldsAdd Service = coalesce(entityName(...))) */
+function svcServiceFieldFilter(names: string[]): string {
+  if (!names.length) return "";
+  return `\n| filter in(Service, array(${svcNamesInList(names)}))`;
+}
+
+// ---------------------------------------------------------------------------
 // Service list for the dropdown filter
 // ---------------------------------------------------------------------------
 export function serviceListQuery(): string {
@@ -27,9 +49,9 @@ export function serviceListQuery(): string {
 // ---------------------------------------------------------------------------
 // Services Health — Honeycomb
 // ---------------------------------------------------------------------------
-export function servicesHealthQuery(problemsLookbackHours: number): string {
+export function servicesHealthQuery(problemsLookbackHours: number, serviceNames: string[] = []): string {
   return `fetch dt.entity.service
-| filter serviceType != "DATABASE_SERVICE"
+| filter serviceType != "DATABASE_SERVICE"${svcEntityNameFilter(serviceNames)}
 | lookup [
   fetch dt.davis.problems, from:now()-${problemsLookbackHours}h, to:now()
   | filter event.status == "ACTIVE"
@@ -92,7 +114,8 @@ export function problemsQuery(): string {
 export function serviceDetailsQuery(
   topN: number,
   problemsLookbackHours: number,
-  tf: TF
+  tf: TF,
+  serviceNames: string[] = []
 ): string {
   return `timeseries {
   latency_p50 = median(dt.service.request.response_time),
@@ -134,7 +157,7 @@ export function serviceDetailsQuery(
             \`5xx\` = arraySum(http5xx.http_5xx),
             \`4xx\` = arraySum(http4xx.http_4xx)
 | fieldsAdd FailureRate = (Failures / Requests) * 100
-| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcServiceFieldFilter(serviceNames)}
 | fields Status = if(Problems >= 0, "PROBLEM", else:"HEALTHY"),
          Service,
          dt.entity.service,
@@ -157,7 +180,7 @@ export function serviceDetailsQuery(
 // ---------------------------------------------------------------------------
 // Scorecard Previous Period (for compare)
 // ---------------------------------------------------------------------------
-export function scorecardPrevQuery(topN: number, tf: TF): string {
+export function scorecardPrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries {
   latency_p50 = median(dt.service.request.response_time),
   latency_p90 = percentile(dt.service.request.response_time, 90),
@@ -176,7 +199,7 @@ export function scorecardPrevQuery(topN: number, tf: TF): string {
             Failures = arraySum(errors),
             \`5xx\` = if(isNull(arraySum(http5xx.http_5xx)), 0, else:arraySum(http5xx.http_5xx))
 | fieldsAdd FailureRate = (Failures / Requests) * 100
-| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcServiceFieldFilter(serviceNames)}
 | fields Service, dt.entity.service, Requests, Latency_p50, Latency_p90, FailureRate, \`5xx\`
 | limit ${topN}`;
 }
@@ -184,7 +207,7 @@ export function scorecardPrevQuery(topN: number, tf: TF): string {
 // ---------------------------------------------------------------------------
 // Request Details Table
 // ---------------------------------------------------------------------------
-export function requestDetailsQuery(topN: number, tf: TF): string {
+export function requestDetailsQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
 | filter request.is_root_span == true AND isNotNull(endpoint.name)
 | fieldsAdd sampling.probability = (power(2, 56) - coalesce(sampling.threshold, 0)) * power(2, -56),
@@ -209,7 +232,7 @@ export function requestDetailsQuery(topN: number, tf: TF): string {
     endpoint.name,
     dt.system.sampling_ratio
   }
-| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcServiceFieldFilter(serviceNames)}
 | filter isNotNull(endpoint.name)
 | fields Service,
          Request = endpoint.name,
@@ -231,44 +254,44 @@ export function requestDetailsQuery(topN: number, tf: TF): string {
 // Service Metrics — Timeseries Charts
 // ---------------------------------------------------------------------------
 
-export function requestsTotalQuery(topN: number, tf: TF): string {
+export function requestsTotalQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries requests = sum(dt.service.request.count),
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, requests
 | sort arraySum(requests) desc
 | limit ${topN}`;
 }
 
-export function latencyP50Query(topN: number, tf: TF): string {
+export function latencyP50Query(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries latency_p50 = percentile(dt.service.request.response_time, 50),
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, latency_p50
 | sort arrayAvg(latency_p50) desc
 | limit ${topN}`;
 }
 
-export function latencyP90Query(topN: number, tf: TF): string {
+export function latencyP90Query(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries latency_p90 = percentile(dt.service.request.response_time, 90),
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, latency_p90
 | sort arrayAvg(latency_p90) desc
 | limit ${topN}`;
 }
 
-export function failedRequestsQuery(topN: number, tf: TF): string {
+export function failedRequestsQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries errors = sum(dt.service.request.failure_count, default:0),
            nonempty:true,
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
 }
 
-export function failureRateQuery(topN: number, tf: TF): string {
+export function failureRateQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries total = sum(dt.service.request.count, default:0),
            nonempty:true,
            by:{dt.entity.service}, ${tfClause(tf)}
@@ -278,29 +301,29 @@ export function failureRateQuery(topN: number, tf: TF): string {
            by:{dt.entity.service}, ${tfClause(tf)}
 ], sourceField:dt.entity.service, lookupField:dt.entity.service, prefix:"request."
 | fieldsAdd failureRate = request.errors[] / total[] * 100
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, failureRate
 | sort arrayAvg(failureRate) desc
 | limit ${topN}`;
 }
 
-export function http5xxQuery(topN: number, tf: TF): string {
+export function http5xxQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries errors = sum(dt.service.request.count, default:0),
            nonempty:true,
            by:{dt.entity.service}, ${tfClause(tf)},
            filter: http.response.status_code >= 500 and http.response.status_code <= 599
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
 }
 
-export function http4xxQuery(topN: number, tf: TF): string {
+export function http4xxQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries errors = sum(dt.service.request.count, default:0),
            nonempty:true,
            by:{dt.entity.service}, ${tfClause(tf)},
            filter: http.response.status_code >= 400 and http.response.status_code <= 499
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, errors
 | sort arraySum(errors) desc
 | limit ${topN}`;
@@ -548,17 +571,17 @@ export function changeImpactMetricsQuery(tf: TF): string {
 }
 
 // Apdex — per-service satisfaction breakdown from spans
-export function apdexQuery(tf: TF, thresholdMs: number): string {
+export function apdexQuery(tf: TF, thresholdMs: number, serviceNames: string[] = []): string {
   const fourT = thresholdMs * 4;
   return `fetch spans, samplingRatio:1, scanLimitGBytes:50, ${tfClause(tf)}
 | filter isNotNull(dt.entity.service)
 | fieldsAdd Service = coalesce(entityName(dt.entity.service), toString(dt.entity.service)),
-  satisfaction = if(duration <= ${thresholdMs}ms, "satisfied", else: if(duration <= ${fourT}ms, "tolerating", else: "frustrated"))
+  satisfaction = if(duration <= ${thresholdMs}ms, "satisfied", else: if(duration <= ${fourT}ms, "tolerating", else: "frustrated"))${svcServiceFieldFilter(serviceNames)}
 | summarize count = count(), by:{Service, dt.entity.service, satisfaction}`;
 }
 
-export function apdexPrevQuery(tf: TF, thresholdMs: number): string {
-  return apdexQuery(tf, thresholdMs);
+export function apdexPrevQuery(tf: TF, thresholdMs: number, serviceNames: string[] = []): string {
+  return apdexQuery(tf, thresholdMs, serviceNames);
 }
 
 // ---------------------------------------------------------------------------
@@ -638,36 +661,36 @@ export function anomalyBaselineQuery(tf: TF): string {
 // caller is responsible for passing the previous-period TF (typically
 // computed from `previousPeriod()` in TimeframeContext).
 // ---------------------------------------------------------------------------
-export function requestsTotalPrevQuery(topN: number, tf: TF): string {
-  return requestsTotalQuery(topN, tf);
+export function requestsTotalPrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return requestsTotalQuery(topN, tf, serviceNames);
 }
 
-export function latencyP90PrevQuery(topN: number, tf: TF): string {
-  return latencyP90Query(topN, tf);
+export function latencyP90PrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return latencyP90Query(topN, tf, serviceNames);
 }
 
-export function failureRatePrevQuery(topN: number, tf: TF): string {
-  return failureRateQuery(topN, tf);
+export function failureRatePrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return failureRateQuery(topN, tf, serviceNames);
 }
 
-export function http5xxPrevQuery(topN: number, tf: TF): string {
-  return http5xxQuery(topN, tf);
+export function http5xxPrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return http5xxQuery(topN, tf, serviceNames);
 }
 
-export function latencyP50PrevQuery(topN: number, tf: TF): string {
-  return latencyP50Query(topN, tf);
+export function latencyP50PrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return latencyP50Query(topN, tf, serviceNames);
 }
 
-export function failedRequestsPrevQuery(topN: number, tf: TF): string {
-  return failedRequestsQuery(topN, tf);
+export function failedRequestsPrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return failedRequestsQuery(topN, tf, serviceNames);
 }
 
 export function requestsByStatusCodePrevQuery(topN: number, tf: TF): string {
   return requestsByStatusCodeQuery(topN, tf);
 }
 
-export function http4xxPrevQuery(topN: number, tf: TF): string {
-  return http4xxQuery(topN, tf);
+export function http4xxPrevQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
+  return http4xxQuery(topN, tf, serviceNames);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,19 +715,19 @@ export function processGcTimePrevQuery(topN: number, tf: TF): string {
 // ---------------------------------------------------------------------------
 // Service Metrics — Percentile Comparison (P75 + P99)
 // ---------------------------------------------------------------------------
-export function latencyP75Query(topN: number, tf: TF): string {
+export function latencyP75Query(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries latency_p75 = percentile(dt.service.request.response_time, 75),
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, latency_p75
 | sort arrayAvg(latency_p75) desc
 | limit ${topN}`;
 }
 
-export function latencyP99TimeseriesQuery(topN: number, tf: TF): string {
+export function latencyP99TimeseriesQuery(topN: number, tf: TF, serviceNames: string[] = []): string {
   return `timeseries latency_p99 = percentile(dt.service.request.response_time, 99),
            by:{dt.entity.service}, ${tfClause(tf)}
-| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))
+| fieldsAdd service.name = coalesce(entityName(dt.entity.service), toString(dt.entity.service))${svcNameFilter(serviceNames)}
 | fields timeframe, interval, service.name, dt.entity.service, latency_p99
 | sort arrayAvg(latency_p99) desc
 | limit ${topN}`;

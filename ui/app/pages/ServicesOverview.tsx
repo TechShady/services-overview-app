@@ -1219,15 +1219,22 @@ interface InfraBaselines {
 
 interface HotnessAssistInfraData {
   totalBuckets: number;
+  analyzedCount: number;
   hotBuckets: number;
   criticalBuckets: number;
   problemStormBuckets: number;
   worstIdx: number;
+  worst2Idx: number;
   bestIdx: number;
+  best2Idx: number;
   worstBucket: InfraBucketData;
+  worst2Bucket: InfraBucketData;
   bestBucket: InfraBucketData;
+  best2Bucket: InfraBucketData;
   worstZ: number;
+  worst2Z: number;
   bestZ: number;
+  best2Z: number;
   worstDriver: string;
   worstDriverColor: string;
   baselines: InfraBaselines;
@@ -1248,19 +1255,26 @@ function analyzeInfraHotness(
   bucketMs: number,
 ): HotnessAssistInfraData {
   const n = buckets.length;
-  const hotBuckets = hotness.filter(z => z >= 0.75).length;
-  const criticalBuckets = hotness.filter(z => z >= 2.5).length;
+  const usableHotness = hotness.length > 1 ? hotness.slice(0, -1) : hotness;
+  const usableBuckets = buckets.length > 1 ? buckets.slice(0, -1) : buckets;
+  const analyzedCount = usableHotness.length;
+  const hotBuckets = usableHotness.filter(z => z >= 0.75).length;
+  const criticalBuckets = usableHotness.filter(z => z >= 2.5).length;
 
-  let worstIdx = 0, bestIdx = 0;
-  hotness.forEach((z, i) => {
-    if (z > (hotness[worstIdx] ?? 0)) worstIdx = i;
-    if (z < (hotness[bestIdx] ?? 0)) bestIdx = i;
-  });
+  const ranked = usableHotness.map((z, i) => ({ z, i })).sort((a, b) => b.z - a.z);
+  const worstIdx  = ranked[0]?.i ?? 0;
+  const worst2Idx = ranked.length > 1 ? (ranked[1]?.i ?? worstIdx) : worstIdx;
+  const bestIdx   = ranked[ranked.length - 1]?.i ?? 0;
+  const best2Idx  = ranked.length > 1 ? (ranked[ranked.length - 2]?.i ?? bestIdx) : bestIdx;
 
-  const worstBucket = buckets[worstIdx];
-  const bestBucket = buckets[bestIdx];
-  const worstZ = hotness[worstIdx] ?? 0;
-  const bestZ = hotness[bestIdx] ?? 0;
+  const worstBucket  = usableBuckets[worstIdx];
+  const worst2Bucket = usableBuckets[worst2Idx];
+  const bestBucket   = usableBuckets[bestIdx];
+  const best2Bucket  = usableBuckets[best2Idx];
+  const worstZ  = usableHotness[worstIdx] ?? 0;
+  const worst2Z = usableHotness[worst2Idx] ?? 0;
+  const bestZ   = usableHotness[bestIdx] ?? 0;
+  const best2Z  = usableHotness[best2Idx] ?? 0;
 
   const { meanErrRate, stdErrRate, meanP90, stdP90, meanReqs, stdReqs, meanProbs, stdProbs, meanCpu, stdCpu, meanMem, stdMem } = baselines;
 
@@ -1295,7 +1309,7 @@ function analyzeInfraHotness(
     p.startMs < worstToMs && (p.endMs === null || p.endMs > worstFromMs)
   ).map(p => ({ title: p.title, displayId: p.displayId }));
 
-  const problemStormBuckets = hotness.filter((z, i) => z >= 0.75 && (buckets[i]?.problemCount ?? 0) > 0).length;
+  const problemStormBuckets = usableHotness.filter((z, i) => z >= 0.75 && (usableBuckets[i]?.problemCount ?? 0) > 0).length;
 
   const insights: InsightItem[] = [];
   const recommendations: RecommendationItem[] = [];
@@ -1381,38 +1395,47 @@ function analyzeInfraHotness(
   recommendations.push({ impact: "low", text: `Configure SLO targets in Reliability > SLO & Error Budget: error rate ≤ ${Math.max(0.1, bestBucket.errorRate * 1.1).toFixed(1)}% and P90 latency ≤ ${(bestBucket.p90LatencyMs * 1.1).toFixed(0)}ms, based on the best-window metrics from bucket ${bestIdx + 1}.` });
 
   // Sustained hotness
-  if (hotBuckets >= Math.ceil(n * 0.3) && hotBuckets > 2) {
-    insights.push({ severity: "warning", icon: "⏳", text: `${hotBuckets}/${n} buckets (${(hotBuckets / n * 100).toFixed(0)}%) showed elevated signals — sustained pressure, not a brief spike. Review resource allocation and auto-scaling headroom.` });
+  if (hotBuckets >= Math.ceil(analyzedCount * 0.3) && hotBuckets > 2) {
+    insights.push({ severity: "warning", icon: "⏳", text: `${hotBuckets}/${analyzedCount} buckets (${(hotBuckets / analyzedCount * 100).toFixed(0)}%) showed elevated signals — sustained pressure, not a brief spike. Review resource allocation and auto-scaling headroom.` });
     recommendations.push({ impact: "medium", text: `Sustained hotness across ${hotBuckets} buckets suggests a structural capacity shortfall. Use Capacity & Sizing > What-If simulator to model the effect of scaling up workloads by 25–50% and project the SLO impact.` });
   }
 
   // Recovery pattern
-  if (worstIdx < n - 3 && hotness.slice(worstIdx + 1, worstIdx + 3).every(z => z < worstZ * 0.5) && worstZ >= 1.5) {
+  if (worstIdx < analyzedCount - 3 && usableHotness.slice(worstIdx + 1, worstIdx + 3).every(z => z < worstZ * 0.5) && worstZ >= 1.5) {
     insights.push({ severity: "info", icon: "🔄", text: `Metrics recovered within 2 ${bucketLabel} buckets after peak — suggests a transient event (deployment restart, GC pause, or brief traffic burst) rather than a persistent infrastructure failure.` });
   }
 
-  const hotPct = (hotBuckets / n * 100).toFixed(0);
+  const hotPct = (hotBuckets / analyzedCount * 100).toFixed(0);
   const summary = [
-    `Analyzed ${n} ${bucketLabel} buckets.`,
+    `Analyzed ${analyzedCount} of ${n} ${bucketLabel} buckets (last bucket excluded as incomplete).`,
     hotBuckets > 0
       ? `${hotBuckets} bucket${hotBuckets > 1 ? "s" : ""} (${hotPct}%) elevated${criticalBuckets > 0 ? `, ${criticalBuckets} critical` : ""}.`
       : "All buckets within normal range.",
     `Peak at bucket ${worstIdx + 1} (${worstBucket.bucket}): ${worstDriver} — ${worstBucket.errorRate.toFixed(1)}% error rate, ${worstBucket.p90LatencyMs.toFixed(0)}ms P90, ${haFmtN(worstBucket.requests)} req.`,
+    worst2Idx !== worstIdx ? `Second worst at bucket ${worst2Idx + 1} (${worst2Bucket.bucket}): ${worst2Bucket.errorRate.toFixed(1)}% error rate, ${worst2Bucket.p90LatencyMs.toFixed(0)}ms P90.` : "",
     activeProblemsAtWorst.length > 0 ? `${activeProblemsAtWorst.length} Davis problem${activeProblemsAtWorst.length > 1 ? "s" : ""} active at peak.` : "",
     `Best window: bucket ${bestIdx + 1} — ${bestBucket.errorRate.toFixed(1)}% error rate, ${bestBucket.p90LatencyMs.toFixed(0)}ms P90.`,
+    best2Idx !== bestIdx ? `Second best: bucket ${best2Idx + 1} — ${best2Bucket.errorRate.toFixed(1)}% error rate, ${best2Bucket.p90LatencyMs.toFixed(0)}ms P90.` : "",
   ].filter(Boolean).join(" ");
 
   return {
     totalBuckets: n,
+    analyzedCount,
     hotBuckets,
     criticalBuckets,
     problemStormBuckets,
     worstIdx,
+    worst2Idx,
     bestIdx,
+    best2Idx,
     worstBucket,
+    worst2Bucket,
     bestBucket,
+    best2Bucket,
     worstZ,
+    worst2Z,
     bestZ,
+    best2Z,
     worstDriver,
     worstDriverColor,
     baselines,
@@ -1488,10 +1511,15 @@ function HotnessAssistPanel({
       const col = v >= 2.5 ? "#FF3D9A" : v >= 1.5 ? "#FF832B" : v >= 0.75 ? "#FFB800" : "#4589FF";
       const x = 10 + i * barW;
       const y = svgH - 8 - hh;
-      const isWorst = i === data.worstIdx; const isBest = i === data.bestIdx;
+      const isW1 = i === data.worstIdx;
+      const isW2 = i === data.worst2Idx && data.worst2Idx !== data.worstIdx;
+      const isB1 = i === data.bestIdx;
+      const isB2 = i === data.best2Idx && data.best2Idx !== data.bestIdx && i !== data.worstIdx;
       return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(barW - 1).toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}" rx="1" opacity="${i === currentIdx ? "1" : "0.75"}"/>`
-        + (isWorst ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#FF3D9A" font-size="9" font-weight="700">▼</text>` : "")
-        + (isBest ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#00A36C" font-size="9" font-weight="700">▲</text>` : "");
+        + (isW1 ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#FF3D9A" font-size="8" font-weight="700">W1</text>` : "")
+        + (isW2 ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#FF9EC6" font-size="8" font-weight="700">W2</text>` : "")
+        + (isB1 && !isW1 ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#00A36C" font-size="8" font-weight="700">B1</text>` : "")
+        + (isB2 && !isW2 ? `<text x="${(x + barW / 2).toFixed(1)}" y="10" text-anchor="middle" fill="#7FDFB0" font-size="8" font-weight="700">B2</text>` : "");
     }).join("");
     const threshLines = [{ z: 0.75, col: "#FFB800" }, { z: 1.5, col: "#FF832B" }, { z: 2.5, col: "#FF3D9A" }].map(({ z, col }) => {
       const y = (svgH - 8 - Math.min(1, z / maxZ) * (svgH - 16)).toFixed(1);
@@ -1586,13 +1614,14 @@ function HotnessAssistPanel({
 
 <h2>Hotness Timeline (${bucketLabel} buckets)</h2>
 <div style="margin-bottom:20px;background:rgba(128,128,128,0.05);padding:8px;border-radius:6px">${timelineSvg}
-<div style="display:flex;gap:12px;margin-top:4px;font-size:10px;opacity:0.5"><span>▼ worst · ▲ best</span><span style="margin-left:auto"><span style="color:#4589FF">■</span> normal <span style="color:#FFB800">■</span> elevated <span style="color:#FF832B">■</span> hot <span style="color:#FF3D9A">■</span> critical</span></div></div>
+<div style="display:flex;gap:12px;margin-top:4px;font-size:10px;opacity:0.5"><span><span style="color:#FF3D9A">W1</span> <span style="color:#FF9EC6">W2</span> worst · <span style="color:#00A36C">B1</span> <span style="color:#7FDFB0">B2</span> best</span><span style="margin-left:auto"><span style="color:#4589FF">■</span> normal <span style="color:#FFB800">■</span> elevated <span style="color:#FF832B">■</span> hot <span style="color:#FF3D9A">■</span> critical</span></div></div>
 
-<h2>Worst vs Best Bucket</h2>
-<div class="card-grid" style="margin-bottom:20px">
+<h2>Peak Buckets</h2>
+<div class="card-grid" style="margin-bottom:20px;grid-template-columns:${data.worst2Idx !== data.worstIdx || data.best2Idx !== data.bestIdx ? "repeat(2,1fr)" : "1fr 1fr"}">
   <div class="card card-worst">
-    <div class="card-title" style="color:${data.worstDriverColor}">🔥 Bucket ${data.worstIdx + 1} — <span class="driver-badge" style="background:${data.worstDriverColor}22;color:${data.worstDriverColor}">${data.worstDriver}</span></div>
+    <div class="card-title" style="color:${data.worstDriverColor}">🔥 Worst #1 — Bucket ${data.worstIdx + 1}</div>
     <div class="card-ts">${w.bucket}</div>
+    <div class="driver-badge" style="background:${data.worstDriverColor}22;color:${data.worstDriverColor};margin-bottom:8px">${data.worstDriver}</div>
     <table><tbody>
       <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${w.errorRate.toFixed(1)}%</td></tr>
       <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${w.p90LatencyMs.toFixed(0)}ms</td></tr>
@@ -1604,8 +1633,22 @@ function HotnessAssistPanel({
     </tbody></table>
     <div class="z-badge" style="background:${data.worstDriverColor}18;color:${data.worstDriverColor}">Hotness Z = ${data.worstZ.toFixed(2)}</div>
   </div>
+  ${data.worst2Idx !== data.worstIdx ? `<div class="card" style="background:rgba(255,158,198,0.06);border:1px solid rgba(255,158,198,0.2)">
+    <div class="card-title" style="color:#FF9EC6">🔥 Worst #2 — Bucket ${data.worst2Idx + 1}</div>
+    <div class="card-ts">${data.worst2Bucket.bucket}</div>
+    <table><tbody>
+      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.errorRate.toFixed(1)}%</td></tr>
+      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.p90LatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.avgLatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(data.worst2Bucket.requests)}</td></tr>
+      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.problemCount}</td></tr>
+      ${data.worst2Bucket.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.cpuPct.toFixed(1)}%</td></tr>` : ""}
+      ${data.worst2Bucket.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.memPct.toFixed(1)}%</td></tr>` : ""}
+    </tbody></table>
+    <div class="z-badge" style="background:rgba(255,158,198,0.1);color:#FF9EC6">Hotness Z = ${data.worst2Z.toFixed(2)}</div>
+  </div>` : ""}
   <div class="card card-best">
-    <div class="card-title" style="color:#00A36C">✅ Bucket ${data.bestIdx + 1} — Best Window</div>
+    <div class="card-title" style="color:#00A36C">✅ Best #1 — Bucket ${data.bestIdx + 1}</div>
     <div class="card-ts">${b.bucket}</div>
     <table><tbody>
       <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.errorRate.toFixed(1)}%</td></tr>
@@ -1618,18 +1661,76 @@ function HotnessAssistPanel({
     </tbody></table>
     <div class="z-badge" style="background:rgba(0,163,108,0.1);color:#00A36C">Hotness Z = ${data.bestZ.toFixed(2)}</div>
   </div>
+  ${data.best2Idx !== data.bestIdx ? `<div class="card" style="background:rgba(127,223,176,0.05);border:1px solid rgba(127,223,176,0.2)">
+    <div class="card-title" style="color:#7FDFB0">✅ Best #2 — Bucket ${data.best2Idx + 1}</div>
+    <div class="card-ts">${data.best2Bucket.bucket}</div>
+    <table><tbody>
+      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.errorRate.toFixed(1)}%</td></tr>
+      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.p90LatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.avgLatencyMs.toFixed(0)}ms</td></tr>
+      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(data.best2Bucket.requests)}</td></tr>
+      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${data.best2Bucket.problemCount}</td></tr>
+      ${data.best2Bucket.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.cpuPct.toFixed(1)}%</td></tr>` : ""}
+      ${data.best2Bucket.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.memPct.toFixed(1)}%</td></tr>` : ""}
+    </tbody></table>
+    <div class="z-badge" style="background:rgba(127,223,176,0.08);color:#7FDFB0">Hotness Z = ${data.best2Z.toFixed(2)}</div>
+  </div>` : ""}
 </div>
 
 <h2>Signal Z-Scores at Peak (Bucket ${data.worstIdx + 1})</h2>
 <table style="margin-bottom:20px"><thead><tr><th>Signal</th><th>Z-Score</th><th>Intensity</th></tr></thead><tbody>${zRows}</tbody></table>
 
-<h2>Best vs Worst Delta</h2>
+<h2>What&apos;s Different — Worst vs Best</h2>
 <table style="margin-bottom:20px">
-  <thead><tr><th>Metric</th><th>Best</th><th>Worst</th><th>Gap</th></tr></thead>
+  <thead><tr><th>Metric</th><th>Best #1</th><th>Worst #1</th><th>Gap</th></tr></thead>
   <tbody>
     ${deltaRows.map(r => metricTableRow(r.label, r.best, r.worst, r.gap, r.bad)).join("")}
   </tbody>
 </table>
+
+${data.worst2Idx !== data.worstIdx ? `<h2>Common Bad Signals — Worst #1 vs Worst #2</h2>
+<table style="margin-bottom:20px">
+  <thead><tr><th>Metric</th><th>Worst #1</th><th>Worst #2</th><th>Pattern</th></tr></thead>
+  <tbody>
+    ${((): string => {
+      const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
+      const w2 = data.worst2Bucket;
+      const badRows: Array<{ label: string; v1: string; v2: string; pattern: string; bothBad: boolean }> = [
+        { label: "Error Rate", v1: `${w.errorRate.toFixed(1)}%`, v2: `${w2.errorRate.toFixed(1)}%`, pattern: w.errorRate > meanErrRate && w2.errorRate > meanErrRate ? "Both elevated" : "Mixed", bothBad: w.errorRate > meanErrRate && w2.errorRate > meanErrRate },
+        { label: "P90 Latency", v1: `${w.p90LatencyMs.toFixed(0)}ms`, v2: `${w2.p90LatencyMs.toFixed(0)}ms`, pattern: w.p90LatencyMs > meanP90 && w2.p90LatencyMs > meanP90 ? "Both elevated" : "Mixed", bothBad: w.p90LatencyMs > meanP90 && w2.p90LatencyMs > meanP90 },
+        { label: "Requests", v1: haFmtN(w.requests), v2: haFmtN(w2.requests), pattern: w.requests > meanReqs && w2.requests > meanReqs ? "Both elevated" : "Mixed", bothBad: w.requests > meanReqs && w2.requests > meanReqs },
+        { label: "Problems", v1: String(w.problemCount), v2: String(w2.problemCount), pattern: w.problemCount > meanProbs && w2.problemCount > meanProbs ? "Both elevated" : "Mixed", bothBad: w.problemCount > meanProbs && w2.problemCount > meanProbs },
+        ...(w.cpuPct > 0 || w2.cpuPct > 0 ? [{ label: "CPU", v1: `${w.cpuPct.toFixed(1)}%`, v2: `${w2.cpuPct.toFixed(1)}%`, pattern: w.cpuPct > meanCpu && w2.cpuPct > meanCpu ? "Both elevated" : "Mixed", bothBad: w.cpuPct > meanCpu && w2.cpuPct > meanCpu }] : []),
+        ...(w.memPct > 0 || w2.memPct > 0 ? [{ label: "Memory", v1: `${w.memPct.toFixed(1)}%`, v2: `${w2.memPct.toFixed(1)}%`, pattern: w.memPct > meanMem && w2.memPct > meanMem ? "Both elevated" : "Mixed", bothBad: w.memPct > meanMem && w2.memPct > meanMem }] : []),
+      ];
+      return badRows.map(({ label, v1, v2, pattern, bothBad }) =>
+        `<tr><td>${label}</td><td style="font-family:monospace;color:${bothBad ? "#FF832B" : "#e0e0e0"}">${v1}</td><td style="font-family:monospace;color:${bothBad ? "#FF832B" : "#e0e0e0"}">${v2}</td><td style="font-weight:700;color:${bothBad ? "#FF832B" : "rgba(128,128,128,0.6)"}">${pattern}</td></tr>`
+      ).join("");
+    })()}
+  </tbody>
+</table>` : ""}
+
+${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best #2</h2>
+<table style="margin-bottom:20px">
+  <thead><tr><th>Metric</th><th>Best #1</th><th>Best #2</th><th>Pattern</th></tr></thead>
+  <tbody>
+    ${((): string => {
+      const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
+      const b2 = data.best2Bucket;
+      const goodRows: Array<{ label: string; v1: string; v2: string; pattern: string; bothGood: boolean }> = [
+        { label: "Error Rate", v1: `${b.errorRate.toFixed(1)}%`, v2: `${b2.errorRate.toFixed(1)}%`, pattern: b.errorRate <= meanErrRate && b2.errorRate <= meanErrRate ? "Both healthy" : "Mixed", bothGood: b.errorRate <= meanErrRate && b2.errorRate <= meanErrRate },
+        { label: "P90 Latency", v1: `${b.p90LatencyMs.toFixed(0)}ms`, v2: `${b2.p90LatencyMs.toFixed(0)}ms`, pattern: b.p90LatencyMs <= meanP90 && b2.p90LatencyMs <= meanP90 ? "Both healthy" : "Mixed", bothGood: b.p90LatencyMs <= meanP90 && b2.p90LatencyMs <= meanP90 },
+        { label: "Requests", v1: haFmtN(b.requests), v2: haFmtN(b2.requests), pattern: b.requests <= meanReqs && b2.requests <= meanReqs ? "Both healthy" : "Mixed", bothGood: b.requests <= meanReqs && b2.requests <= meanReqs },
+        { label: "Problems", v1: String(b.problemCount), v2: String(b2.problemCount), pattern: b.problemCount <= meanProbs && b2.problemCount <= meanProbs ? "Both healthy" : "Mixed", bothGood: b.problemCount <= meanProbs && b2.problemCount <= meanProbs },
+        ...(b.cpuPct > 0 || b2.cpuPct > 0 ? [{ label: "CPU", v1: `${b.cpuPct.toFixed(1)}%`, v2: `${b2.cpuPct.toFixed(1)}%`, pattern: b.cpuPct <= meanCpu && b2.cpuPct <= meanCpu ? "Both healthy" : "Mixed", bothGood: b.cpuPct <= meanCpu && b2.cpuPct <= meanCpu }] : []),
+        ...(b.memPct > 0 || b2.memPct > 0 ? [{ label: "Memory", v1: `${b.memPct.toFixed(1)}%`, v2: `${b2.memPct.toFixed(1)}%`, pattern: b.memPct <= meanMem && b2.memPct <= meanMem ? "Both healthy" : "Mixed", bothGood: b.memPct <= meanMem && b2.memPct <= meanMem }] : []),
+      ];
+      return goodRows.map(({ label, v1, v2, pattern, bothGood }) =>
+        `<tr><td>${label}</td><td style="font-family:monospace;color:${bothGood ? "#00A36C" : "#e0e0e0"}">${v1}</td><td style="font-family:monospace;color:${bothGood ? "#00A36C" : "#e0e0e0"}">${v2}</td><td style="font-weight:700;color:${bothGood ? "#00A36C" : "rgba(128,128,128,0.6)"}">${pattern}</td></tr>`
+      ).join("");
+    })()}
+  </tbody>
+</table>` : ""}
 
 <h2>Active Problems at Peak</h2>
 <div style="margin-bottom:20px">${problemsHtml}</div>
@@ -1716,20 +1817,24 @@ function HotnessAssistPanel({
                   const norm = Math.min(1, v / maxZ);
                   const color = hotnessColor(v);
                   const h = Math.max(3, norm * (stripH - 8));
-                  const isWorst = i === data.worstIdx;
-                  const isBest = i === data.bestIdx && data.bestIdx !== data.worstIdx;
+                  const isW1 = i === data.worstIdx;
+                  const isW2 = i === data.worst2Idx && data.worst2Idx !== data.worstIdx;
+                  const isB1 = i === data.bestIdx;
+                  const isB2 = i === data.best2Idx && data.best2Idx !== data.bestIdx && i !== data.worstIdx;
                   const isCurrent = i === currentIdx;
                   return (
                     <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "flex-end", height: "100%", position: "relative" }}>
-                      {isWorst && <div style={{ position: "absolute", top: 0, fontSize: 8, color: TL_HOT_HIGH, fontWeight: 700 }}>▼</div>}
-                      {isBest && <div style={{ position: "absolute", top: 0, fontSize: 8, color: "#00A36C", fontWeight: 700 }}>▲</div>}
+                      {isW1 && <div style={{ position: "absolute", top: 0, fontSize: 7, color: TL_HOT_HIGH, fontWeight: 700, lineHeight: 1 }}>W1</div>}
+                      {isW2 && <div style={{ position: "absolute", top: 0, fontSize: 7, color: "#FF9EC6", fontWeight: 700, lineHeight: 1 }}>W2</div>}
+                      {isB1 && !isW1 && <div style={{ position: "absolute", top: 0, fontSize: 7, color: "#00A36C", fontWeight: 700, lineHeight: 1 }}>B1</div>}
+                      {isB2 && !isW2 && <div style={{ position: "absolute", top: 0, fontSize: 7, color: "#7FDFB0", fontWeight: 700, lineHeight: 1 }}>B2</div>}
                       <div style={{ width: "100%", height: h, background: color, opacity: isCurrent ? 1 : 0.7, borderRadius: 1, outline: isCurrent ? "1px solid rgba(255,255,255,0.8)" : "none", transition: "opacity 0.15s" }} title={`Bucket ${i + 1} · Z=${v.toFixed(2)}`} />
                     </div>
                   );
                 })}
               </div>
               <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 10, opacity: 0.5 }}>
-                <span>▼ worst · ▲ best</span>
+                <span><span style={{ color: TL_HOT_HIGH }}>W1</span> <span style={{ color: "#FF9EC6" }}>W2</span> worst · <span style={{ color: "#00A36C" }}>B1</span> <span style={{ color: "#7FDFB0" }}>B2</span> best</span>
                 <span style={{ marginLeft: "auto" }}>
                   <span style={{ color: TL_HOT_NONE }}>■</span> normal&nbsp;
                   <span style={{ color: TL_HOT_ELEV }}>■</span> elevated&nbsp;
@@ -1741,11 +1846,11 @@ function HotnessAssistPanel({
           );
         })()}
 
-        {/* Worst vs Best cards */}
+        {/* Worst #1, Worst #2, Best #1, Best #2 cards */}
         {(() => {
           blockOffset += 400;
           const cardStyle = (color: string): React.CSSProperties => ({
-            flex: 1, padding: "12px 14px", borderRadius: 8, background: `${color}08`, border: `1px solid ${color}25`,
+            flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 8, background: `${color}08`, border: `1px solid ${color}25`,
             opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms`,
           });
           const metricRow = (label: string, value: string, note?: string) => (
@@ -1754,15 +1859,21 @@ function HotnessAssistPanel({
               <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>{value}{note ? <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 4 }}>{note}</span> : null}</span>
             </div>
           );
+          const w2 = data.worst2Bucket;
+          const b2 = data.best2Bucket;
+          const showW2 = data.worst2Idx !== data.worstIdx;
+          const showB2 = data.best2Idx !== data.bestIdx;
           return (
             <div style={{ marginBottom: 16 }}>
-              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset - 200}ms` }}>Worst vs Best Bucket</div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset - 200}ms` }}>Peak Buckets</div>
+              <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 10 }}>
+                {/* Worst #1 */}
                 <div style={cardStyle(TL_HOT_HIGH)}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: data.worstDriverColor, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 14 }}>🔥</span> Bucket {data.worstIdx + 1} — {data.worstDriver}
+                    <span style={{ fontSize: 14 }}>🔥</span> Worst #1 — Bucket {data.worstIdx + 1}
                   </div>
-                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 8 }}>{w.bucket}</div>
+                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 6 }}>{w.bucket}</div>
+                  <div style={{ fontSize: 9, opacity: 0.6, marginBottom: 8, fontStyle: "italic" }}>{data.worstDriver}</div>
                   {metricRow("Error Rate", `${w.errorRate.toFixed(1)}%`)}
                   {metricRow("P90 Latency", `${w.p90LatencyMs.toFixed(0)}ms`)}
                   {metricRow("Avg Latency", `${w.avgLatencyMs.toFixed(0)}ms`)}
@@ -1774,11 +1885,31 @@ function HotnessAssistPanel({
                     Hotness Z = {data.worstZ.toFixed(2)}
                   </div>
                 </div>
+                {/* Worst #2 */}
+                {showW2 && (
+                  <div style={cardStyle("#FF9EC6")}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#FF9EC6", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 14 }}>🔥</span> Worst #2 — Bucket {data.worst2Idx + 1}
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{w2.bucket}</div>
+                    {metricRow("Error Rate", `${w2.errorRate.toFixed(1)}%`)}
+                    {metricRow("P90 Latency", `${w2.p90LatencyMs.toFixed(0)}ms`)}
+                    {metricRow("Avg Latency", `${w2.avgLatencyMs.toFixed(0)}ms`)}
+                    {metricRow("Requests", haFmtN(w2.requests))}
+                    {metricRow("Problems", String(w2.problemCount))}
+                    {w2.cpuPct > 0 && metricRow("CPU", `${w2.cpuPct.toFixed(1)}%`)}
+                    {w2.memPct > 0 && metricRow("Memory", `${w2.memPct.toFixed(1)}%`)}
+                    <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(255,158,198,0.12)", fontSize: 10, fontWeight: 700, color: "#FF9EC6", textAlign: "center" as const }}>
+                      Hotness Z = {data.worst2Z.toFixed(2)}
+                    </div>
+                  </div>
+                )}
+                {/* Best #1 */}
                 <div style={cardStyle("#00A36C")}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: "#00A36C", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 14 }}>✅</span> Bucket {data.bestIdx + 1} — Best Window
+                    <span style={{ fontSize: 14 }}>✅</span> Best #1 — Bucket {data.bestIdx + 1}
                   </div>
-                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 8 }}>{b.bucket}</div>
+                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{b.bucket}</div>
                   {metricRow("Error Rate", `${b.errorRate.toFixed(1)}%`)}
                   {metricRow("P90 Latency", `${b.p90LatencyMs.toFixed(0)}ms`)}
                   {metricRow("Avg Latency", `${b.avgLatencyMs.toFixed(0)}ms`)}
@@ -1790,6 +1921,25 @@ function HotnessAssistPanel({
                     Hotness Z = {data.bestZ.toFixed(2)}
                   </div>
                 </div>
+                {/* Best #2 */}
+                {showB2 && (
+                  <div style={cardStyle("#7FDFB0")}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#7FDFB0", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 14 }}>✅</span> Best #2 — Bucket {data.best2Idx + 1}
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{b2.bucket}</div>
+                    {metricRow("Error Rate", `${b2.errorRate.toFixed(1)}%`)}
+                    {metricRow("P90 Latency", `${b2.p90LatencyMs.toFixed(0)}ms`)}
+                    {metricRow("Avg Latency", `${b2.avgLatencyMs.toFixed(0)}ms`)}
+                    {metricRow("Requests", haFmtN(b2.requests))}
+                    {metricRow("Problems", String(b2.problemCount))}
+                    {b2.cpuPct > 0 && metricRow("CPU", `${b2.cpuPct.toFixed(1)}%`)}
+                    {b2.memPct > 0 && metricRow("Memory", `${b2.memPct.toFixed(1)}%`)}
+                    <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(127,223,176,0.08)", fontSize: 10, fontWeight: 700, color: "#7FDFB0", textAlign: "center" as const }}>
+                      Hotness Z = {data.best2Z.toFixed(2)}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -1832,16 +1982,16 @@ function HotnessAssistPanel({
           );
         })()}
 
-        {/* Delta gap table */}
+        {/* Delta gap table — Worst vs Best */}
         {(() => {
           blockOffset += 300;
           return (
             <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Best vs Worst Delta</div>
+              <div className="svc-ai-section-title">What&apos;s Different — Worst vs Best</div>
               <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
                 <thead>
                   <tr style={{ opacity: 0.5 }}>
-                    {["Metric", "Best", "Worst", "Gap"].map(h => (
+                    {["Metric", "Best #1", "Worst #1", "Gap"].map(h => (
                       <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
                     ))}
                   </tr>
@@ -1853,6 +2003,86 @@ function HotnessAssistPanel({
                       <td style={{ padding: "5px 8px", fontFamily: "monospace", color: "#00A36C" }}>{best}</td>
                       <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bad ? TL_HOT_WARM : "inherit" }}>{worst}</td>
                       <td style={{ padding: "5px 8px", fontFamily: "monospace", fontWeight: 700, color: bad ? TL_HOT_WARM : "inherit" }}>{gap}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+
+        {/* Common Bad Signals — Worst #1 vs Worst #2 */}
+        {data.worst2Idx !== data.worstIdx && (() => {
+          blockOffset += 200;
+          const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
+          const w2 = data.worst2Bucket;
+          type CompRow = { label: string; v1: string; v2: string; pattern: string; bothBad: boolean };
+          const compRows: CompRow[] = [
+            { label: "Error Rate", v1: `${w.errorRate.toFixed(1)}%`, v2: `${w2.errorRate.toFixed(1)}%`, pattern: w.errorRate > meanErrRate && w2.errorRate > meanErrRate ? "Both elevated" : "Mixed", bothBad: w.errorRate > meanErrRate && w2.errorRate > meanErrRate },
+            { label: "P90 Latency", v1: `${w.p90LatencyMs.toFixed(0)}ms`, v2: `${w2.p90LatencyMs.toFixed(0)}ms`, pattern: w.p90LatencyMs > meanP90 && w2.p90LatencyMs > meanP90 ? "Both elevated" : "Mixed", bothBad: w.p90LatencyMs > meanP90 && w2.p90LatencyMs > meanP90 },
+            { label: "Requests", v1: haFmtN(w.requests), v2: haFmtN(w2.requests), pattern: w.requests > meanReqs && w2.requests > meanReqs ? "Both elevated" : "Mixed", bothBad: w.requests > meanReqs && w2.requests > meanReqs },
+            { label: "Problems", v1: String(w.problemCount), v2: String(w2.problemCount), pattern: w.problemCount > meanProbs && w2.problemCount > meanProbs ? "Both elevated" : "Mixed", bothBad: w.problemCount > meanProbs && w2.problemCount > meanProbs },
+            ...(w.cpuPct > 0 || w2.cpuPct > 0 ? [{ label: "CPU", v1: `${w.cpuPct.toFixed(1)}%`, v2: `${w2.cpuPct.toFixed(1)}%`, pattern: w.cpuPct > meanCpu && w2.cpuPct > meanCpu ? "Both elevated" : "Mixed", bothBad: w.cpuPct > meanCpu && w2.cpuPct > meanCpu }] : []),
+            ...(w.memPct > 0 || w2.memPct > 0 ? [{ label: "Memory", v1: `${w.memPct.toFixed(1)}%`, v2: `${w2.memPct.toFixed(1)}%`, pattern: w.memPct > meanMem && w2.memPct > meanMem ? "Both elevated" : "Mixed", bothBad: w.memPct > meanMem && w2.memPct > meanMem }] : []),
+          ];
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Common Bad Signals — Worst #1 vs Worst #2</div>
+              <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+                <thead>
+                  <tr style={{ opacity: 0.5 }}>
+                    {["Metric", "Worst #1", "Worst #2", "Pattern"].map(h => (
+                      <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {compRows.map(({ label, v1, v2, pattern, bothBad }) => (
+                    <tr key={label} style={{ borderBottom: "1px solid rgba(128,128,128,0.08)" }}>
+                      <td style={{ padding: "5px 8px", opacity: 0.7 }}>{label}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bothBad ? TL_HOT_WARM : "inherit" }}>{v1}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bothBad ? TL_HOT_WARM : "inherit" }}>{v2}</td>
+                      <td style={{ padding: "5px 8px", fontWeight: 700, color: bothBad ? "#FF832B" : "rgba(128,128,128,0.6)", fontSize: 11 }}>{pattern}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+
+        {/* Common Good Signals — Best #1 vs Best #2 */}
+        {data.best2Idx !== data.bestIdx && (() => {
+          blockOffset += 200;
+          const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
+          const b2 = data.best2Bucket;
+          type GoodRow = { label: string; v1: string; v2: string; pattern: string; bothGood: boolean };
+          const goodRows: GoodRow[] = [
+            { label: "Error Rate", v1: `${b.errorRate.toFixed(1)}%`, v2: `${b2.errorRate.toFixed(1)}%`, pattern: b.errorRate <= meanErrRate && b2.errorRate <= meanErrRate ? "Both healthy" : "Mixed", bothGood: b.errorRate <= meanErrRate && b2.errorRate <= meanErrRate },
+            { label: "P90 Latency", v1: `${b.p90LatencyMs.toFixed(0)}ms`, v2: `${b2.p90LatencyMs.toFixed(0)}ms`, pattern: b.p90LatencyMs <= meanP90 && b2.p90LatencyMs <= meanP90 ? "Both healthy" : "Mixed", bothGood: b.p90LatencyMs <= meanP90 && b2.p90LatencyMs <= meanP90 },
+            { label: "Requests", v1: haFmtN(b.requests), v2: haFmtN(b2.requests), pattern: b.requests <= meanReqs && b2.requests <= meanReqs ? "Both healthy" : "Mixed", bothGood: b.requests <= meanReqs && b2.requests <= meanReqs },
+            { label: "Problems", v1: String(b.problemCount), v2: String(b2.problemCount), pattern: b.problemCount <= meanProbs && b2.problemCount <= meanProbs ? "Both healthy" : "Mixed", bothGood: b.problemCount <= meanProbs && b2.problemCount <= meanProbs },
+            ...(b.cpuPct > 0 || b2.cpuPct > 0 ? [{ label: "CPU", v1: `${b.cpuPct.toFixed(1)}%`, v2: `${b2.cpuPct.toFixed(1)}%`, pattern: b.cpuPct <= meanCpu && b2.cpuPct <= meanCpu ? "Both healthy" : "Mixed", bothGood: b.cpuPct <= meanCpu && b2.cpuPct <= meanCpu }] : []),
+            ...(b.memPct > 0 || b2.memPct > 0 ? [{ label: "Memory", v1: `${b.memPct.toFixed(1)}%`, v2: `${b2.memPct.toFixed(1)}%`, pattern: b.memPct <= meanMem && b2.memPct <= meanMem ? "Both healthy" : "Mixed", bothGood: b.memPct <= meanMem && b2.memPct <= meanMem }] : []),
+          ];
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Common Good Signals — Best #1 vs Best #2</div>
+              <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+                <thead>
+                  <tr style={{ opacity: 0.5 }}>
+                    {["Metric", "Best #1", "Best #2", "Pattern"].map(h => (
+                      <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {goodRows.map(({ label, v1, v2, pattern, bothGood }) => (
+                    <tr key={label} style={{ borderBottom: "1px solid rgba(128,128,128,0.08)" }}>
+                      <td style={{ padding: "5px 8px", opacity: 0.7 }}>{label}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bothGood ? "#00A36C" : "inherit" }}>{v1}</td>
+                      <td style={{ padding: "5px 8px", fontFamily: "monospace", color: bothGood ? "#00A36C" : "inherit" }}>{v2}</td>
+                      <td style={{ padding: "5px 8px", fontWeight: 700, color: bothGood ? "#00A36C" : "rgba(128,128,128,0.6)", fontSize: 11 }}>{pattern}</td>
                     </tr>
                   ))}
                 </tbody>

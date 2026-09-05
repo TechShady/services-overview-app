@@ -1,9 +1,9 @@
 {
   "$schema": "./.dt-app/app.config.schema.json",
-  "environmentUrl": "https://guu84124.apps.dynatrace.com",
+  "environmentUrl": "https://orf80966.apps.dynatrace.com",
   "app": {
     "name": "Services Overview",
-    "version": "0.39.11",
+    "version": "0.39.13",
     "description": "Not an official Dynatrace app https://github.com/TechShady/services-overview-app",
     "id": "my.services.overview.app",
     "scopes": [

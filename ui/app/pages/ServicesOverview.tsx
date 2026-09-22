@@ -1558,6 +1558,23 @@ function HotnessAssistPanel({
     { label: "Peak Mem", value: `${w.memPct.toFixed(1)}%`, sub: `avg ${data.baselines.meanMem.toFixed(1)}%`, color: w.memPct > data.baselines.meanMem * 1.3 + 10 ? TL_HOT_WARM : "#e0e0e0" },
   ];
 
+  const [soPanelW, setSoPanelW] = React.useState(480);
+  const [soPanelH, setSoPanelH] = React.useState(580);
+  const soResizeRef = React.useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
+  React.useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!soResizeRef.current) return;
+      const dx = e.clientX - soResizeRef.current.startX;
+      const dy = e.clientY - soResizeRef.current.startY;
+      setSoPanelW(Math.max(380, soResizeRef.current.startW + dx));
+      setSoPanelH(Math.max(420, soResizeRef.current.startH + dy));
+    };
+    const onUp = () => { soResizeRef.current = null; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, []);
+
   const deltaRows = [
     { label: "Error Rate", best: `${b.errorRate.toFixed(1)}%`, worst: `${w.errorRate.toFixed(1)}%`, gap: `+${(w.errorRate - b.errorRate).toFixed(1)}pp`, bad: w.errorRate > b.errorRate + 0.5 },
     { label: "P90 Latency", best: `${b.p90LatencyMs.toFixed(0)}ms`, worst: `${w.p90LatencyMs.toFixed(0)}ms`, gap: `+${(w.p90LatencyMs - b.p90LatencyMs).toFixed(0)}ms`, bad: w.p90LatencyMs > b.p90LatencyMs * 1.1 + 20 },
@@ -1834,7 +1851,7 @@ ${reportComparisonCards(
   return createPortal(
     <div
       className="svc-ha-panel"
-      style={{ left: pos.x, top: pos.y }}
+      style={{ left: pos.x, top: pos.y, width: soPanelW, height: soPanelH, maxHeight: "none" }}
     >
       {/* Header */}
       <div className="svc-ha-panel-header" onMouseDown={onDragStart}>
@@ -2176,6 +2193,19 @@ ${reportComparisonCards(
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(128,128,128,0.12)", fontSize: 10, opacity: 0.35, lineHeight: 1.5 }}>
           Hotness Assist · Rule-based analysis from span-derived error rate, P90 latency, request volume, and Davis problem signals.
         </div>
+      </div>
+      {/* Resize handle */}
+      <div
+        onMouseDown={e => {
+          e.stopPropagation();
+          soResizeRef.current = { startX: e.clientX, startY: e.clientY, startW: soPanelW, startH: soPanelH };
+        }}
+        style={{ position: "absolute", bottom: 0, right: 0, width: 18, height: 18, cursor: "nwse-resize", display: "flex", alignItems: "flex-end", justifyContent: "flex-end", padding: "3px", zIndex: 1 }}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" style={{ opacity: 0.3 }}>
+          <line x1="1" y1="9" x2="9" y2="1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="5" y1="9" x2="9" y2="5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
       </div>
     </div>,
     document.body

@@ -1247,6 +1247,11 @@ interface HotnessAssistInfraData {
   alertPattern: "deployment" | "load-induced" | "infrastructure" | "unknown";
   burstType: "chronic" | "sustained" | "transient" | "stable";
   maxConsecutiveHot: number;
+  episodeCount: number;
+  longestEpisodeBuckets: number;
+  avgRecoveryBuckets: number;
+  driftSlope: number;
+  driftLabel: "worsening" | "stable" | "improving";
 }
 
 // --- Analysis engine (pure, deterministic) ---
@@ -1426,6 +1431,42 @@ function analyzeInfraHotness(
     (latZ >= 1.0 || cpuZ >= 1.0 || memZ >= 1.0) && errZ < 0.5 ? "infrastructure" :
     "unknown";
 
+  // Spike episodes
+  const HOT_THRESH = 0.75;
+  const episodeList: { startIdx: number; endIdx: number; bucketCount: number }[] = [];
+  let inEp = false, epStart = 0;
+  for (let i = 0; i < usableHotness.length; i++) {
+    if (usableHotness[i] >= HOT_THRESH) {
+      if (!inEp) { inEp = true; epStart = i; }
+    } else if (inEp) {
+      episodeList.push({ startIdx: epStart, endIdx: i - 1, bucketCount: i - epStart });
+      inEp = false;
+    }
+  }
+  if (inEp) episodeList.push({ startIdx: epStart, endIdx: usableHotness.length - 1, bucketCount: usableHotness.length - epStart });
+  const episodeCount = episodeList.length;
+  const longestEpisodeBuckets = episodeList.reduce((m, ep) => Math.max(m, ep.bucketCount), 0);
+
+  // Recovery speed
+  const recoveryList = episodeList.map(ep => {
+    for (let i = ep.endIdx + 1; i < usableHotness.length; i++) {
+      if (usableHotness[i] < 0.3 || usableHotness[i] >= HOT_THRESH) return i - ep.endIdx;
+    }
+    return usableHotness.length - ep.endIdx;
+  });
+  const avgRecoveryBuckets = recoveryList.length > 0
+    ? Math.round(recoveryList.reduce((s, v) => s + v, 0) / recoveryList.length)
+    : 0;
+
+  // Drift trend
+  const dn = usableHotness.length;
+  const dSumX = (dn * (dn - 1)) / 2;
+  const dSumX2 = (dn * (dn - 1) * (2 * dn - 1)) / 6;
+  const dSumY = usableHotness.reduce((s: number, v: number) => s + v, 0);
+  const dSumXY = usableHotness.reduce((s: number, v: number, i: number) => s + i * v, 0);
+  const driftSlope = dn > 1 ? (dn * dSumXY - dSumX * dSumY) / (dn * dSumX2 - dSumX * dSumX) : 0;
+  const driftLabel: "worsening" | "stable" | "improving" = driftSlope > 0.02 ? "worsening" : driftSlope < -0.02 ? "improving" : "stable";
+
   const hotPct = (hotBuckets / analyzedCount * 100).toFixed(0);
   const summary = [
     `Analyzed ${analyzedCount} of ${n} ${bucketLabel} buckets (last bucket excluded as incomplete).`,
@@ -1468,6 +1509,11 @@ function analyzeInfraHotness(
     alertPattern,
     burstType,
     maxConsecutiveHot,
+    episodeCount,
+    longestEpisodeBuckets,
+    avgRecoveryBuckets,
+    driftSlope,
+    driftLabel,
   };
 }
 
@@ -1807,6 +1853,18 @@ ${reportComparisonCards(
         <button className="svc-ha-export-btn" onMouseDown={e => e.stopPropagation()} onClick={handleExportPdf} title="Export PDF report">
           ⬇ PDF
         </button>
+        <button
+          onMouseDown={e => e.stopPropagation()}
+          onClick={() => {
+            const rec0 = data.recommendations[0]?.text ?? "Investigate root cause.";
+            const text = `Services Overview detected a ${data.alertPattern}-pattern spike — ${data.episodeCount} episode${data.episodeCount !== 1 ? "s" : ""} (longest ${data.longestEpisodeBuckets} bucket${data.longestEpisodeBuckets !== 1 ? "s" : ""}, peak Z=${data.worstZ?.toFixed(1) ?? "?"}). Drift: ${data.driftLabel}. Avg recovery: ${data.avgRecoveryBuckets === 0 ? "n/a" : `${data.avgRecoveryBuckets} bucket${data.avgRecoveryBuckets !== 1 ? "s" : ""}`}. Recommendation: ${rec0}`;
+            navigator.clipboard.writeText(text).catch(() => {});
+          }}
+          title="Copy executive summary to clipboard"
+          style={{ background: "rgba(128,128,128,0.12)", border: "1px solid rgba(128,128,128,0.2)", color: "rgba(255,255,255,0.6)", cursor: "pointer", fontSize: 10, padding: "3px 8px", borderRadius: 4, fontWeight: 600 }}
+        >
+          📋
+        </button>
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16, opacity: 0.45, padding: "2px 6px", lineHeight: 1 }}>✕</button>
       </div>
 
@@ -1891,7 +1949,7 @@ ${reportComparisonCards(
           const burstLabel = data.burstType === "chronic" ? `Chronic (${data.maxConsecutiveHot} consecutive)` : data.burstType === "sustained" ? `Sustained (${data.maxConsecutiveHot} consecutive)` : data.burstType === "transient" ? `Transient (${data.maxConsecutiveHot} consecutive)` : "Stable";
           const burstSubLabel = data.burstType === "chronic" ? "Needs active remediation" : data.burstType === "sustained" ? "Likely needed intervention" : data.burstType === "transient" ? "Appears self-resolved" : "No elevated buckets";
           return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
               <div style={{ background: `${patternColor}12`, border: `1px solid ${patternColor}40`, borderRadius: 8, padding: "8px 12px" }}>
                 <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Pattern Analysis</div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: patternColor }}>{patternLabel}</div>
@@ -1901,6 +1959,35 @@ ${reportComparisonCards(
                 <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Spike Duration</div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: burstColor }}>{burstLabel}</div>
                 <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{burstSubLabel}</div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Spike Episodes + Recovery + Drift */}
+        {(() => {
+          blockOffset += 200;
+          const epColor = data.episodeCount === 0 ? "#10B981" : data.episodeCount === 1 ? "#FFF04D" : data.episodeCount <= 3 ? "#FF3D9A" : "#E00000";
+          const recLabel = data.episodeCount === 0 ? "N/A" : data.avgRecoveryBuckets <= 1 ? "Rapid" : data.avgRecoveryBuckets <= 3 ? "Fast" : data.avgRecoveryBuckets <= 6 ? "Moderate" : "Slow";
+          const recColor = data.episodeCount === 0 ? "#888" : data.avgRecoveryBuckets <= 1 ? "#10B981" : data.avgRecoveryBuckets <= 3 ? "#10B981" : data.avgRecoveryBuckets <= 6 ? "#FFF04D" : "#E00000";
+          const driftColor = data.driftLabel === "worsening" ? "#E00000" : data.driftLabel === "improving" ? "#10B981" : "#888";
+          const cs: React.CSSProperties = { flex: 1, borderRadius: 8, padding: "9px 11px", display: "flex", flexDirection: "column", gap: 2 };
+          return (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div style={{ ...cs, background: `${epColor}0d`, border: `1px solid ${epColor}30` }}>
+                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Spike Episodes</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: epColor }}>{data.episodeCount}</div>
+                <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "No hot buckets" : `Longest: ${data.longestEpisodeBuckets} bucket${data.longestEpisodeBuckets !== 1 ? "s" : ""}`}</div>
+              </div>
+              <div style={{ ...cs, background: `${recColor}0d`, border: `1px solid ${recColor}30` }}>
+                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Recovery Speed</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: recColor }}>{recLabel}</div>
+                <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "—" : `Avg ${data.avgRecoveryBuckets} bucket${data.avgRecoveryBuckets !== 1 ? "s" : ""} to baseline`}</div>
+              </div>
+              <div style={{ ...cs, background: `${driftColor}0d`, border: `1px solid ${driftColor}30` }}>
+                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Drift Trend</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: driftColor }}>{data.driftLabel.charAt(0).toUpperCase() + data.driftLabel.slice(1)}</div>
+                <div style={{ fontSize: 10, opacity: 0.6 }}>{`${data.driftSlope >= 0 ? "+" : ""}${data.driftSlope.toFixed(3)}Z/bucket`}</div>
               </div>
             </div>
           );

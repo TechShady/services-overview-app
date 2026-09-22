@@ -213,6 +213,8 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
   const [hover, setHover]               = React.useState<{ day: number; hour: number; value: number | null } | null>(null);
   const [filterLevel, setFilterLevel]   = React.useState<LevelKey | null>(null);
   const [showAnalysis, setShowAnalysis] = React.useState(false);
+  const [panelH, setPanelH]             = React.useState(520);
+  const soHmResizeRef = React.useRef<{ startY: number; startH: number } | null>(null);
 
   React.useEffect(() => {
     let active = true;
@@ -224,6 +226,18 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
     return () => { active = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  React.useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!soHmResizeRef.current) return;
+      const dy = e.clientY - soHmResizeRef.current.startY;
+      setPanelH(Math.max(350, soHmResizeRef.current.startH + dy));
+    };
+    const onUp = () => { soHmResizeRef.current = null; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, []);
+
   const grid     = React.useMemo(() => buildGrid(scores, bucketMs), [scores, bucketMs]);
   const analysis = React.useMemo(() => showAnalysis ? analyzeGrid(grid) : null, [grid, showAnalysis]);
 
@@ -234,7 +248,7 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
   const panelW = LEFT_PAD + 7 * (CELL_W + GAP) + 48;
 
   return createPortal(
-    <div className="svc-ha-panel" style={{ left: pos.x, top: pos.y, width: panelW, maxHeight: "90vh", zIndex: 602, fontFamily: "'Segoe UI',system-ui,sans-serif" }}>
+    <div className="svc-ha-panel" style={{ left: pos.x, top: pos.y, width: panelW, height: panelH, zIndex: 602, fontFamily: "'Segoe UI',system-ui,sans-serif" }}>
       <div className="svc-ha-panel-header" onMouseDown={onDragStart} style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 15 }}>📅</span>
         <div style={{ flex: 1 }}>
@@ -326,6 +340,18 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
             )}
           </>
         )}
+      </div>
+      <div
+        onMouseDown={e => {
+          e.stopPropagation();
+          soHmResizeRef.current = { startY: e.clientY, startH: panelH };
+        }}
+        style={{ position: "absolute", bottom: 0, right: 0, width: 18, height: 18, cursor: "ns-resize", display: "flex", alignItems: "flex-end", justifyContent: "flex-end", padding: "3px", zIndex: 1 }}
+      >
+        <svg width="10" height="6" viewBox="0 0 10 6" style={{ opacity: 0.3 }}>
+          <line x1="0" y1="2" x2="10" y2="2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
       </div>
     </div>,
     document.body

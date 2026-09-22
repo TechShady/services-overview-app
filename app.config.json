@@ -3,7 +3,7 @@
   "environmentUrl": "https://orf80966.apps.dynatrace.com",
   "app": {
     "name": "Services Overview",
-    "version": "0.39.13",
+    "version": "0.39.15",
     "description": "Not an official Dynatrace app https://github.com/TechShady/services-overview-app",
     "id": "my.services.overview.app",
     "scopes": [

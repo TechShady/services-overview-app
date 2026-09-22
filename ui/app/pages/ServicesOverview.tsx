@@ -39,6 +39,7 @@ import { useTimelapse, TL_BUCKETS, TL_SPEEDS, TlBucket } from "../TimelapseConte
 import { KpiCard, ForecastProvider } from "../components/KpiCard";
 import { ForecastModal } from "../components/ForecastModal";
 import { HotnessForecastPanel } from "../components/HotnessForecastPanel";
+import { HotnessCalendarPanel } from "../components/HotnessCalendarPanel";
 import { PersonaPickerModal } from "../components/PersonaPickerModal";
 import type { PersonaDef } from "../components/PersonaPickerModal";
 import { CorrelationsContext, CorrelationsPanel } from "../components/CorrelationsPanel";
@@ -1243,6 +1244,9 @@ interface HotnessAssistInfraData {
   insights: InsightItem[];
   recommendations: RecommendationItem[];
   activeProblemsAtWorst: Array<{ title: string; displayId: string }>;
+  alertPattern: "deployment" | "load-induced" | "infrastructure" | "unknown";
+  burstType: "chronic" | "sustained" | "transient" | "stable";
+  maxConsecutiveHot: number;
 }
 
 // --- Analysis engine (pure, deterministic) ---
@@ -1405,6 +1409,23 @@ function analyzeInfraHotness(
     insights.push({ severity: "info", icon: "🔄", text: `Metrics recovered within 2 ${bucketLabel} buckets after peak — suggests a transient event (deployment restart, GC pause, or brief traffic burst) rather than a persistent infrastructure failure.` });
   }
 
+  // Compute max consecutive hot buckets and burst type
+  let maxConsecutiveHot = 0;
+  let _currentStreak = 0;
+  for (const z of usableHotness) {
+    if (z >= 0.75) { _currentStreak++; maxConsecutiveHot = Math.max(maxConsecutiveHot, _currentStreak); }
+    else { _currentStreak = 0; }
+  }
+  const burstType: "chronic" | "sustained" | "transient" | "stable" =
+    hotBuckets === 0 ? "stable" : maxConsecutiveHot >= 4 ? "chronic" : maxConsecutiveHot >= 2 ? "sustained" : "transient";
+
+  // Compute alert pattern from z-scores
+  const alertPattern: "deployment" | "load-induced" | "infrastructure" | "unknown" =
+    errZ >= 1.0 && volZ >= 0.75 ? "load-induced" :
+    errZ >= 1.0 && volZ < 0.5 ? "deployment" :
+    (latZ >= 1.0 || cpuZ >= 1.0 || memZ >= 1.0) && errZ < 0.5 ? "infrastructure" :
+    "unknown";
+
   const hotPct = (hotBuckets / analyzedCount * 100).toFixed(0);
   const summary = [
     `Analyzed ${analyzedCount} of ${n} ${bucketLabel} buckets (last bucket excluded as incomplete).`,
@@ -1444,6 +1465,9 @@ function analyzeInfraHotness(
     insights,
     recommendations,
     activeProblemsAtWorst,
+    alertPattern,
+    burstType,
+    maxConsecutiveHot,
   };
 }
 
@@ -1498,6 +1522,34 @@ function HotnessAssistPanel({
     { label: "Hotness Z", best: b === w ? "—" : data.bestZ.toFixed(2), worst: worstZ.toFixed(2), gap: `+${(worstZ - data.bestZ).toFixed(2)}`, bad: worstZ > 1.5 },
   ];
 
+  const comparisonBucketCard = (label: string, bucketNumber: number, bucket: InfraBucketData, zScore: number, color: string) => (
+    <div style={{ minWidth: 0, padding: "11px 13px", borderRadius: 8, background: `${color}08`, border: `1px solid ${color}30` }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color, marginBottom: 3 }}>{label} · Bucket {bucketNumber}</div>
+      <div style={{ fontSize: 9, opacity: 0.45, fontFamily: "monospace", marginBottom: 8 }}>{bucket.bucket}</div>
+      {[
+        ["Error Rate", `${bucket.errorRate.toFixed(1)}%`],
+        ["P90 Latency", `${bucket.p90LatencyMs.toFixed(0)}ms`],
+        ["Avg Latency", `${bucket.avgLatencyMs.toFixed(0)}ms`],
+        ["Requests", haFmtN(bucket.requests)],
+        ["Problems", String(bucket.problemCount)],
+        ...(bucket.cpuPct > 0 ? [["CPU", `${bucket.cpuPct.toFixed(1)}%`]] : []),
+        ...(bucket.memPct > 0 ? [["Memory", `${bucket.memPct.toFixed(1)}%`]] : []),
+      ].map(([metric, value]) => (
+        <div key={metric} style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 3, fontSize: 11 }}>
+          <span style={{ opacity: 0.6 }}>{metric}</span><strong style={{ fontFamily: "monospace" }}>{value}</strong>
+        </div>
+      ))}
+      <div style={{ marginTop: 7, padding: "4px 7px", borderRadius: 5, background: `${color}15`, color, textAlign: "center", fontSize: 10, fontWeight: 700 }}>Hotness Z = {zScore.toFixed(2)}</div>
+    </div>
+  );
+
+  const comparisonCardSet = (title: string, left: React.ReactNode, right: React.ReactNode) => (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.55, marginBottom: 7, textTransform: "uppercase", letterSpacing: 0.4 }}>{title}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>{left}{right}</div>
+    </div>
+  );
+
   // ---------------------------------------------------------------------------
   // PDF Export — generates a self-contained HTML report, opens in new tab
   // ---------------------------------------------------------------------------
@@ -1530,6 +1582,23 @@ function HotnessAssistPanel({
     const metricTableRow = (label: string, best: string, worst: string, gap: string, bad: boolean) =>
       `<tr><td>${label}</td><td style="color:#00A36C;font-family:monospace">${best}</td><td style="color:${bad ? "#FF832B" : "#e0e0e0"};font-family:monospace">${worst}</td><td style="color:${bad ? "#FF832B" : "#e0e0e0"};font-family:monospace;font-weight:700">${gap}</td></tr>`;
 
+    const reportBucketCard = (label: string, bucketNumber: number, bucket: InfraBucketData, zScore: number, color: string) => `<div class="card" style="background:${color}0d;border:1px solid ${color}33">
+      <div class="card-title" style="color:${color}">${label} · Bucket ${bucketNumber}</div>
+      <div class="card-ts">${bucket.bucket}</div>
+      <table><tbody>
+        <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${bucket.errorRate.toFixed(1)}%</td></tr>
+        <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${bucket.p90LatencyMs.toFixed(0)}ms</td></tr>
+        <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${bucket.avgLatencyMs.toFixed(0)}ms</td></tr>
+        <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(bucket.requests)}</td></tr>
+        <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${bucket.problemCount}</td></tr>
+        ${bucket.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700">${bucket.cpuPct.toFixed(1)}%</td></tr>` : ""}
+        ${bucket.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700">${bucket.memPct.toFixed(1)}%</td></tr>` : ""}
+      </tbody></table>
+      <div class="z-badge" style="background:${color}18;color:${color}">Hotness Z = ${zScore.toFixed(2)}</div>
+    </div>`;
+
+    const reportComparisonCards = (left: string, right: string) => `<div class="card-grid" style="margin-bottom:12px">${left}${right}</div>`;
+
     const insightsHtml = data.insights.map(ins => {
       const bg = ins.severity === "critical" ? "rgba(194,25,48,0.1)" : ins.severity === "warning" ? "rgba(255,131,43,0.08)" : ins.severity === "good" ? "rgba(13,156,41,0.08)" : "rgba(69,137,255,0.08)";
       const border = ins.severity === "critical" ? "#C21930" : ins.severity === "warning" ? "#FF832B" : ins.severity === "good" ? "#0D9C29" : "#4589FF";
@@ -1545,19 +1614,6 @@ function HotnessAssistPanel({
     const problemsHtml = data.activeProblemsAtWorst.length > 0
       ? data.activeProblemsAtWorst.slice(0, 8).map(p => `<div style="display:flex;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(255,61,154,0.07);border:1px solid rgba(255,61,154,0.15);margin-bottom:4px"><span>🚨</span><span style="color:#FF3D9A;font-family:monospace;font-weight:700;flex-shrink:0">${p.displayId}</span><span style="font-size:12px;opacity:0.8">${p.title}</span></div>`).join("")
       : `<div style="opacity:0.5;font-size:13px">No Davis problems were active during the hottest bucket.</div>`;
-
-    const zRows = [
-      { label: "Error Rate", z: data.worstZScores.errZ },
-      { label: "P90 Latency", z: data.worstZScores.latZ },
-      { label: "Request Volume", z: data.worstZScores.volZ },
-      { label: "Problem Activity", z: data.worstZScores.probZ },
-      { label: "CPU Utilization", z: data.worstZScores.cpuZ },
-      { label: "Memory Utilization", z: data.worstZScores.memZ },
-    ].map(({ label, z }) => {
-      const col = Math.abs(z) >= 2.5 ? "#FF3D9A" : Math.abs(z) >= 1.5 ? "#FF832B" : Math.abs(z) >= 0.75 ? "#FFB800" : "#00A36C";
-      const barPct = Math.min(100, Math.abs(z) / 3 * 100).toFixed(1);
-      return `<tr><td>${label}</td><td style="color:${col};font-family:monospace;font-weight:700">${z >= 0 ? "+" : ""}${z.toFixed(2)}z</td><td style="width:200px"><div style="height:6px;background:rgba(128,128,128,0.15);border-radius:3px"><div style="height:100%;width:${barPct}%;background:${col};border-radius:3px"></div></div></td></tr>`;
-    }).join("");
 
     const generatedAt = new Date().toLocaleString();
 
@@ -1587,6 +1643,9 @@ function HotnessAssistPanel({
   .z-badge { display: inline-block; margin-top: 10px; padding: 4px 10px; border-radius: 5px; font-size: 11px; font-weight: 700; text-align: center; width: calc(100% - 20px); }
   .driver-badge { display: inline-block; margin-bottom: 6px; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
   .footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid rgba(128,128,128,0.15); font-size: 11px; opacity: 0.35; }
+  .page-break { page-break-before: always; }
+  .pat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .pat-card { border-radius: 8px; padding: 12px 14px; }
 </style></head>
 <body>
 <div class="toolbar no-print">
@@ -1616,81 +1675,50 @@ function HotnessAssistPanel({
 <div style="margin-bottom:20px;background:rgba(128,128,128,0.05);padding:8px;border-radius:6px">${timelineSvg}
 <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;opacity:0.5"><span><span style="color:#FF3D9A">W1</span> <span style="color:#FF9EC6">W2</span> worst · <span style="color:#00A36C">B1</span> <span style="color:#7FDFB0">B2</span> best</span><span style="margin-left:auto"><span style="color:#4589FF">■</span> normal <span style="color:#FFB800">■</span> elevated <span style="color:#FF832B">■</span> hot <span style="color:#FF3D9A">■</span> critical</span></div></div>
 
-<h2>Peak Buckets</h2>
-<div class="card-grid" style="margin-bottom:20px;grid-template-columns:${data.worst2Idx !== data.worstIdx || data.best2Idx !== data.bestIdx ? "repeat(2,1fr)" : "1fr 1fr"}">
-  <div class="card card-worst">
-    <div class="card-title" style="color:${data.worstDriverColor}">🔥 Worst #1 — Bucket ${data.worstIdx + 1}</div>
-    <div class="card-ts">${w.bucket}</div>
-    <div class="driver-badge" style="background:${data.worstDriverColor}22;color:${data.worstDriverColor};margin-bottom:8px">${data.worstDriver}</div>
-    <table><tbody>
-      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${w.errorRate.toFixed(1)}%</td></tr>
-      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${w.p90LatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${w.avgLatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(w.requests)}</td></tr>
-      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${w.problemCount}</td></tr>
-      ${w.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700">${w.cpuPct.toFixed(1)}%</td></tr>` : ""}
-      ${w.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700">${w.memPct.toFixed(1)}%</td></tr>` : ""}
-    </tbody></table>
-    <div class="z-badge" style="background:${data.worstDriverColor}18;color:${data.worstDriverColor}">Hotness Z = ${data.worstZ.toFixed(2)}</div>
+<h2>Pattern Analysis</h2>
+${((): string => {
+  const _TL_HOT_WARM = "#FF832B"; const _TL_HOT_ELEV = "#FFB800"; const _TL_HOT_HIGH = "#FF3D9A";
+  const patternColor = data.alertPattern === "deployment" ? _TL_HOT_WARM : data.alertPattern === "load-induced" ? _TL_HOT_ELEV : data.alertPattern === "infrastructure" ? "#FF832B" : "#888";
+  const patternLabel = data.alertPattern === "deployment" ? "Deployment Regression" : data.alertPattern === "load-induced" ? "Load-Induced Overload" : data.alertPattern === "infrastructure" ? "Infrastructure Issue" : "Pattern Unknown";
+  const patternSubLabel = data.alertPattern === "deployment" ? "Code / config change most likely" : data.alertPattern === "load-induced" ? "Infrastructure capacity limit hit" : data.alertPattern === "infrastructure" ? "CDN, network, or origin saturation" : "Insufficient signal for classification";
+  const burstColor = data.burstType === "chronic" ? _TL_HOT_HIGH : data.burstType === "sustained" ? _TL_HOT_WARM : data.burstType === "transient" ? _TL_HOT_ELEV : "#00A36C";
+  const burstLabel = data.burstType === "chronic" ? `Chronic (${data.maxConsecutiveHot} consecutive)` : data.burstType === "sustained" ? `Sustained (${data.maxConsecutiveHot} consecutive)` : data.burstType === "transient" ? `Transient (${data.maxConsecutiveHot} consecutive)` : "Stable";
+  const burstSubLabel = data.burstType === "chronic" ? "Needs active remediation" : data.burstType === "sustained" ? "Likely needed intervention" : data.burstType === "transient" ? "Appears self-resolved" : "No elevated buckets";
+  return `<div class="pat-grid">
+  <div class="pat-card" style="background:${patternColor}12;border:1px solid ${patternColor}40">
+    <div style="font-size:9px;opacity:0.55;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Pattern Analysis</div>
+    <div style="font-size:14px;font-weight:700;color:${patternColor}">${patternLabel}</div>
+    <div style="font-size:11px;opacity:0.55;margin-top:4px">${patternSubLabel}</div>
   </div>
-  ${data.worst2Idx !== data.worstIdx ? `<div class="card" style="background:rgba(255,158,198,0.06);border:1px solid rgba(255,158,198,0.2)">
-    <div class="card-title" style="color:#FF9EC6">🔥 Worst #2 — Bucket ${data.worst2Idx + 1}</div>
-    <div class="card-ts">${data.worst2Bucket.bucket}</div>
-    <table><tbody>
-      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.errorRate.toFixed(1)}%</td></tr>
-      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.p90LatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.avgLatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(data.worst2Bucket.requests)}</td></tr>
-      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.problemCount}</td></tr>
-      ${data.worst2Bucket.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.cpuPct.toFixed(1)}%</td></tr>` : ""}
-      ${data.worst2Bucket.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700">${data.worst2Bucket.memPct.toFixed(1)}%</td></tr>` : ""}
-    </tbody></table>
-    <div class="z-badge" style="background:rgba(255,158,198,0.1);color:#FF9EC6">Hotness Z = ${data.worst2Z.toFixed(2)}</div>
-  </div>` : ""}
-  <div class="card card-best">
-    <div class="card-title" style="color:#00A36C">✅ Best #1 — Bucket ${data.bestIdx + 1}</div>
-    <div class="card-ts">${b.bucket}</div>
-    <table><tbody>
-      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.errorRate.toFixed(1)}%</td></tr>
-      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.p90LatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.avgLatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(b.requests)}</td></tr>
-      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${b.problemCount}</td></tr>
-      ${b.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.cpuPct.toFixed(1)}%</td></tr>` : ""}
-      ${b.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700;color:#00A36C">${b.memPct.toFixed(1)}%</td></tr>` : ""}
-    </tbody></table>
-    <div class="z-badge" style="background:rgba(0,163,108,0.1);color:#00A36C">Hotness Z = ${data.bestZ.toFixed(2)}</div>
+  <div class="pat-card" style="background:${burstColor}12;border:1px solid ${burstColor}40">
+    <div style="font-size:9px;opacity:0.55;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Spike Duration</div>
+    <div style="font-size:14px;font-weight:700;color:${burstColor}">${burstLabel}</div>
+    <div style="font-size:11px;opacity:0.55;margin-top:4px">${burstSubLabel}</div>
   </div>
-  ${data.best2Idx !== data.bestIdx ? `<div class="card" style="background:rgba(127,223,176,0.05);border:1px solid rgba(127,223,176,0.2)">
-    <div class="card-title" style="color:#7FDFB0">✅ Best #2 — Bucket ${data.best2Idx + 1}</div>
-    <div class="card-ts">${data.best2Bucket.bucket}</div>
-    <table><tbody>
-      <tr><td style="opacity:0.6">Error Rate</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.errorRate.toFixed(1)}%</td></tr>
-      <tr><td style="opacity:0.6">P90 Latency</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.p90LatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Avg Latency</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.avgLatencyMs.toFixed(0)}ms</td></tr>
-      <tr><td style="opacity:0.6">Requests</td><td style="font-family:monospace;font-weight:700">${haFmtN(data.best2Bucket.requests)}</td></tr>
-      <tr><td style="opacity:0.6">Problems</td><td style="font-family:monospace;font-weight:700">${data.best2Bucket.problemCount}</td></tr>
-      ${data.best2Bucket.cpuPct > 0 ? `<tr><td style="opacity:0.6">CPU</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.cpuPct.toFixed(1)}%</td></tr>` : ""}
-      ${data.best2Bucket.memPct > 0 ? `<tr><td style="opacity:0.6">Memory</td><td style="font-family:monospace;font-weight:700;color:#7FDFB0">${data.best2Bucket.memPct.toFixed(1)}%</td></tr>` : ""}
-    </tbody></table>
-    <div class="z-badge" style="background:rgba(127,223,176,0.08);color:#7FDFB0">Hotness Z = ${data.best2Z.toFixed(2)}</div>
-  </div>` : ""}
-</div>
+</div>`;
+})()}
 
-<h2>Signal Z-Scores at Peak (Bucket ${data.worstIdx + 1})</h2>
-<table style="margin-bottom:20px"><thead><tr><th>Signal</th><th>Z-Score</th><th>Intensity</th></tr></thead><tbody>${zRows}</tbody></table>
-
-<h2>What&apos;s Different — Worst vs Best</h2>
+<div class="page-break"></div>
+<h2>What&apos;s Different — Worst #1 vs Best #1</h2>
+${reportComparisonCards(
+  reportBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, "#FF3D9A"),
+  reportBucketCard("B1 · Best #1", data.bestIdx + 1, b, data.bestZ, "#00A36C"),
+)}
 <table style="margin-bottom:20px">
-  <thead><tr><th>Metric</th><th>Best #1</th><th>Worst #1</th><th>Gap</th></tr></thead>
+  <thead><tr><th>Metric</th><th>B1</th><th>W1</th><th>Gap</th></tr></thead>
   <tbody>
     ${deltaRows.map(r => metricTableRow(r.label, r.best, r.worst, r.gap, r.bad)).join("")}
   </tbody>
 </table>
 
-${data.worst2Idx !== data.worstIdx ? `<h2>Common Bad Signals — Worst #1 vs Worst #2</h2>
+${data.worst2Idx !== data.worstIdx ? `<div class="page-break"></div>
+<h2>Common Bad Signals — Worst #1 vs Worst #2</h2>
+${reportComparisonCards(
+  reportBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, "#FF3D9A"),
+  reportBucketCard("W2 · Worst #2", data.worst2Idx + 1, data.worst2Bucket, data.worst2Z, "#FF9EC6"),
+)}
 <table style="margin-bottom:20px">
-  <thead><tr><th>Metric</th><th>Worst #1</th><th>Worst #2</th><th>Pattern</th></tr></thead>
+  <thead><tr><th>Metric</th><th>W1</th><th>W2</th><th>Pattern</th></tr></thead>
   <tbody>
     ${((): string => {
       const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
@@ -1710,9 +1738,14 @@ ${data.worst2Idx !== data.worstIdx ? `<h2>Common Bad Signals — Worst #1 vs Wor
   </tbody>
 </table>` : ""}
 
-${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best #2</h2>
+${data.best2Idx !== data.bestIdx ? `<div class="page-break"></div>
+<h2>Common Good Signals — Best #1 vs Best #2</h2>
+${reportComparisonCards(
+  reportBucketCard("B1 · Best #1", data.bestIdx + 1, b, data.bestZ, "#00A36C"),
+  reportBucketCard("B2 · Best #2", data.best2Idx + 1, data.best2Bucket, data.best2Z, "#7FDFB0"),
+)}
 <table style="margin-bottom:20px">
-  <thead><tr><th>Metric</th><th>Best #1</th><th>Best #2</th><th>Pattern</th></tr></thead>
+  <thead><tr><th>Metric</th><th>B1</th><th>B2</th><th>Pattern</th></tr></thead>
   <tbody>
     ${((): string => {
       const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
@@ -1732,14 +1765,15 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
   </tbody>
 </table>` : ""}
 
-<h2>Active Problems at Peak</h2>
-<div style="margin-bottom:20px">${problemsHtml}</div>
-
+<div class="page-break"></div>
 <h2>Infrastructure Insights</h2>
 <div style="margin-bottom:20px">${insightsHtml}</div>
 
 <h2>Recommended Actions</h2>
 <div style="margin-bottom:20px">${recsHtml}</div>
+
+<h2>Active Problems at Peak</h2>
+<div style="margin-bottom:20px">${problemsHtml}</div>
 
 <div class="footer">Hotness Assist · Services Overview · Rule-based analysis from span-derived error rate, P90 latency, request volume, and Davis problem signals. Generated ${generatedAt}.</div>
 </body></html>`;
@@ -1846,152 +1880,47 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
           );
         })()}
 
-        {/* Worst #1, Worst #2, Best #1, Best #2 cards */}
+        {/* Pattern Analysis + Spike Duration */}
         {(() => {
-          blockOffset += 400;
-          const cardStyle = (color: string): React.CSSProperties => ({
-            flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 8, background: `${color}08`, border: `1px solid ${color}25`,
-            opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms`,
-          });
-          const metricRow = (label: string, value: string, note?: string) => (
-            <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
-              <span style={{ fontSize: 11, opacity: 0.6 }}>{label}</span>
-              <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>{value}{note ? <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 4 }}>{note}</span> : null}</span>
-            </div>
-          );
-          const w2 = data.worst2Bucket;
-          const b2 = data.best2Bucket;
-          const showW2 = data.worst2Idx !== data.worstIdx;
-          const showB2 = data.best2Idx !== data.bestIdx;
+          blockOffset += 300;
+          const TL_HOT_HIGH = "#FF3D9A"; const TL_HOT_WARM = "#FF832B"; const TL_HOT_ELEV = "#FFB800";
+          const patternColor = data.alertPattern === "deployment" ? TL_HOT_WARM : data.alertPattern === "load-induced" ? TL_HOT_ELEV : data.alertPattern === "infrastructure" ? "#FF832B" : "#888";
+          const patternLabel = data.alertPattern === "deployment" ? "Deployment Regression" : data.alertPattern === "load-induced" ? "Load-Induced Overload" : data.alertPattern === "infrastructure" ? "Infrastructure Issue" : "Pattern Unknown";
+          const patternSubLabel = data.alertPattern === "deployment" ? "Code / config change most likely" : data.alertPattern === "load-induced" ? "Infrastructure capacity limit hit" : data.alertPattern === "infrastructure" ? "CDN, network, or origin saturation" : "Insufficient signal for classification";
+          const burstColor = data.burstType === "chronic" ? TL_HOT_HIGH : data.burstType === "sustained" ? TL_HOT_WARM : data.burstType === "transient" ? TL_HOT_ELEV : "#00A36C";
+          const burstLabel = data.burstType === "chronic" ? `Chronic (${data.maxConsecutiveHot} consecutive)` : data.burstType === "sustained" ? `Sustained (${data.maxConsecutiveHot} consecutive)` : data.burstType === "transient" ? `Transient (${data.maxConsecutiveHot} consecutive)` : "Stable";
+          const burstSubLabel = data.burstType === "chronic" ? "Needs active remediation" : data.burstType === "sustained" ? "Likely needed intervention" : data.burstType === "transient" ? "Appears self-resolved" : "No elevated buckets";
           return (
-            <div style={{ marginBottom: 16 }}>
-              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset - 200}ms` }}>Peak Buckets</div>
-              <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 10 }}>
-                {/* Worst #1 */}
-                <div style={cardStyle(TL_HOT_HIGH)}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: data.worstDriverColor, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 14 }}>🔥</span> Worst #1 — Bucket {data.worstIdx + 1}
-                  </div>
-                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 6 }}>{w.bucket}</div>
-                  <div style={{ fontSize: 9, opacity: 0.6, marginBottom: 8, fontStyle: "italic" }}>{data.worstDriver}</div>
-                  {metricRow("Error Rate", `${w.errorRate.toFixed(1)}%`)}
-                  {metricRow("P90 Latency", `${w.p90LatencyMs.toFixed(0)}ms`)}
-                  {metricRow("Avg Latency", `${w.avgLatencyMs.toFixed(0)}ms`)}
-                  {metricRow("Requests", haFmtN(w.requests))}
-                  {metricRow("Problems", String(w.problemCount))}
-                  {w.cpuPct > 0 && metricRow("CPU", `${w.cpuPct.toFixed(1)}%`)}
-                  {w.memPct > 0 && metricRow("Memory", `${w.memPct.toFixed(1)}%`)}
-                  <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: `${data.worstDriverColor}15`, fontSize: 10, fontWeight: 700, color: data.worstDriverColor, textAlign: "center" as const }}>
-                    Hotness Z = {data.worstZ.toFixed(2)}
-                  </div>
-                </div>
-                {/* Worst #2 */}
-                {showW2 && (
-                  <div style={cardStyle("#FF9EC6")}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#FF9EC6", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 14 }}>🔥</span> Worst #2 — Bucket {data.worst2Idx + 1}
-                    </div>
-                    <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{w2.bucket}</div>
-                    {metricRow("Error Rate", `${w2.errorRate.toFixed(1)}%`)}
-                    {metricRow("P90 Latency", `${w2.p90LatencyMs.toFixed(0)}ms`)}
-                    {metricRow("Avg Latency", `${w2.avgLatencyMs.toFixed(0)}ms`)}
-                    {metricRow("Requests", haFmtN(w2.requests))}
-                    {metricRow("Problems", String(w2.problemCount))}
-                    {w2.cpuPct > 0 && metricRow("CPU", `${w2.cpuPct.toFixed(1)}%`)}
-                    {w2.memPct > 0 && metricRow("Memory", `${w2.memPct.toFixed(1)}%`)}
-                    <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(255,158,198,0.12)", fontSize: 10, fontWeight: 700, color: "#FF9EC6", textAlign: "center" as const }}>
-                      Hotness Z = {data.worst2Z.toFixed(2)}
-                    </div>
-                  </div>
-                )}
-                {/* Best #1 */}
-                <div style={cardStyle("#00A36C")}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#00A36C", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 14 }}>✅</span> Best #1 — Bucket {data.bestIdx + 1}
-                  </div>
-                  <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{b.bucket}</div>
-                  {metricRow("Error Rate", `${b.errorRate.toFixed(1)}%`)}
-                  {metricRow("P90 Latency", `${b.p90LatencyMs.toFixed(0)}ms`)}
-                  {metricRow("Avg Latency", `${b.avgLatencyMs.toFixed(0)}ms`)}
-                  {metricRow("Requests", haFmtN(b.requests))}
-                  {metricRow("Problems", String(b.problemCount))}
-                  {b.cpuPct > 0 && metricRow("CPU", `${b.cpuPct.toFixed(1)}%`)}
-                  {b.memPct > 0 && metricRow("Memory", `${b.memPct.toFixed(1)}%`)}
-                  <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(0,163,108,0.1)", fontSize: 10, fontWeight: 700, color: "#00A36C", textAlign: "center" as const }}>
-                    Hotness Z = {data.bestZ.toFixed(2)}
-                  </div>
-                </div>
-                {/* Best #2 */}
-                {showB2 && (
-                  <div style={cardStyle("#7FDFB0")}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#7FDFB0", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 14 }}>✅</span> Best #2 — Bucket {data.best2Idx + 1}
-                    </div>
-                    <div style={{ fontSize: 10, opacity: 0.45, fontFamily: "monospace", marginBottom: 14 }}>{b2.bucket}</div>
-                    {metricRow("Error Rate", `${b2.errorRate.toFixed(1)}%`)}
-                    {metricRow("P90 Latency", `${b2.p90LatencyMs.toFixed(0)}ms`)}
-                    {metricRow("Avg Latency", `${b2.avgLatencyMs.toFixed(0)}ms`)}
-                    {metricRow("Requests", haFmtN(b2.requests))}
-                    {metricRow("Problems", String(b2.problemCount))}
-                    {b2.cpuPct > 0 && metricRow("CPU", `${b2.cpuPct.toFixed(1)}%`)}
-                    {b2.memPct > 0 && metricRow("Memory", `${b2.memPct.toFixed(1)}%`)}
-                    <div style={{ marginTop: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(127,223,176,0.08)", fontSize: 10, fontWeight: 700, color: "#7FDFB0", textAlign: "center" as const }}>
-                      Hotness Z = {data.best2Z.toFixed(2)}
-                    </div>
-                  </div>
-                )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div style={{ background: `${patternColor}12`, border: `1px solid ${patternColor}40`, borderRadius: 8, padding: "8px 12px" }}>
+                <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Pattern Analysis</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: patternColor }}>{patternLabel}</div>
+                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{patternSubLabel}</div>
+              </div>
+              <div style={{ background: `${burstColor}12`, border: `1px solid ${burstColor}40`, borderRadius: 8, padding: "8px 12px" }}>
+                <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Spike Duration</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: burstColor }}>{burstLabel}</div>
+                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{burstSubLabel}</div>
               </div>
             </div>
           );
         })()}
 
-        {/* Z-score breakdown for worst bucket */}
-        {(() => {
-          blockOffset += 500;
-          const { errZ, latZ, volZ, probZ, cpuZ, memZ } = data.worstZScores;
-          const zRows = [
-            { label: "Error Rate", z: errZ, desc: "error rate vs average" },
-            { label: "P90 Latency", z: latZ, desc: "latency vs average" },
-            { label: "Request Volume", z: volZ, desc: "request count deviation" },
-            { label: "Problem Activity", z: probZ, desc: "Davis problems opened" },
-            { label: "CPU Utilization", z: cpuZ, desc: "host CPU% vs average" },
-            { label: "Memory Utilization", z: memZ, desc: "host memory% vs average" },
-          ];
-          return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Signal Z-Scores at Peak (Bucket {data.worstIdx + 1})</div>
-              {zRows.map(({ label, z, desc }) => {
-                const absZ = Math.abs(z); const barW = Math.min(100, absZ / 3 * 100);
-                const col = absZ >= 2.5 ? TL_HOT_HIGH : absZ >= 1.5 ? TL_HOT_WARM : absZ >= 0.75 ? TL_HOT_ELEV : "#00A36C";
-                return (
-                  <div key={label} style={{ marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
-                      <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>{label}</span>
-                      <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
-                        <span style={{ fontSize: 10, opacity: 0.45 }}>{desc}</span>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: col, fontFamily: "monospace", minWidth: 54, textAlign: "right" }}>{z >= 0 ? "+" : ""}{z.toFixed(2)}z</span>
-                      </div>
-                    </div>
-                    <div style={{ height: 5, background: "rgba(128,128,128,0.12)", borderRadius: 3 }}>
-                      <div style={{ height: "100%", width: `${barW}%`, background: col, borderRadius: 3, transition: "width 0.3s" }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
-
-        {/* Delta gap table — Worst vs Best */}
+        {/* W1 vs B1 — what's different */}
         {(() => {
           blockOffset += 300;
           return (
             <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">What&apos;s Different — Worst vs Best</div>
+              <div className="svc-ai-section-title">What&apos;s Different — Worst #1 vs Best #1</div>
+              {comparisonCardSet(
+                "W1 vs B1",
+                comparisonBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, TL_HOT_HIGH),
+                comparisonBucketCard("B1 · Best #1", data.bestIdx + 1, b, data.bestZ, "#00A36C"),
+              )}
               <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
                 <thead>
                   <tr style={{ opacity: 0.5 }}>
-                    {["Metric", "Best #1", "Worst #1", "Gap"].map(h => (
+                    {["Metric", "B1", "W1", "Gap"].map(h => (
                       <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
                     ))}
                   </tr>
@@ -2011,7 +1940,7 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
           );
         })()}
 
-        {/* Common Bad Signals — Worst #1 vs Worst #2 */}
+        {/* W1 vs W2 — common bad signals */}
         {data.worst2Idx !== data.worstIdx && (() => {
           blockOffset += 200;
           const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
@@ -2028,10 +1957,15 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
           return (
             <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
               <div className="svc-ai-section-title">Common Bad Signals — Worst #1 vs Worst #2</div>
+              {comparisonCardSet(
+                "W1 vs W2",
+                comparisonBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, TL_HOT_HIGH),
+                comparisonBucketCard("W2 · Worst #2", data.worst2Idx + 1, w2, data.worst2Z, "#FF9EC6"),
+              )}
               <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
                 <thead>
                   <tr style={{ opacity: 0.5 }}>
-                    {["Metric", "Worst #1", "Worst #2", "Pattern"].map(h => (
+                    {["Metric", "W1", "W2", "Pattern"].map(h => (
                       <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
                     ))}
                   </tr>
@@ -2051,7 +1985,7 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
           );
         })()}
 
-        {/* Common Good Signals — Best #1 vs Best #2 */}
+        {/* B1 vs B2 — common good signals */}
         {data.best2Idx !== data.bestIdx && (() => {
           blockOffset += 200;
           const { meanErrRate, meanP90, meanReqs, meanProbs, meanCpu, meanMem } = data.baselines;
@@ -2068,10 +2002,15 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
           return (
             <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
               <div className="svc-ai-section-title">Common Good Signals — Best #1 vs Best #2</div>
+              {comparisonCardSet(
+                "B1 vs B2",
+                comparisonBucketCard("B1 · Best #1", data.bestIdx + 1, b, data.bestZ, "#00A36C"),
+                comparisonBucketCard("B2 · Best #2", data.best2Idx + 1, b2, data.best2Z, "#7FDFB0"),
+              )}
               <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
                 <thead>
                   <tr style={{ opacity: 0.5 }}>
-                    {["Metric", "Best #1", "Best #2", "Pattern"].map(h => (
+                    {["Metric", "B1", "B2", "Pattern"].map(h => (
                       <th key={h} style={{ textAlign: "left" as const, padding: "4px 8px", fontWeight: 600, fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4, borderBottom: "1px solid rgba(128,128,128,0.15)" }}>{h}</th>
                     ))}
                   </tr>
@@ -2087,26 +2026,6 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
                   ))}
                 </tbody>
               </table>
-            </div>
-          );
-        })()}
-
-        {/* Active problems at peak */}
-        {data.activeProblemsAtWorst.length > 0 && (() => {
-          blockOffset += 200;
-          return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Active Problems at Peak (Bucket {data.worstIdx + 1})</div>
-              {data.activeProblemsAtWorst.slice(0, 6).map((p, i) => (
-                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderRadius: 6, background: "rgba(255,61,154,0.06)", border: "1px solid rgba(255,61,154,0.12)", marginBottom: 4 }}>
-                  <span style={{ fontSize: 12 }}>🚨</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: TL_HOT_HIGH, fontWeight: 700, flexShrink: 0 }}>{p.displayId}</span>
-                  <span style={{ fontSize: 12, opacity: 0.8, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{p.title}</span>
-                </div>
-              ))}
-              {data.activeProblemsAtWorst.length > 6 && (
-                <div style={{ fontSize: 11, opacity: 0.5, padding: "4px 10px" }}>+{data.activeProblemsAtWorst.length - 6} more problems — see Incidents & Changes tab</div>
-              )}
             </div>
           );
         })()}
@@ -2131,7 +2050,7 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
         {data.recommendations.length > 0 && (() => {
           blockOffset += data.insights.length * 100 + 400;
           return (
-            <div style={{ marginBottom: 8 }}>
+            <div style={{ marginBottom: 16 }}>
               <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>Recommended Actions</div>
               {data.recommendations.map((rec, i) => {
                 const myOffset = blockOffset + 300 + i * 500;
@@ -2142,6 +2061,26 @@ ${data.best2Idx !== data.bestIdx ? `<h2>Common Good Signals — Best #1 vs Best 
                   </div>
                 );
               })}
+            </div>
+          );
+        })()}
+
+        {/* Active problems at peak — shown after recommendations */}
+        {data.activeProblemsAtWorst.length > 0 && (() => {
+          blockOffset += data.recommendations.length * 500 + 400;
+          return (
+            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">Active Problems at Peak (Bucket {data.worstIdx + 1})</div>
+              {data.activeProblemsAtWorst.slice(0, 6).map((p, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderRadius: 6, background: "rgba(255,61,154,0.06)", border: "1px solid rgba(255,61,154,0.12)", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12 }}>🚨</span>
+                  <span style={{ fontSize: 11, fontFamily: "monospace", color: TL_HOT_HIGH, fontWeight: 700, flexShrink: 0 }}>{p.displayId}</span>
+                  <span style={{ fontSize: 12, opacity: 0.8, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{p.title}</span>
+                </div>
+              ))}
+              {data.activeProblemsAtWorst.length > 6 && (
+                <div style={{ fontSize: 11, opacity: 0.5, padding: "4px 10px" }}>+{data.activeProblemsAtWorst.length - 6} more problems — see Incidents & Changes tab</div>
+              )}
             </div>
           );
         })()}
@@ -4429,6 +4368,22 @@ export const ServicesOverview = () => {
     window.addEventListener("mouseup", onUp);
   }, [hotnessAssistPos]);
 
+  // Hotness Heatmap panel state
+  const [hotnessCalendarOpen, setHotnessCalendarOpen] = useState(false);
+  const [hotnessCalendarPos, setHotnessCalendarPos] = useState({ x: 740, y: 80 });
+  const hotnessCalendarDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const startHotnessCalendarDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    hotnessCalendarDragRef.current = { startX: e.clientX, startY: e.clientY, origX: hotnessCalendarPos.x, origY: hotnessCalendarPos.y };
+    const onMove = (me: MouseEvent) => {
+      if (!hotnessCalendarDragRef.current) return;
+      setHotnessCalendarPos({ x: hotnessCalendarDragRef.current.origX + me.clientX - hotnessCalendarDragRef.current.startX, y: hotnessCalendarDragRef.current.origY + me.clientY - hotnessCalendarDragRef.current.startY });
+    };
+    const onUp = () => { hotnessCalendarDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [hotnessCalendarPos]);
+
   // Hotness Forecast panel state
   const [hotnessForecastOpen, setHotnessForecastOpen] = useState(false);
   const [hotnessForecastPos, setHotnessForecastPos] = useState({ x: 200, y: 120 });
@@ -5128,6 +5083,7 @@ export const ServicesOverview = () => {
 
   React.useEffect(() => { if (!tl.enabled) setTlDiagPanel(null); }, [tl.enabled]);
   React.useEffect(() => { if (!tl.enabled) setHotnessAssistOpen(false); }, [tl.enabled]);
+  React.useEffect(() => { if (!tl.enabled) setHotnessCalendarOpen(false); }, [tl.enabled]);
   React.useEffect(() => { if (!tl.enabled) setHotnessForecastOpen(false); }, [tl.enabled]);
 
   // ---------------------------------------------------------------------------
@@ -5301,6 +5257,30 @@ export const ServicesOverview = () => {
       const eM = mn(errRates), eS = sd(errRates, eM);
       const pM = mn(p90s.slice(0, n)), pS = sd(p90s.slice(0, n), pM);
       return Array.from({ length: n }, (_, i) => Math.max(0, (errRates[i] - eM) / eS, (p90s[i] - pM) / pS));
+    } catch { return []; }
+  }, []);
+
+  const getHotnessCalendarData = useCallback(async (days: number): Promise<number[]> => {
+    try {
+      const q = `timeseries {
+  requests = sum(dt.service.request.count, default:0),
+  errors = sum(dt.service.request.failure_count, default:0),
+  p90_us = percentile(dt.service.request.response_time, 90)
+}, from: now()-${days}d, interval:1h`;
+      const recs = await runDqlQuery(q);
+      if (!recs.length) return [];
+      const row = recs[0] as any;
+      const reqs: number[] = (row.requests ?? []).map(Number);
+      const errs: number[] = (row.errors ?? []).map(Number);
+      const p90s: number[] = (row.p90_us ?? []).map((value: number) => value / 1000);
+      const count = Math.min(reqs.length, errs.length, p90s.length);
+      if (count < 2) return [];
+      const errorRates = reqs.slice(0, count).map((requests, index) => requests > 0 ? errs[index] / requests * 100 : 0);
+      const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+      const stdDev = (values: number[], average: number) => Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / Math.max(values.length, 1)) || 1;
+      const errorMean = mean(errorRates); const errorStdDev = stdDev(errorRates, errorMean);
+      const latencyMean = mean(p90s.slice(0, count)); const latencyStdDev = stdDev(p90s.slice(0, count), latencyMean);
+      return Array.from({ length: count }, (_, index) => Math.max(0, (errorRates[index] - errorMean) / errorStdDev, (p90s[index] - latencyMean) / latencyStdDev));
     } catch { return []; }
   }, []);
 
@@ -10203,6 +10183,17 @@ export const ServicesOverview = () => {
                       onClick={() => setHotnessAssistOpen(v => !v)}
                     />
                   )}
+                  {tl.hotness.length >= 2 && (
+                    <button
+                      className={`svc-ha-btn${hotnessCalendarOpen ? " active" : ""}`}
+                      onClick={() => setHotnessCalendarOpen(value => !value)}
+                      title="Hotness Heatmap — hour-of-day by day-of-week patterns"
+                      style={{ borderColor: "rgba(69,137,255,0.45)", background: hotnessCalendarOpen ? "rgba(69,137,255,0.2)" : "rgba(69,137,255,0.08)" }}
+                    >
+                      <span style={{ fontSize: 12 }}>📅</span>
+                      Heatmap
+                    </button>
+                  )}
                   {tl.hotness.length > 0 && (
                     <button
                       onClick={() => setHotnessForecastOpen(v => !v)}
@@ -10398,6 +10389,17 @@ export const ServicesOverview = () => {
           </div>,
           document.body
         )
+      )}
+
+      {hotnessCalendarOpen && tl.enabled && tl.hotness.length > 0 && (
+        <HotnessCalendarPanel
+          hotness={tl.hotness}
+          bucketMs={3_600_000}
+          pos={hotnessCalendarPos}
+          onClose={() => setHotnessCalendarOpen(false)}
+          onDragStart={startHotnessCalendarDrag}
+          getRequeryData={getHotnessCalendarData}
+        />
       )}
 
       {hotnessForecastOpen && tl.hotness.length > 0 && (

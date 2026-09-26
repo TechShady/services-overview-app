@@ -3,9 +3,11 @@ import { createPortal } from "react-dom";
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 
-interface HotnessCalendarPanelProps {
-  hotness: number[];
-  bucketMs: number;
+export interface KpiHeatmapPanelProps {
+  label: string;
+  color?: string;
+  /** Initial hourly Z-score buckets (newest last). If empty, fetched via getRequeryData. */
+  scores?: number[];
   pos: { x: number; y: number };
   onDragStart: (event: React.MouseEvent<HTMLDivElement>) => void;
   onClose: () => void;
@@ -13,28 +15,27 @@ interface HotnessCalendarPanelProps {
 }
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAYS  = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const fmtHour = (h: number) =>
   h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`;
 
 type LevelKey = "nodata" | "baseline" | "low" | "warm" | "hot" | "spike";
-type HighlightMode = "hotzone" | "worstHour" | "worstDay" | null;
 
 const LEVELS: { key: LevelKey; label: string; color: string; tip: string }[] = [
   { key: "nodata",   label: "No Data",  color: "rgba(255,255,255,0.07)", tip: "No recorded data for this hour × day slot" },
-  { key: "baseline", label: "Baseline", color: "rgba(69,137,255,0.18)",  tip: "Normal performance, at or near average (< 0.1\\u03C3)" },
-  { key: "low",      label: "Low",      color: "rgba(69,137,255,0.55)",  tip: "Slightly elevated (0.1 – 0.75\\u03C3)" },
-  { key: "warm",     label: "Warm",     color: "#FFF04D",                tip: "Moderately elevated (0.75 – 1.5\\u03C3)" },
-  { key: "hot",      label: "Hot",      color: "#FF3D9A",                tip: "Significantly elevated (1.5 – 2.5\\u03C3)" },
+  { key: "baseline", label: "Baseline", color: "rgba(69,137,255,0.18)",  tip: "Normal — at or near average (< 0.1\\u03C3)" },
+  { key: "low",      label: "Low",      color: "rgba(69,137,255,0.55)",  tip: "Slightly elevated (0.1–0.75\\u03C3)" },
+  { key: "warm",     label: "Warm",     color: "#FFF04D",                tip: "Moderately elevated (0.75–1.5\\u03C3)" },
+  { key: "hot",      label: "Hot",      color: "#FF3D9A",                tip: "Significantly elevated (1.5–2.5\\u03C3)" },
   { key: "spike",    label: "Spike",    color: "#FF073A",                tip: "Critical spike (> 2.5\\u03C3)" },
 ];
 
 function getLevel(val: number | null): LevelKey {
   if (val === null) return "nodata";
-  if (val >= 2.5)  return "spike";
-  if (val >= 1.5)  return "hot";
-  if (val >= 0.75) return "warm";
-  if (val >= 0.1)  return "low";
+  if (val >= 2.5)   return "spike";
+  if (val >= 1.5)   return "hot";
+  if (val >= 0.75)  return "warm";
+  if (val >= 0.1)   return "low";
   return "baseline";
 }
 
@@ -73,7 +74,7 @@ interface HeatAnalysis {
   recommendations: string[];
 }
 
-function analyzeGrid(grid: (number | null)[][]): HeatAnalysis {
+function analyzeGrid(grid: (number | null)[][], label: string): HeatAnalysis {
   const hourAvg = HOURS.map(h => {
     const vals = DAYS.map((_, d) => grid[d][h]).filter((v): v is number => v !== null);
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
@@ -96,54 +97,46 @@ function analyzeGrid(grid: (number | null)[][]): HeatAnalysis {
       else { ranges.push(cur); cur = [hotHours[i]]; }
     }
     ranges.push(cur);
-    const longest = ranges.reduce((a, b) => (b.length > a.length ? b : a));
+    const longest = ranges.reduce((a, b) => b.length > a.length ? b : a);
     hotZoneText = longest.length === 1
       ? `${fmtHour(longest[0])} daily`
       : `${fmtHour(longest[0])}–${fmtHour(longest[longest.length - 1] + 1)} daily`;
   }
 
-  const weekdayMean  = [1, 2, 3, 4, 5].reduce((a, d) => a + dayAvg[d], 0) / 5;
-  const weekendMean  = [0, 6].reduce((a, d) => a + dayAvg[d], 0) / 2;
   const hotCellCount   = DAYS.flatMap((_, d) => HOURS.map(h => grid[d][h])).filter(v => v !== null && (v as number) >= 1.5).length;
   const spikeCellCount = DAYS.flatMap((_, d) => HOURS.map(h => grid[d][h])).filter(v => v !== null && (v as number) >= 2.5).length;
+  const weekdayMean    = [1, 2, 3, 4, 5].reduce((a, d) => a + dayAvg[d], 0) / 5;
+  const weekendMean    = [0, 6].reduce((a, d) => a + dayAvg[d], 0) / 2;
 
   const insights: string[] = [];
   const recs: string[] = [];
   const peakAvg = hourAvg[worstHourIdx];
 
-  if (peakAvg >= 2.5)
-    insights.push(`Critical service degradation at ${fmtHour(worstHourIdx)} — average Z-score ${peakAvg.toFixed(1)}\\u03C3 across the week.`);
-  else if (peakAvg >= 1.5)
-    insights.push(`Services consistently stressed at ${fmtHour(worstHourIdx)} — average Z-score ${peakAvg.toFixed(1)}\\u03C3 across the week.`);
-  else if (peakAvg >= 0.75)
-    insights.push(`Elevated service load at ${fmtHour(worstHourIdx)} — mildly stressed throughout the week.`);
-  else
-    insights.push("No clearly elevated hour — service performance is broadly consistent throughout the day.");
+  if (peakAvg >= 2.5)      insights.push(`Critical ${label} spike at ${fmtHour(worstHourIdx)} — avg Z-score ${peakAvg.toFixed(1)}\\u03C3.`);
+  else if (peakAvg >= 1.5) insights.push(`${label} consistently stressed at ${fmtHour(worstHourIdx)} — avg ${peakAvg.toFixed(1)}\\u03C3.`);
+  else if (peakAvg >= 0.75) insights.push(`Elevated ${label} at ${fmtHour(worstHourIdx)} — mildly stressed.`);
+  else                     insights.push(`${label} is broadly consistent throughout the day.`);
 
   const safeWeekend = Math.max(weekendMean, 0.01);
   const safeWeekday = Math.max(weekdayMean, 0.01);
   if (weekdayMean > 0.1 && weekdayMean > weekendMean * 1.5) {
-    insights.push(`Services are ${((weekdayMean / safeWeekend - 1) * 100).toFixed(0)}% more stressed on weekdays — typical business-hours traffic pattern.`);
-    recs.push("Scale service instances before weekday peak hours. Consider pre-warming connection pools between 7–9am Monday–Friday.");
+    insights.push(`${((weekdayMean / safeWeekend - 1) * 100).toFixed(0)}% higher on weekdays — typical business-hours pattern.`);
+    recs.push(`Scale before weekday peak hours. Pre-warm resources 7–9am Mon–Fri.`);
   } else if (weekendMean > 0.1 && weekendMean > weekdayMean * 1.5) {
-    insights.push(`Services are ${((weekendMean / safeWeekday - 1) * 100).toFixed(0)}% more stressed on weekends — possible batch or consumer workload.`);
-    recs.push("Review weekend-specific workloads. Check for batch jobs or consumer-facing traffic causing elevated service load on Saturday–Sunday.");
+    insights.push(`${((weekendMean / safeWeekday - 1) * 100).toFixed(0)}% higher on weekends — batch or consumer workload pattern.`);
+    recs.push("Review weekend-specific workloads. Check for batch jobs elevating this metric Sat–Sun.");
   } else {
-    insights.push(`Service load is consistent across weekdays and weekends (weekday avg: ${weekdayMean.toFixed(2)}\\u03C3, weekend avg: ${weekendMean.toFixed(2)}\\u03C3).`);
+    insights.push(`Consistent across weekdays and weekends (weekday avg ${weekdayMean.toFixed(2)}\\u03C3, weekend ${weekendMean.toFixed(2)}\\u03C3).`);
   }
 
   if (spikeCellCount > 0) {
-    insights.push(`${spikeCellCount} critical spike cell${spikeCellCount > 1 ? "s" : ""} detected — check for deployment or infra events.`);
-    recs.push(`Investigate the ${spikeCellCount} critical spike window${spikeCellCount > 1 ? "s" : ""} — check deployment logs, auto-scaling events, and infrastructure alerts around ${fmtHour(worstHourIdx)} on ${DAYS[worstDayIdx]}.`);
+    insights.push(`${spikeCellCount} critical spike cell${spikeCellCount > 1 ? "s" : ""} — check deployments or infra events.`);
+    recs.push(`Investigate ${spikeCellCount} spike window${spikeCellCount > 1 ? "s" : ""} around ${fmtHour(worstHourIdx)} on ${DAYS[worstDayIdx]}.`);
   }
   if (hotHours.length > 0) {
-    recs.push(`Scale up services before ${fmtHour(hotHours[0])} — hot window runs ${fmtHour(hotHours[0])}–${fmtHour(hotHours[hotHours.length - 1] + 1)}.`);
+    recs.push(`Hot window: ${fmtHour(hotHours[0])}–${fmtHour(hotHours[hotHours.length - 1] + 1)} — scale up before this window.`);
   }
-  if (hotCellCount > 48) {
-    insights.push(`${hotCellCount} hot/spike cells out of 168 (${Math.round(hotCellCount / 168 * 100)}%) — widespread service degradation.`);
-    recs.push("High proportion of hot hours suggests systemic capacity issues. Review instance sizing, connection pool limits, and memory/CPU headroom.");
-  }
-  if (recs.length === 0) recs.push("No significant action needed — service performance looks healthy across the week.");
+  if (recs.length === 0) recs.push(`No significant action needed — ${label} looks healthy.`);
 
   return {
     hotZoneText,
@@ -156,7 +149,7 @@ function analyzeGrid(grid: (number | null)[][]): HeatAnalysis {
 
 // ─── PDF Export ───────────────────────────────────────────────────────────────
 
-function exportHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis) {
+function exportKpiHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis, label: string) {
   const ts = new Date().toLocaleString();
   const cellTd = (val: number | null) => {
     const col = levelColor(getLevel(val));
@@ -168,14 +161,14 @@ function exportHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis) {
   const insHtml = analysis.insights.map(s => `<div style="margin-bottom:5px;padding:7px 11px;background:rgba(128,128,128,0.07);border-radius:6px;font-size:12px;line-height:1.5">💡 ${s}</div>`).join("");
   const recHtml = analysis.recommendations.map(s => `<div style="margin-bottom:5px;padding:7px 11px;background:rgba(69,137,255,0.07);border:1px solid rgba(69,137,255,0.15);border-radius:6px;font-size:12px;line-height:1.5">→ ${s}</div>`).join("");
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Hotness Heatmap — Services Overview</title>
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} Heatmap — Services Overview</title>
 <style>
   @media print{body{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}@page{margin:.6in;size:A4}.pb{page-break-before:always}}
   body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1223;color:#e8eaf0;margin:0;padding:24px}
   h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:20px 0 10px}
   table{border-collapse:separate;border-spacing:2px}
 </style></head><body>
-<h1>🗓 Hotness Heatmap — Services Overview</h1>
+<h1>📅 ${label} Heatmap — Services Overview</h1>
 <div style="font-size:11px;opacity:0.4;margin-bottom:18px">Generated ${ts} · 7-day view (Sun–Sat, 12am–11pm)</div>
 <table>
   <tr><td style="width:34px"></td>${DAYS.map(d => `<td style="text-align:center;font-size:10px;font-weight:700;padding-bottom:4px;opacity:0.55">${d}</td>`).join("")}</tr>
@@ -183,7 +176,7 @@ function exportHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis) {
 </table>
 <div style="margin:14px 0 24px">${legend}</div>
 <div class="pb"></div>
-<h2>Heatmap Analysis</h2>
+<h2>Analysis</h2>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px">
   <div style="background:rgba(255,7,58,0.08);border:1px solid rgba(255,7,58,0.25);border-radius:8px;padding:10px 13px">
     <div style="font-size:9px;opacity:0.5;text-transform:uppercase;margin-bottom:3px">Hot Zone</div>
@@ -200,7 +193,7 @@ function exportHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis) {
 </div>
 <h2>Insights</h2>${insHtml}
 <h2>Recommendations</h2>${recHtml}
-<div style="margin-top:28px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.07);font-size:10px;opacity:0.3">Hotness Heatmap · Services Overview</div>
+<div style="margin-top:28px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.07);font-size:10px;opacity:0.3">${label} Heatmap · Services Overview</div>
 </body></html>`;
 
   const w = window.open("", "_blank");
@@ -212,15 +205,17 @@ function exportHeatmapPdf(grid: (number | null)[][], analysis: HeatAnalysis) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onClose, getRequeryData }: HotnessCalendarPanelProps) {
-  const [scores, setScores]               = React.useState(hotness);
-  const [loading, setLoading]             = React.useState(true);
-  const [hover, setHover]                 = React.useState<{ day: number; hour: number; value: number | null } | null>(null);
-  const [filterLevel, setFilterLevel]     = React.useState<LevelKey | null>(null);
-  const [showAnalysis, setShowAnalysis]   = React.useState(false);
+type HighlightMode = "hotzone" | "worstHour" | "worstDay" | null;
+
+export function KpiHeatmapPanel({ label, color = "#4589FF", scores: initScores, pos, onDragStart, onClose, getRequeryData }: KpiHeatmapPanelProps) {
+  const [scores, setScores]             = React.useState<number[]>(initScores ?? []);
+  const [loading, setLoading]           = React.useState(true);
+  const [hover, setHover]               = React.useState<{ day: number; hour: number; value: number | null } | null>(null);
+  const [filterLevel, setFilterLevel]   = React.useState<LevelKey | null>(null);
+  const [showAnalysis, setShowAnalysis] = React.useState(false);
   const [highlightMode, setHighlightMode] = React.useState<HighlightMode>(null);
-  const [panelH, setPanelH]               = React.useState(520);
-  const soHmResizeRef = React.useRef<{ startY: number; startH: number } | null>(null);
+  const [panelH, setPanelH]             = React.useState(520);
+  const resizeRef = React.useRef<{ startY: number; startH: number } | null>(null);
 
   React.useEffect(() => {
     let active = true;
@@ -234,25 +229,25 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
 
   React.useEffect(() => {
     const onMove = (e: MouseEvent) => {
-      if (!soHmResizeRef.current) return;
-      const dy = e.clientY - soHmResizeRef.current.startY;
-      setPanelH(Math.max(350, soHmResizeRef.current.startH + dy));
+      if (!resizeRef.current) return;
+      const dy = e.clientY - resizeRef.current.startY;
+      setPanelH(Math.max(350, resizeRef.current.startH + dy));
     };
-    const onUp = () => { soHmResizeRef.current = null; };
+    const onUp = () => { resizeRef.current = null; };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
 
-  const grid     = React.useMemo(() => buildGrid(scores, bucketMs), [scores, bucketMs]);
-  const analysis = React.useMemo(() => (showAnalysis || highlightMode) ? analyzeGrid(grid) : null, [grid, showAnalysis, highlightMode]);
+  const grid     = React.useMemo(() => buildGrid(scores, 3_600_000), [scores]);
+  const analysis = React.useMemo(() => showAnalysis || highlightMode ? analyzeGrid(grid, label) : null, [grid, showAnalysis, highlightMode, label]);
 
   const toggleFilter = (key: LevelKey) => setFilterLevel(prev => prev === key ? null : key);
 
-  // Highlight sets derived from mode
+  // Derived highlight sets from mode
   const highlightedHours = React.useMemo<Set<number>>(() => {
     if (!analysis) return new Set();
-    if (highlightMode === "hotzone")   return new Set(analysis.hotHours);
+    if (highlightMode === "hotzone") return new Set(analysis.hotHours);
     if (highlightMode === "worstHour") return new Set([analysis.worstHourIdx]);
     return new Set();
   }, [highlightMode, analysis]);
@@ -269,46 +264,48 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
   };
 
   const cellOpacity = (key: LevelKey, day: number, hour: number) => {
-    const hl = isCellHighlighted(day, hour);
-    if (!hl) return 0.07;
+    const highlighted = isCellHighlighted(day, hour);
+    if (!highlighted) return 0.07;
     return filterLevel ? (key === filterLevel ? 1 : 0.1) : 1;
   };
 
   const cellBorder = (day: number, hour: number) => {
     const isHov = hover?.day === day && hover.hour === hour;
     if (isHov) return "1px solid rgba(255,255,255,0.5)";
-    if (highlightMode && isCellHighlighted(day, hour)) return "1px solid rgba(255,255,255,0.18)";
+    if (highlightMode && isCellHighlighted(day, hour)) return "1px solid rgba(255,255,255,0.2)";
     return "1px solid transparent";
   };
+
+  const CELL_W = 28, CELL_H = 14, GAP = 2, LEFT_PAD = 42;
+  const panelW = LEFT_PAD + 7 * (CELL_W + GAP) + 48;
 
   const handleCardClick = (mode: HighlightMode) => {
     setHighlightMode(prev => prev === mode ? null : mode);
     if (!showAnalysis) setShowAnalysis(true);
   };
 
-  const CELL_W = 28, CELL_H = 14, GAP = 2, LEFT_PAD = 42;
-  const panelW = LEFT_PAD + 7 * (CELL_W + GAP) + 48;
-
   return createPortal(
-    <div className="svc-ha-panel" style={{ left: pos.x, top: pos.y, width: panelW, height: panelH, zIndex: 602, fontFamily: "'Segoe UI',system-ui,sans-serif" }}>
+    <div className="svc-ha-panel" style={{ left: pos.x, top: pos.y, width: panelW, height: panelH, zIndex: 603, fontFamily: "'Segoe UI',system-ui,sans-serif" }}>
+      {/* Header */}
       <div className="svc-ha-panel-header" onMouseDown={onDragStart} style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 15 }}>📅</span>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 800 }}>Hotness Heatmap</div>
+          <div style={{ fontSize: 13, fontWeight: 800 }}>
+            <span style={{ color, marginRight: 4 }}>●</span>{label} Heatmap
+          </div>
           <div style={{ fontSize: 10, opacity: 0.45, marginTop: 1 }}>
             {loading ? "Loading 7-day window…" : "Hour-of-day × Day-of-week · 7-day view"}
           </div>
         </div>
         <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
           <button
-            onClick={() => exportHeatmapPdf(grid, analysis ?? analyzeGrid(grid))}
+            onClick={() => exportKpiHeatmapPdf(grid, analysis ?? analyzeGrid(grid, label), label)}
             style={{ fontSize: 10, padding: "3px 9px", background: "rgba(69,137,255,0.1)", border: "1px solid rgba(69,137,255,0.3)", borderRadius: 5, color: "#4589FF", cursor: "pointer", fontWeight: 600 }}
-            title="Export heatmap as PDF"
+            title="Export as PDF"
           >PDF</button>
           <button
             onClick={() => setShowAnalysis(p => !p)}
             style={{ fontSize: 10, padding: "3px 9px", background: showAnalysis ? "rgba(255,61,154,0.15)" : "rgba(128,128,128,0.08)", border: `1px solid ${showAnalysis ? "rgba(255,61,154,0.4)" : "rgba(128,128,128,0.2)"}`, borderRadius: 5, color: showAnalysis ? "#FF3D9A" : "inherit", cursor: "pointer", fontWeight: 600 }}
-            title="Analyze heatmap patterns"
           >{showAnalysis ? "▲ Analyze" : "▼ Analyze"}</button>
           <button onClick={onClose} style={{ background: "none", border: "none", color: "inherit", fontSize: 16, cursor: "pointer", opacity: 0.45, padding: "2px 6px" }}>✕</button>
         </div>
@@ -358,15 +355,15 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
                 ? `${DAYS[hover.day]} ${fmtHour(hover.hour)} · ${hover.value === null ? "no data" : `avg Z ${hover.value.toFixed(2)}\\u03C3`}`
                 : highlightMode
                   ? `Highlighted: ${highlightMode === "hotzone" ? "Hot Zone hours" : highlightMode === "worstHour" ? "Worst Hour row" : "Worst Day column"} — click card to clear`
-                  : "Hover a cell to inspect hotness"}
+                  : "Hover a cell to inspect · click insight cards to highlight sections"}
             </div>
 
-            {/* Clickable legend */}
+            {/* Legend */}
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "center", marginTop: 6, paddingTop: 8, borderTop: "1px solid rgba(128,128,128,0.15)" }}>
-              {LEVELS.map(({ key, label, color, tip }) => (
+              {LEVELS.map(({ key, label: lbl, color: lcol, tip }) => (
                 <div key={key} onClick={() => toggleFilter(key)} title={tip} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", padding: "3px 7px", borderRadius: 5, background: filterLevel === key ? "rgba(255,255,255,0.09)" : "transparent", border: filterLevel === key ? "1px solid rgba(255,255,255,0.18)" : "1px solid transparent", transition: "all 0.12s ease" }}>
-                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: color, border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0 }} />
-                  <span style={{ fontSize: 9, opacity: filterLevel && filterLevel !== key ? 0.35 : 0.75, fontWeight: filterLevel === key ? 700 : 400 }}>{label}</span>
+                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: lcol, border: "1px solid rgba(255,255,255,0.1)", flexShrink: 0 }} />
+                  <span style={{ fontSize: 9, opacity: filterLevel && filterLevel !== key ? 0.35 : 0.75, fontWeight: filterLevel === key ? 700 : 400 }}>{lbl}</span>
                 </div>
               ))}
               {filterLevel && <div onClick={() => setFilterLevel(null)} style={{ fontSize: 9, opacity: 0.45, cursor: "pointer", alignSelf: "center", padding: "3px 6px", borderRadius: 4, background: "rgba(255,255,255,0.05)" }}>✕ Clear</div>}
@@ -375,8 +372,9 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
             {/* Analysis section */}
             {showAnalysis && analysis && (
               <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(128,128,128,0.15)" }}>
+                {/* Clickable insight cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7, marginBottom: 12 }}>
-                  {/* HOT ZONE — clickable */}
+                  {/* HOT ZONE */}
                   <div
                     onClick={() => handleCardClick("hotzone")}
                     title="Click to highlight Hot Zone hours in the heatmap"
@@ -386,14 +384,14 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
                       borderRadius: 8, padding: "7px 10px", cursor: "pointer",
                       transform: highlightMode === "hotzone" ? "scale(1.03)" : "scale(1)",
                       transition: "all 0.15s ease",
-                      boxShadow: highlightMode === "hotzone" ? "0 0 12px rgba(255,7,58,0.3)" : "none",
+                      boxShadow: highlightMode === "hotzone" ? "0 0 12px rgba(255,7,58,0.25)" : "none",
                     }}
                   >
                     <div style={{ fontSize: 9, opacity: 0.5, textTransform: "uppercase" as const, marginBottom: 2 }}>Hot Zone</div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: "#FF3D9A" }}>{analysis.hotZoneText}</div>
-                    {highlightMode === "hotzone" && <div style={{ fontSize: 8, color: "#FF3D9A", opacity: 0.65, marginTop: 3 }}>● highlighted</div>}
+                    {highlightMode === "hotzone" && <div style={{ fontSize: 8, color: "#FF3D9A", opacity: 0.6, marginTop: 3 }}>● highlighted</div>}
                   </div>
-                  {/* WORST HOUR — clickable */}
+                  {/* WORST HOUR */}
                   <div
                     onClick={() => handleCardClick("worstHour")}
                     title="Click to highlight the Worst Hour row in the heatmap"
@@ -403,14 +401,14 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
                       borderRadius: 8, padding: "7px 10px", cursor: "pointer",
                       transform: highlightMode === "worstHour" ? "scale(1.03)" : "scale(1)",
                       transition: "all 0.15s ease",
-                      boxShadow: highlightMode === "worstHour" ? "0 0 12px rgba(255,131,43,0.3)" : "none",
+                      boxShadow: highlightMode === "worstHour" ? "0 0 12px rgba(255,131,43,0.25)" : "none",
                     }}
                   >
                     <div style={{ fontSize: 9, opacity: 0.5, textTransform: "uppercase" as const, marginBottom: 2 }}>Worst Hour</div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: "#FF832B" }}>{analysis.worstHourText}</div>
-                    {highlightMode === "worstHour" && <div style={{ fontSize: 8, color: "#FF832B", opacity: 0.65, marginTop: 3 }}>● highlighted</div>}
+                    {highlightMode === "worstHour" && <div style={{ fontSize: 8, color: "#FF832B", opacity: 0.6, marginTop: 3 }}>● highlighted</div>}
                   </div>
-                  {/* WORST DAY — clickable */}
+                  {/* WORST DAY */}
                   <div
                     onClick={() => handleCardClick("worstDay")}
                     title="Click to highlight the Worst Day column in the heatmap"
@@ -425,9 +423,10 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
                   >
                     <div style={{ fontSize: 9, opacity: 0.5, textTransform: "uppercase" as const, marginBottom: 2 }}>Worst Day</div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: "#FFF04D" }}>{analysis.worstDayText}</div>
-                    {highlightMode === "worstDay" && <div style={{ fontSize: 8, color: "#FFF04D", opacity: 0.65, marginTop: 3 }}>● highlighted</div>}
+                    {highlightMode === "worstDay" && <div style={{ fontSize: 8, color: "#FFF04D", opacity: 0.6, marginTop: 3 }}>● highlighted</div>}
                   </div>
                 </div>
+
                 <div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase" as const, opacity: 0.4, marginBottom: 5 }}>Insights</div>
                 <div style={{ display: "flex", flexDirection: "column" as const, gap: 4, marginBottom: 10 }}>
                   {analysis.insights.map((ins, i) => <div key={i} style={{ fontSize: 11, padding: "5px 9px", background: "rgba(128,128,128,0.07)", borderRadius: 5, lineHeight: 1.5 }}>💡 {ins}</div>)}
@@ -441,11 +440,10 @@ export function HotnessCalendarPanel({ hotness, bucketMs, pos, onDragStart, onCl
           </>
         )}
       </div>
+
+      {/* Resize handle */}
       <div
-        onMouseDown={e => {
-          e.stopPropagation();
-          soHmResizeRef.current = { startY: e.clientY, startH: panelH };
-        }}
+        onMouseDown={e => { e.stopPropagation(); resizeRef.current = { startY: e.clientY, startH: panelH }; }}
         style={{ position: "absolute", bottom: 0, right: 0, width: 18, height: 18, cursor: "ns-resize", display: "flex", alignItems: "flex-end", justifyContent: "flex-end", padding: "3px", zIndex: 1 }}
       >
         <svg width="10" height="6" viewBox="0 0 10 6" style={{ opacity: 0.3 }}>

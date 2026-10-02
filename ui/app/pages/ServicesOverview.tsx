@@ -40,6 +40,9 @@ import { KpiCard, ForecastProvider } from "../components/KpiCard";
 import { ForecastModal } from "../components/ForecastModal";
 import { HotnessForecastPanel } from "../components/HotnessForecastPanel";
 import { HotnessCalendarPanel } from "../components/HotnessCalendarPanel";
+import { KpiMenuContext } from "../components/KpiMenuContext";
+import { DimensionModal } from "../components/DimensionModal";
+import { KpiHeatmapPanel } from "../components/KpiHeatmapPanel";
 import { PersonaPickerModal } from "../components/PersonaPickerModal";
 import type { PersonaDef } from "../components/PersonaPickerModal";
 import { CorrelationsContext, CorrelationsPanel } from "../components/CorrelationsPanel";
@@ -1113,14 +1116,14 @@ function AIInsightsPanel({ data, onClose }: { data: AIInsightsData; onClose: () 
       </div>
       <div className="svc-ai-panel-body">
         <div style={{ marginBottom: 16 }}>
-          <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: "100ms" }}>Summary</div>
+          <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: "100ms" }}>🔥 Summary</div>
           <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(165,110,255,0.06)", border: "1px solid rgba(165,110,255,0.12)" }}>
             <StreamText text={data.summary} baseDelay={200} style={{ fontSize: 13, lineHeight: "1.5" }} />
           </div>
         </div>
         {data.insights.length > 0 && (
           <div style={{ marginBottom: 16 }}>
-            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${insightOffset - 200}ms` }}>Insights</div>
+            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${insightOffset - 200}ms` }}>💡 Insights</div>
             {data.insights.map((ins, i) => {
               const myOffset = insightOffset;
               insightOffset += insightDurations[i] + 240;
@@ -1135,7 +1138,7 @@ function AIInsightsPanel({ data, onClose }: { data: AIInsightsData; onClose: () 
         )}
         {data.recommendations.length > 0 && (
           <div>
-            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${insightOffset}ms` }}>Recommendations</div>
+            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${insightOffset}ms` }}>🎯 Recommendations</div>
             {data.recommendations.map((rec, i) => {
               const myOffset = insightOffset + 300 + i * 800;
               return (
@@ -1252,6 +1255,8 @@ interface HotnessAssistInfraData {
   avgRecoveryBuckets: number;
   driftSlope: number;
   driftLabel: "worsening" | "stable" | "improving";
+  rootCauseNarrative: string;
+  intervalMinutes: number;
 }
 
 // --- Analysis engine (pure, deterministic) ---
@@ -1467,6 +1472,21 @@ function analyzeInfraHotness(
   const driftSlope = dn > 1 ? (dn * dSumXY - dSumX * dSumY) / (dn * dSumX2 - dSumX * dSumX) : 0;
   const driftLabel: "worsening" | "stable" | "improving" = driftSlope > 0.02 ? "worsening" : driftSlope < -0.02 ? "improving" : "stable";
 
+  // Root cause narrative — traffic-driver clause
+  const hasPerfIssues = errZ >= 1.0 || latZ >= 1.0 || cpuZ >= 1.0 || memZ >= 1.0;
+  let rootCauseNarrative = "";
+  if (hasPerfIssues) {
+    if (volZ >= 1.0) {
+      rootCauseNarrative = `Traffic was significantly elevated (+${volZ.toFixed(1)}σ) alongside performance degradation — load-induced pressure is the primary suspect.`;
+    } else if (volZ >= 0.5) {
+      rootCauseNarrative = `Traffic was modestly elevated (+${volZ.toFixed(1)}σ) — a contributing factor but likely not the sole driver.`;
+    } else {
+      rootCauseNarrative = `Traffic was within normal range during the worst window — the degradation is not volume-driven, pointing to a code, config, or infrastructure change.`;
+    }
+  }
+
+  const intervalMinutes = Math.round(bucketMs / 60000);
+
   const hotPct = (hotBuckets / analyzedCount * 100).toFixed(0);
   const summary = [
     `Analyzed ${analyzedCount} of ${n} ${bucketLabel} buckets (last bucket excluded as incomplete).`,
@@ -1514,6 +1534,8 @@ function analyzeInfraHotness(
     avgRecoveryBuckets,
     driftSlope,
     driftLabel,
+    rootCauseNarrative,
+    intervalMinutes,
   };
 }
 
@@ -1711,10 +1733,7 @@ function HotnessAssistPanel({
   .pat-card { border-radius: 8px; padding: 12px 14px; }
 </style></head>
 <body>
-<div class="toolbar no-print">
-  <button class="print-btn" onclick="window.print()">🖨 Print / Save as PDF</button>
-  <span style="font-size:12px;opacity:0.6">Use your browser's print dialog → Save as PDF for best results.</span>
-</div>
+
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid rgba(255,131,43,0.2)">
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C12 2 7 8 7 13a5 5 0 0010 0c0-2.5-1.5-4.5-3-6 0 2-1 3.5-2 4.5C11 10 12 7.5 12 2z" fill="#FF832B"/></svg>
   <div>
@@ -1845,7 +1864,7 @@ ${reportComparisonCards(
   const handleExportPdf = () => {
     const html = generateHotnessReportHtml();
     const win = window.open("", "_blank");
-    if (win) { win.document.write(html); win.document.close(); }
+    if (win) { win.document.write(html); win.document.close(); setTimeout(() => win.print(), 400); }
   };
 
   return createPortal(
@@ -1888,10 +1907,15 @@ ${reportComparisonCards(
       {/* Body */}
       <div className="svc-ha-panel-body">
         {/* Summary */}
-        <div style={{ marginBottom: 16 }}>
-          <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: "100ms" }}>Analysis Summary</div>
+        <div className="svc-section-card">
+          <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: "100ms" }}>🔥 Hotness Assist Analysis</div>
           <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,131,43,0.05)", border: "1px solid rgba(255,131,43,0.15)" }}>
             <StreamText text={data.summary} baseDelay={200} style={{ fontSize: 13, lineHeight: "1.6" }} />
+            {data.rootCauseNarrative && (
+              <div style={{ fontSize: 13, lineHeight: "1.6", marginTop: 8, color: "rgba(255,255,255,0.7)" }}>
+                {data.rootCauseNarrative}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1910,8 +1934,8 @@ ${reportComparisonCards(
         {(() => {
           blockOffset += 300;
           return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Hotness Timeline ({bucketLabel} buckets)</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">📊 Hotness Timeline ({bucketLabel} buckets)</div>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: stripH, background: "rgba(128,128,128,0.05)", borderRadius: 6, padding: "4px 6px", position: "relative" }}>
                 {/* Reference lines */}
                 {[{ z: 0.75, label: "0.75" }, { z: 1.5, label: "1.5" }, { z: 2.5, label: "2.5" }].map(({ z, label }) => {
@@ -1966,16 +1990,19 @@ ${reportComparisonCards(
           const burstLabel = data.burstType === "chronic" ? `Chronic (${data.maxConsecutiveHot} consecutive)` : data.burstType === "sustained" ? `Sustained (${data.maxConsecutiveHot} consecutive)` : data.burstType === "transient" ? `Transient (${data.maxConsecutiveHot} consecutive)` : "Stable";
           const burstSubLabel = data.burstType === "chronic" ? "Needs active remediation" : data.burstType === "sustained" ? "Likely needed intervention" : data.burstType === "transient" ? "Appears self-resolved" : "No elevated buckets";
           return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div style={{ background: `${patternColor}12`, border: `1px solid ${patternColor}40`, borderRadius: 8, padding: "8px 12px" }}>
-                <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Pattern Analysis</div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: patternColor }}>{patternLabel}</div>
-                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{patternSubLabel}</div>
-              </div>
-              <div style={{ background: `${burstColor}12`, border: `1px solid ${burstColor}40`, borderRadius: 8, padding: "8px 12px" }}>
-                <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Spike Duration</div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: burstColor }}>{burstLabel}</div>
-                <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{burstSubLabel}</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">🔍 Pattern Analysis</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div style={{ background: `${patternColor}12`, border: `1px solid ${patternColor}40`, borderRadius: 8, padding: "8px 12px" }}>
+                  <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Pattern Analysis</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: patternColor }}>{patternLabel}</div>
+                  <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{patternSubLabel}</div>
+                </div>
+                <div style={{ background: `${burstColor}12`, border: `1px solid ${burstColor}40`, borderRadius: 8, padding: "8px 12px" }}>
+                  <div style={{ fontSize: 9, opacity: 0.55, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 3 }}>Spike Duration</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: burstColor }}>{burstLabel}</div>
+                  <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2 }}>{burstSubLabel}</div>
+                </div>
               </div>
             </div>
           );
@@ -1990,21 +2017,24 @@ ${reportComparisonCards(
           const driftColor = data.driftLabel === "worsening" ? "#E00000" : data.driftLabel === "improving" ? "#10B981" : "#888";
           const cs: React.CSSProperties = { flex: 1, borderRadius: 8, padding: "9px 11px", display: "flex", flexDirection: "column", gap: 2 };
           return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div style={{ ...cs, background: `${epColor}0d`, border: `1px solid ${epColor}30` }}>
-                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Spike Episodes</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: epColor }}>{data.episodeCount}</div>
-                <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "No hot buckets" : `Longest: ${data.longestEpisodeBuckets} bucket${data.longestEpisodeBuckets !== 1 ? "s" : ""}`}</div>
-              </div>
-              <div style={{ ...cs, background: `${recColor}0d`, border: `1px solid ${recColor}30` }}>
-                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Recovery Speed</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: recColor }}>{recLabel}</div>
-                <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "—" : `Avg ${data.avgRecoveryBuckets} bucket${data.avgRecoveryBuckets !== 1 ? "s" : ""} to baseline`}</div>
-              </div>
-              <div style={{ ...cs, background: `${driftColor}0d`, border: `1px solid ${driftColor}30` }}>
-                <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Drift Trend</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: driftColor }}>{data.driftLabel.charAt(0).toUpperCase() + data.driftLabel.slice(1)}</div>
-                <div style={{ fontSize: 10, opacity: 0.6 }}>{`${data.driftSlope >= 0 ? "+" : ""}${data.driftSlope.toFixed(3)}Z/bucket`}</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">⚡ Spike Behavior</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <div style={{ ...cs, background: `${epColor}0d`, border: `1px solid ${epColor}30` }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Spike Episodes</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: epColor }}>{data.episodeCount}</div>
+                  <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "No hot buckets" : `Longest: ${data.longestEpisodeBuckets} bucket${data.longestEpisodeBuckets !== 1 ? "s" : ""}`}</div>
+                </div>
+                <div style={{ ...cs, background: `${recColor}0d`, border: `1px solid ${recColor}30` }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Recovery Speed</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: recColor }}>{recLabel}</div>
+                  <div style={{ fontSize: 10, opacity: 0.6 }}>{data.episodeCount === 0 ? "—" : `Avg ${data.avgRecoveryBuckets} bucket${data.avgRecoveryBuckets !== 1 ? "s" : ""} to baseline`}</div>
+                </div>
+                <div style={{ ...cs, background: `${driftColor}0d`, border: `1px solid ${driftColor}30` }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, opacity: 0.5, textTransform: "uppercase" as const, letterSpacing: 0.8 }}>Drift Trend</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: driftColor }}>{data.driftLabel.charAt(0).toUpperCase() + data.driftLabel.slice(1)}</div>
+                  <div style={{ fontSize: 10, opacity: 0.6 }}>{`${data.driftSlope >= 0 ? "+" : ""}${data.driftSlope.toFixed(3)}Z/bucket`}</div>
+                </div>
               </div>
             </div>
           );
@@ -2014,8 +2044,8 @@ ${reportComparisonCards(
         {(() => {
           blockOffset += 300;
           return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">What&apos;s Different — Worst #1 vs Best #1</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">⚖️ What&apos;s Different — Worst #1 vs Best #1</div>
               {comparisonCardSet(
                 "W1 vs B1",
                 comparisonBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, TL_HOT_HIGH),
@@ -2059,8 +2089,8 @@ ${reportComparisonCards(
             ...(w.memPct > 0 || w2.memPct > 0 ? [{ label: "Memory", v1: `${w.memPct.toFixed(1)}%`, v2: `${w2.memPct.toFixed(1)}%`, pattern: w.memPct > meanMem && w2.memPct > meanMem ? "Both elevated" : "Mixed", bothBad: w.memPct > meanMem && w2.memPct > meanMem }] : []),
           ];
           return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Common Bad Signals — Worst #1 vs Worst #2</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">🔴 Common Bad Signals — Worst #1 vs Worst #2</div>
               {comparisonCardSet(
                 "W1 vs W2",
                 comparisonBucketCard("W1 · Worst #1", data.worstIdx + 1, w, data.worstZ, TL_HOT_HIGH),
@@ -2104,8 +2134,8 @@ ${reportComparisonCards(
             ...(b.memPct > 0 || b2.memPct > 0 ? [{ label: "Memory", v1: `${b.memPct.toFixed(1)}%`, v2: `${b2.memPct.toFixed(1)}%`, pattern: b.memPct <= meanMem && b2.memPct <= meanMem ? "Both healthy" : "Mixed", bothGood: b.memPct <= meanMem && b2.memPct <= meanMem }] : []),
           ];
           return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Common Good Signals — Best #1 vs Best #2</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">✅ Common Good Signals — Best #1 vs Best #2</div>
               {comparisonCardSet(
                 "B1 vs B2",
                 comparisonBucketCard("B1 · Best #1", data.bestIdx + 1, b, data.bestZ, "#00A36C"),
@@ -2136,8 +2166,8 @@ ${reportComparisonCards(
 
         {/* Insights */}
         {data.insights.length > 0 && (
-          <div style={{ marginBottom: 16 }}>
-            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>Infrastructure Insights</div>
+          <div className="svc-section-card">
+            <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>💡 Infrastructure Insights</div>
             {data.insights.map((ins, i) => {
               const myOffset = blockOffset + 200 + i * 100;
               return (
@@ -2154,8 +2184,8 @@ ${reportComparisonCards(
         {data.recommendations.length > 0 && (() => {
           blockOffset += data.insights.length * 100 + 400;
           return (
-            <div style={{ marginBottom: 16 }}>
-              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>Recommended Actions</div>
+            <div className="svc-section-card">
+              <div className="svc-ai-section-title" style={{ opacity: 0, animation: "svc-ai-typewriter 0.3s ease forwards", animationDelay: `${blockOffset}ms` }}>🎯 Recommended Actions</div>
               {data.recommendations.map((rec, i) => {
                 const myOffset = blockOffset + 300 + i * 500;
                 return (
@@ -2169,12 +2199,39 @@ ${reportComparisonCards(
           );
         })()}
 
-        {/* Active problems at peak — shown after recommendations */}
-        {data.activeProblemsAtWorst.length > 0 && (() => {
+        {/* Advanced Signals */}
+        {(() => {
           blockOffset += data.recommendations.length * 500 + 400;
+          const sloBreachMinutes = data.criticalBuckets > 0 ? data.criticalBuckets * data.intervalMinutes : 0;
+          const worstErrPerReq = w.requests > 0 ? w.errors / w.requests : 0;
+          const bestErrPerReq = b.requests > 0 ? b.errors / b.requests : 0;
+          const trafficEfficiencySignal = bestErrPerReq > 0 && worstErrPerReq / bestErrPerReq > 1.5
+            ? `Error-per-request ratio ${(worstErrPerReq * 100).toFixed(2)}% at worst vs ${(bestErrPerReq * 100).toFixed(2)}% at best — ${(worstErrPerReq / bestErrPerReq).toFixed(1)}x more errors per request during peak.`
+            : "";
+          if (sloBreachMinutes === 0 && !trafficEfficiencySignal) return null;
           return (
-            <div style={{ marginBottom: 16, opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
-              <div className="svc-ai-section-title">Active Problems at Peak (Bucket {data.worstIdx + 1})</div>
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">🧠 Advanced Signals</div>
+              {sloBreachMinutes > 0 && (
+                <div style={{ marginBottom: 8, padding: "8px 12px", borderRadius: 6, background: "rgba(255,61,154,0.06)", border: "1px solid rgba(255,61,154,0.12)", fontSize: 13 }}>
+                  ⏱️ <strong>SLO Breach Estimate:</strong> ~{sloBreachMinutes} min of critical-level degradation ({data.criticalBuckets} bucket{data.criticalBuckets !== 1 ? "s" : ""} at Z ≥ 2.5).
+                </div>
+              )}
+              {trafficEfficiencySignal && (
+                <div style={{ padding: "8px 12px", borderRadius: 6, background: "rgba(255,131,43,0.06)", border: "1px solid rgba(255,131,43,0.12)", fontSize: 13 }}>
+                  📊 <strong>Traffic Efficiency:</strong> {trafficEfficiencySignal}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Active Davis Problems — shown at bottom */}
+        {data.activeProblemsAtWorst.length > 0 && (() => {
+          blockOffset += 400;
+          return (
+            <div className="svc-section-card" style={{ opacity: 0, animation: "svc-ai-typewriter 0.4s ease forwards", animationDelay: `${blockOffset}ms` }}>
+              <div className="svc-ai-section-title">⚠️ Active Davis Problems (Bucket {data.worstIdx + 1})</div>
               {data.activeProblemsAtWorst.slice(0, 6).map((p, i) => (
                 <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderRadius: 6, background: "rgba(255,61,154,0.06)", border: "1px solid rgba(255,61,154,0.12)", marginBottom: 4 }}>
                   <span style={{ fontSize: 12 }}>🚨</span>
@@ -2183,7 +2240,7 @@ ${reportComparisonCards(
                 </div>
               ))}
               {data.activeProblemsAtWorst.length > 6 && (
-                <div style={{ fontSize: 11, opacity: 0.5, padding: "4px 10px" }}>+{data.activeProblemsAtWorst.length - 6} more problems — see Incidents & Changes tab</div>
+                <div style={{ fontSize: 11, opacity: 0.5, padding: "4px 10px" }}>+{data.activeProblemsAtWorst.length - 6} more problems — see Incidents &amp; Changes tab</div>
               )}
             </div>
           );
@@ -4599,6 +4656,86 @@ export const ServicesOverview = () => {
   const [metricsRegistry, setMetricsRegistry] = useState<MetricEntry[]>([]);
   const openCorrelations = useCallback((target: MetricEntry) => setCorrelationsTarget(target), []);
   const registerMetrics = useCallback((metrics: MetricEntry[]) => setMetricsRegistry(metrics), []);
+
+  // KPI card Dimension modal state
+  const [dimensionModal, setDimensionModal] = useState<{ label: string; sparkline?: number[]; color?: string } | null>(null);
+
+  // KPI card Heatmap panel state
+  const [kpiHeatmapPanel, setKpiHeatmapPanel] = useState<{ label: string; sparkline?: number[]; color?: string; getRequeryData: (days: number) => Promise<number[]> } | null>(null);
+  const [kpiHeatmapPos, setKpiHeatmapPos] = useState({ x: 200, y: 120 });
+  const kpiHeatmapDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const startKpiHeatmapDrag = useCallback((e: React.MouseEvent) => {
+    kpiHeatmapDragRef.current = { startX: e.clientX, startY: e.clientY, origX: kpiHeatmapPos.x, origY: kpiHeatmapPos.y };
+    const onMove = (me: MouseEvent) => {
+      if (!kpiHeatmapDragRef.current) return;
+      setKpiHeatmapPos({ x: kpiHeatmapDragRef.current.origX + me.clientX - kpiHeatmapDragRef.current.startX, y: kpiHeatmapDragRef.current.origY + me.clientY - kpiHeatmapDragRef.current.startY });
+    };
+    const onUp = () => { kpiHeatmapDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [kpiHeatmapPos]);
+
+  // Build getRequeryData for a given KPI label
+  const buildKpiHeatmapFetcher = useCallback((label: string) => async (days: number): Promise<number[]> => {
+    try {
+      const lower = label.toLowerCase();
+      let dqlExpr = "";
+      if (lower.includes("request") || lower.includes("throughput") || lower.includes("traffic")) {
+        dqlExpr = `timeseries { vals = sum(dt.service.request.count, default:0) }, from: now()-${days}d, interval:1h`;
+      } else if (lower.includes("error") || lower.includes("failure")) {
+        dqlExpr = `timeseries { req = sum(dt.service.request.count, default:0), err = sum(dt.service.request.failure_count, default:0) }, from: now()-${days}d, interval:1h`;
+      } else if (lower.includes("p90") || lower.includes("p99") || lower.includes("latency") || lower.includes("response")) {
+        dqlExpr = `timeseries { vals = percentile(dt.service.request.response_time, 90) }, from: now()-${days}d, interval:1h`;
+      } else if (lower.includes("p50") || lower.includes("median")) {
+        dqlExpr = `timeseries { vals = percentile(dt.service.request.response_time, 50) }, from: now()-${days}d, interval:1h`;
+      } else {
+        // fallback: combined hotness score
+        dqlExpr = `timeseries { req = sum(dt.service.request.count, default:0), err = sum(dt.service.request.failure_count, default:0), p90 = percentile(dt.service.request.response_time, 90) }, from: now()-${days}d, interval:1h`;
+      }
+      const recs = await runDqlQuery(dqlExpr);
+      if (!recs.length) return [];
+      const row = recs[0] as any;
+
+      let rawVals: number[];
+      if (lower.includes("error") || lower.includes("failure")) {
+        const reqs: number[] = (row.req ?? []).map(Number);
+        const errs: number[] = (row.err ?? []).map(Number);
+        rawVals = reqs.map((r, i) => r > 0 ? errs[i] / r * 100 : 0);
+      } else if (lower.includes("request") || lower.includes("throughput") || lower.includes("traffic")) {
+        rawVals = (row.vals ?? []).map(Number);
+      } else if (lower.includes("latency") || lower.includes("response") || lower.includes("p90") || lower.includes("p99") || lower.includes("p50") || lower.includes("median")) {
+        rawVals = ((row.vals ?? [])).map((v: number) => v / 1000);
+      } else {
+        const reqs: number[] = (row.req ?? []).map(Number);
+        const errs: number[] = (row.err ?? []).map(Number);
+        const p90s: number[] = (row.p90 ?? []).map((v: number) => v / 1000);
+        const n = Math.min(reqs.length, errs.length, p90s.length);
+        const errRates = reqs.slice(0, n).map((r, i) => r > 0 ? errs[i] / r * 100 : 0);
+        const mn = (a: number[]) => a.reduce((x, y) => x + y, 0) / Math.max(a.length, 1);
+        const sd = (a: number[], m: number) => Math.sqrt(a.reduce((x, v) => x + (v - m) ** 2, 0) / Math.max(a.length, 1)) || 1;
+        const eM = mn(errRates), eS = sd(errRates, eM);
+        const pM = mn(p90s.slice(0, n)), pS = sd(p90s.slice(0, n), pM);
+        return Array.from({ length: n }, (_, i) => Math.max(0, (errRates[i] - eM) / eS, (p90s[i] - pM) / pS));
+      }
+
+      // Normalize raw values to Z-scores
+      const mn = rawVals.reduce((a, b) => a + b, 0) / Math.max(rawVals.length, 1);
+      const sd = Math.sqrt(rawVals.reduce((a, v) => a + (v - mn) ** 2, 0) / Math.max(rawVals.length, 1)) || 1;
+      return rawVals.map(v => Math.max(0, (v - mn) / sd));
+    } catch { return []; }
+  }, []);
+
+  // KpiMenuContext value
+  const kpiMenuContextValue = React.useMemo(() => ({
+    openDimension: (opts: { label: string; sparkline?: number[]; color?: string }) => {
+      setDimensionModal(opts);
+    },
+    openHeatmap: (opts: { label: string; sparkline?: number[]; color?: string; getRequeryData?: (days: number) => Promise<number[]> }) => {
+      const fetcher = opts.getRequeryData ?? buildKpiHeatmapFetcher(opts.label);
+      setKpiHeatmapPos({ x: Math.max(40, window.innerWidth / 2 - 200), y: 100 });
+      setKpiHeatmapPanel({ label: opts.label, sparkline: opts.sparkline, color: opts.color, getRequeryData: fetcher });
+    },
+  }), [buildKpiHeatmapFetcher]);
 
   const savedTabVisibility = useUserAppState({ key: TAB_STATE_KEY });
   const savedTabOrder = useUserAppState({ key: TAB_ORDER_STATE_KEY });
@@ -10025,6 +10162,7 @@ export const ServicesOverview = () => {
 
   return (
     <CorrelationsContext.Provider value={correlationsCtxValue}>
+    <KpiMenuContext.Provider value={kpiMenuContextValue}>
     <ForecastProvider value={openForecast}>
     <div className="svc-overview">
       {/* ---- Header Bar (matches User Journey layout) ---- */}
@@ -18776,8 +18914,30 @@ export const ServicesOverview = () => {
           onClose={() => setCorrelationsTarget(null)}
         />
       )}
+
+      {/* ---- KPI Dimension Modal ---- */}
+      {dimensionModal && (
+        <DimensionModal
+          label={dimensionModal.label}
+          color={dimensionModal.color}
+          onClose={() => setDimensionModal(null)}
+        />
+      )}
+
+      {/* ---- KPI Heatmap Panel ---- */}
+      {kpiHeatmapPanel && (
+        <KpiHeatmapPanel
+          label={kpiHeatmapPanel.label}
+          color={kpiHeatmapPanel.color}
+          pos={kpiHeatmapPos}
+          onDragStart={startKpiHeatmapDrag}
+          onClose={() => setKpiHeatmapPanel(null)}
+          getRequeryData={kpiHeatmapPanel.getRequeryData}
+        />
+      )}
     </div>
     </ForecastProvider>
+    </KpiMenuContext.Provider>
     </CorrelationsContext.Provider>
   );
 };
